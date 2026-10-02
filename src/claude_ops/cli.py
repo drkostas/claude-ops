@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import __version__, chat, inject, restore, sessions, slots
 
-SKILLS = ("chat-watcher", "mentor", "rover")
+SKILLS = ("claude-ops", "chat-watcher", "mentor", "rover")
 
 HOOKS = {
     "Stop": [{"hooks": [{"type": "command", "command": "claude-ops hook ask-what-you-need"}]}],
@@ -80,6 +80,10 @@ def cmd_chat(a) -> int:
     if not a.name:
         print("a chat name is required", file=sys.stderr)
         return 2
+    if a.action == "end":
+        r = chat.end(a.name)
+        print(json.dumps(r))
+        return 0 if r["result"] == "ended" else 1
     if a.action == "show":
         ok, detail = chat.show_in_iterm(f"claude-{a.name}")
         print(detail)
@@ -205,8 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--list", action="store_true", help="list the sessions that can be reached")
     s.set_defaults(func=cmd_inject)
 
-    s = sub.add_parser("chat", help="start, show or list chats that run in tmux")
-    s.add_argument("action", choices=("new", "show", "list"))
+    s = sub.add_parser("chat", help="start, show, end or list chats that run in tmux")
+    s.add_argument("action", choices=("new", "show", "end", "list"))
     s.add_argument("name", nargs="?")
     s.add_argument("--cwd", default=".")
     s.add_argument("--args", default="", help="extra arguments for claude")

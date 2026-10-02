@@ -44,6 +44,7 @@ Every send is written to `~/.local/state/claude-ops/inject.jsonl` before it happ
 ```bash
 claude-ops chat new build --cwd ~/code/app --trust     # starts "claude -n build" in tmux session claude-build
 claude-ops chat show build                             # opens it in an iTerm2 window (tmux -CC)
+claude-ops chat end build                              # detaches iTerm2 first, then stops the session
 claude-ops chat list
 ```
 
@@ -52,6 +53,7 @@ A chat in tmux keeps running when its window closes, and other tools can reach i
 - The first run in a new folder stops at "Do you trust the files in this folder?". That prompt lists "No, exit" first with the cursor on it, so pressing Enter would close the chat. With `--trust`, claude-ops waits until the screen is still, moves to "Yes, I trust this folder", checks that the cursor is really there, and only then presses Enter.
 - If the chat stops at another prompt (sign in, permission mode), `chat new` says which one and how to answer it, instead of waiting until it times out.
 - The chat's transcript file appears with the first message, not at launch, so a new chat with no transcript is normal.
+- `chat end` detaches iTerm2 before stopping the session, because stopping a session iTerm2 is still attached to leaves an empty window behind.
 - Claude Code names its process after its version, so tmux reports the running command as something like `2.1.286`. claude-ops counts that as Claude Code.
 
 ## Wake a chat when something new happens
@@ -87,6 +89,7 @@ claude-ops install skills            # copies them to ~/.claude/skills
 
 | Skill | What it is for |
 |---|---|
+| claude-ops | running many chats with these tools, and the traps of iTerm2, tmux and transcripts |
 | chat-watcher | building a scheduled watcher that wakes one chat, as above |
 | mentor | one chat gives another a task with the standard it must meet, then checks the result itself |
 | rover | running something that cuts the Mac off its own wifi, then bringing the wifi back |

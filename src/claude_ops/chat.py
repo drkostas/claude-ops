@@ -145,5 +145,17 @@ def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, sho
             "trusted": trusted, "waiting_on": blocked[0] if blocked else None, "fix": blocked[1] if blocked else None}
 
 
+def end(name: str) -> dict:
+    """Stop a chat's tmux session. iTerm2 is detached first, because killing a session it is still
+    attached to with -CC leaves an empty control window behind."""
+    tmux_name = name if name.startswith("claude-") else f"claude-{name}"
+    if tmux_name not in tmux_sessions():
+        return {"result": "no-session", "tmux": tmux_name}
+    subprocess.run([TMUX, "detach-client", "-s", tmux_name], capture_output=True)
+    time.sleep(0.5)
+    r = subprocess.run([TMUX, "kill-session", "-t", tmux_name], capture_output=True, text=True)
+    return {"result": "ended" if r.returncode == 0 else "failed", "tmux": tmux_name, "detail": r.stderr.strip()}
+
+
 def listing() -> list[dict]:
     return [{"tmux": n, **v} for n, v in sorted(tmux_sessions().items()) if n.startswith("claude-")]

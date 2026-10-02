@@ -30,10 +30,31 @@ claude-ops inject --list            # what can be reached, and which ones run Cl
 ```
 
 Rename the target chat with `/rename <name>` so its tab name is stable, or better, hold its iTerm2
-session id. The sender refuses a target that does not look like Claude Code (exit code 4), because
-text pasted into a plain shell runs as a command. It returns exit code 3 when the chat is not open.
+session id. A tab given its own title was still reported to AppleScript under the name Claude Code
+chose, so a watcher that matched on the name missed it. The id stays the same for the life of the
+tab. For a chat started with `claude-ops chat new`, the target is its tmux name, `claude-<name>`.
+
+The sender refuses a target that does not look like Claude Code (exit code 4), because text
+pasted into a plain shell runs as a command. It returns exit code 3 when the chat is not open.
 Every send is written to `~/.local/state/claude-ops/inject.jsonl` before it happens, and its result
 after.
+
+Things that went wrong with senders like this one.
+
+- The first time a scheduled job scripts iTerm2, macOS asks whether that program may control
+  iTerm2. Until someone answers, every AppleScript call that lists iTerm2 windows hangs, for every
+  program on the Mac. Run the job once while the user is at the Mac so the dialog is answered, and
+  never click it with synthetic input. The tmux transport needs no AppleScript and no consent.
+- Asking iTerm2 anything while it is closed launches it, and from a background job that returns
+  empty output that looks like a failed send. claude-ops checks first and returns exit code 3, so
+  the watcher holds its items.
+- iTerm2 sometimes answers an Apple event with a timeout (error -1712). Keep the stderr of the send
+  in the watcher's log, so a timeout or a consent error is visible instead of an empty line.
+- Older senders removed quotes and backslashes from the prompt so the AppleScript would parse. The
+  chat then acted on a different text than the one built. Pass the prompt to `claude-ops inject`
+  unchanged.
+- A prompt with several lines must arrive as one message. `inject` sends it as one bracketed
+  paste. A sender that types it line by line submits each line on its own.
 
 ## Build one (checklist)
 
@@ -48,6 +69,9 @@ after.
    expired token does not go silent.
 7. A scheduled job often cannot read the login keychain. Keep its token in a file with mode 600 and
    set PATH at the top of the script.
+8. Make a failure visible. One health check exited 0 on 35 dead runs in a row while it wrote a fresh
+   timestamp each time, and one cleanup job failed on every run with an error only its own log held.
+   Read the log once after installing the job, and check the job reports what it did.
 
 `claude_ops.watch` does steps 3 to 6 for you.
 
@@ -67,8 +91,14 @@ with lock(Path("/tmp/my-watch.lock")) as got:
 ## A launchd job (macOS)
 
 `~/Library/LaunchAgents/<label>.plist` with `ProgramArguments` set to the interpreter and the
-script, `StartInterval` (900 is fine for repos), `RunAtLoad` true, and log paths. Load it with
+script, `StartInterval` (900 is fine for repos), `RunAtLoad` true, and log paths. Add
+`EnvironmentVariables` with a PATH that holds every program the script calls. launchd gives a job
+only `/usr/bin:/bin:/usr/sbin:/sbin`, so a script that calls a Homebrew program fails at every run
+while it works from a terminal. Load it with
 `launchctl bootstrap gui/$(id -u) <plist>` and remove it with `launchctl bootout gui/$(id -u)/<label>`.
+
+Never wait for a running job with `pgrep -f <pattern>`. The waiting shell's own command line holds
+the pattern, so the wait never ends. Wait on the job's PID, or on a file it writes.
 
 ## When a "[...-watch]" prompt arrives
 

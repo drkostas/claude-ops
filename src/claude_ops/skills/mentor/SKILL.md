@@ -42,6 +42,19 @@ not pass `--keep-text` for messages that might carry secrets.
 The log is a record and not a permission check. A chat that receives your text acts with its own
 permissions, so never send into a chat you would not trust with that text.
 
+- Confirm delivery by reading the result line in the log (same correlation id as the attempt), not
+  by assuming. Exit code 3 means the chat is not open, and the message did not go.
+- Send through `claude-ops inject` and not through a channel that leaves no line in the log. Several
+  steering messages once changed a chat's course with nothing recorded to say why. Do not write log
+  lines afterwards for messages sent another way. A false record is worse than a gap.
+- A long message must arrive as one message. `inject` sends multi-line text as one paste. When a
+  chat answers that your message "contains no request", it probably received only the last part of
+  a message that was split line by line.
+- Name the folder the other chat should work in, and its branch or worktree. A task written from
+  your folder can carry your folder's state, and the other chat will act on it.
+- A chat's tools are fixed when it starts. A tool you added later is missing in a chat that was
+  already running, so check before you ask it to use one.
+
 ## Verifying
 
 Run the check yourself against the thing itself. Not the chat's summary, its PR description or its
@@ -54,7 +67,10 @@ exit code.
 - A claim about a test suite means you run the suite.
 
 Verify before you correct, every time. A mentor who corrects from a model that only sounds right is
-worse than no mentor, because the other chat will believe it.
+worse than no mentor, because the other chat will believe it. Two real cases from one day. An alarm
+was blamed on the wrong rule, because two rules had similar names and neither was read. And "this
+needs no human step" came from a correct description of a token refresh, and one call to the real
+endpoint disproved it in seconds.
 
 ## When you disagree
 

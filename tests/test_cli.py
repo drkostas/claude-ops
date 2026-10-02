@@ -11,6 +11,7 @@ def test_install_skills(tmp_path, capsys):
     for s in cli.SKILLS:
         text = (tmp_path / s / "SKILL.md").read_text()
         assert text.startswith("---\nname: " + s)
+    assert len(cli.SKILLS) == 4 and "claude-ops" in cli.SKILLS
     cli.main(["install", "skills", "--dest", str(tmp_path)])
     assert "skip" in capsys.readouterr().out
 
@@ -55,3 +56,10 @@ def test_sessions_command(chat_tree, tmp_path, monkeypatch, capsys):
     assert cli.main(["sessions", "login"]) == 0
     out = capsys.readouterr().out
     assert "alpha-login" in out and "claude --resume aaa" in out and "bbb" not in out
+
+
+def test_chat_end_without_a_session(monkeypatch, capsys):
+    from claude_ops import chat
+    monkeypatch.setattr(chat, "tmux_sessions", lambda: {})
+    assert cli.main(["chat", "end", "nothing"]) == 1
+    assert '"no-session"' in capsys.readouterr().out

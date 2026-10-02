@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- A main `claude-ops` skill, and more detail in chat-watcher, mentor and rover from the conversations they came from
+- `claude-ops chat end`, which detaches iTerm2 before stopping the tmux session
+- The rover harness no longer needs `timeout`, which stock macOS does not have
+
 ## 0.1.0
 
 First release.
