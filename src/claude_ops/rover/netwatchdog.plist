@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Install as root:
+     sudo install -m 755 netwatchdog.sh /usr/local/sbin/netwatchdog.sh
+     sudo install -m 644 netwatchdog.plist /Library/LaunchDaemons/com.local.netwatchdog.plist
+     sudo launchctl bootstrap system /Library/LaunchDaemons/com.local.netwatchdog.plist
+     and put SSID="<your network>" in /etc/netwatchdog.conf (mode 600). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.local.netwatchdog</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>/usr/local/sbin/netwatchdog.sh</string></array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/var/log/netwatchdog.out</string>
+  <key>StandardErrorPath</key><string>/var/log/netwatchdog.err</string>
+</dict>
+</plist>

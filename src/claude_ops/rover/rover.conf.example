@@ -1,0 +1,5 @@
+# ~/.config/claude-ops/rover.conf
+IFACE="en0"
+HOME_SSID="my-home-network"
+DEADMAN=180
+PAYLOAD_MAX=60
