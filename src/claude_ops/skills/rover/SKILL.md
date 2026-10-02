@@ -46,6 +46,18 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.local.netwatchdog.pli
 Try the watchdog safely with `sudo SIMULATE=1 FORCE_DOWN=1 bash /usr/local/sbin/netwatchdog.sh`.
 It prints the commands it would run and runs none.
 
+Before each mission, confirm the watchdog is loaded.
+
+```bash
+sudo launchctl print system/com.local.netwatchdog | head -5
+```
+
+The last layer of the guarantee does nothing if it is not running.
+
+The harness limits the payload with `timeout`, which macOS does not include (Homebrew's coreutils
+does). Check `command -v timeout` in the shell that launches the mission. Without it the payload
+fails at once and only the log shows why.
+
 ## Run a mission
 
 1. Write the payload as a shell script (`mission.sh`), with every input it needs written into it.
@@ -57,9 +69,13 @@ It prints the commands it would run and runs none.
 ## Rules, each learned from a real failure
 
 - Test the way back first, alone. Run a mission with no payload and see the Mac return before you
-  run one that depends on it. Recovery that never ran is not recovery.
+  run one that depends on it. Recovery that never ran is not recovery. The first real attempt
+  passed an invalid argument to `networksetup` in its restore step and stayed on a dead network.
 - Carry every input. Credentials, addresses and names are written into the payload before it
-  starts. A mission that needs one more secret halfway cannot ask for it.
+  starts. A mission that needs one more secret halfway cannot ask for it. Reading a Wi-Fi password
+  from the System keychain inside a mission raises a password dialog on every read, and a run that
+  timed out left one on screen with nothing waiting for the answer. Read secrets before departure
+  and write them into the payload.
 - The log is the result of a failed run. Log and take screenshots before and after every step, and
   never let a failure stop the logging. A run that fails at step 2 with good logs is useful.
 - Return no matter what. The reconnect runs after success, failure, timeout and kill.
@@ -69,6 +85,12 @@ It prints the commands it would run and runs none.
 - A word on a page is not a result. Check the control itself (a checkbox you can read), not text
   near it.
 - Every mission has a time limit, and running out of time starts the return like any other end.
+- A mission that does not report back has an unknown result, not a failed one. Write each step so
+  that running it twice is safe, or a half-applied change gets retried into a broken one.
+- Before a step that clicks in a window, turn on Do Not Disturb. A notification banner once sat
+  over the button and took the click.
+- When you wait for a mission from a shell, wait on its log file or its PID. A loop on
+  `pgrep -f <pattern>` matches its own command line and never ends.
 
 ## After the return
 

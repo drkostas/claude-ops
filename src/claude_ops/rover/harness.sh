@@ -107,8 +107,14 @@ log "deadman armed (pid $DEADMAN_PID), reconnect forced in ${DEADMAN}s"
 
 log "--- payload start ---"
 if [ -n "$PAYLOAD" ]; then
-  timeout "$PAYLOAD_MAX" bash "$PAYLOAD" >>"$LOG" 2>&1
+  # stock macOS has no `timeout`, so the time limit is a plain background timer
+  bash "$PAYLOAD" >>"$LOG" 2>&1 &
+  PAYLOAD_PID=$!
+  ( sleep "$PAYLOAD_MAX"; kill -TERM "$PAYLOAD_PID" 2>/dev/null && echo "$(date '+%F %T') payload killed after ${PAYLOAD_MAX}s" >>"$LOG" ) &
+  TIMER_PID=$!
+  wait "$PAYLOAD_PID"
   rc=$?
+  kill "$TIMER_PID" 2>/dev/null
 else
   echo "no payload given" >>"$LOG"
   rc=0
