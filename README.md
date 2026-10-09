@@ -1,3 +1,5 @@
+![claude-ops](docs/images/banner.png)
+
 # claude-ops
 
 claude-ops is a set of small tools for people who run many Claude Code chats on one Mac at the same time, in different project folders. It finds any chat from any folder, sends a message into a chat that is already running, starts chats inside tmux so they can be reached by name, wakes a chat from a scheduled job when something new happens, and adds a few hooks and skills that came out of daily use.
