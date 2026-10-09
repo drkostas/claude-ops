@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-ops"
-version = "0.3.0"
+version = "0.4.0"
 description = "Tools for running many Claude Code chats on one machine: find any chat, send a message into a running one, start chats in tmux, wake a chat from a scheduled job, and a few hooks"
 readme = "README.md"
 requires-python = ">=3.9"

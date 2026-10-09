@@ -171,3 +171,62 @@ def deep_search(text: str, root: Path = ROOT, *, env: Mapping[str, str] | None =
 def resume_command(e: dict) -> str:
     cwd = (e.get("cwd") or "~").replace(str(Path.home()), "~")
     return f"cd {cwd} && claude --resume {e['id']}"
+
+
+_URL_CACHE: dict[str, tuple[float, str | None]] = {}
+
+
+def rc_url(path: str) -> str | None:
+    """A chat's own Remote Control link: the url of the last `bridge_status` record in its
+    transcript, or None. Cached on the file's modification time."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    hit = _URL_CACHE.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    url = None
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if '"bridge_status"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("subtype") == "bridge_status" and d.get("url"):
+                    url = d["url"]
+    except OSError:
+        return None
+    _URL_CACHE[path] = (mtime, url)
+    return url
+
+
+def pick(idx: list[dict]) -> dict[str, dict]:
+    """One entry per chat name (`title`): the conversation that carries it and was active most
+    recently. Subagent transcripts never count."""
+    out: dict[str, dict] = {}
+    for e in idx:
+        name = e.get("title")
+        if not name or Path(e["path"]).name.startswith("agent-") or "/subagents/" in e["path"]:
+            continue
+        at = e.get("active_at") or e.get("mtime") or 0
+        if name not in out or at > (out[name].get("active_at") or out[name].get("mtime") or 0):
+            out[name] = e
+    return out
+
+
+def project_for(cwd: str | None, projects: list[dict]) -> str | None:
+    """The project (`{"project": name, "path": folder}`) whose folder holds `cwd` most closely, by
+    path; None when none does."""
+    if not cwd:
+        return None
+    best = None
+    for p in projects:
+        path = p["path"].rstrip("/")
+        if cwd == path or cwd.startswith(path + "/"):
+            if best is None or len(path) > len(best["path"]):
+                best = p
+    return best["project"] if best else None
