@@ -39,7 +39,7 @@ def test_only_the_last_prompt_on_screen_counts():
 
 def test_enter_is_not_pressed_unless_yes_is_selected(monkeypatch):
     sent = []
-    monkeypatch.setattr(chat, "stable_pane", lambda name: TRUST)  # the Down key had no effect
+    monkeypatch.setattr(chat, "stable_pane", lambda name, **k: TRUST)  # the Down key had no effect
     monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **k: sent.append(cmd[-1]))
     assert chat.answer_trust("claude-x") is False
     assert sent == ["Down"]

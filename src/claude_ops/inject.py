@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,18 +75,18 @@ ITERM_LIST = """with timeout of 20 seconds
 end timeout"""
 
 
-def iterm_running() -> bool:
+def iterm_running(*, env: Mapping[str, str] | None = None) -> bool:
     # Asking iTerm2 itself would launch it when it is closed, so ask System Events.
     r = subprocess.run([OSASCRIPT, "-e", 'tell application "System Events" to return (name of processes) contains "iTerm2"'],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     return r.returncode == 0 and r.stdout.strip() == "true"
 
 
-def iterm_sessions() -> dict[str, dict]:
+def iterm_sessions(*, env: Mapping[str, str] | None = None) -> dict[str, dict]:
     """{session id: {"name": tab name}}. Empty when iTerm2 is not running, which is not an error."""
-    if not iterm_running():
+    if not iterm_running(env=env):
         return {}
-    r = subprocess.run([OSASCRIPT, "-e", ITERM_LIST], capture_output=True, text=True)
+    r = subprocess.run([OSASCRIPT, "-e", ITERM_LIST], capture_output=True, text=True, env=env)
     out = {}
     for line in r.stdout.splitlines():
         if "\t" in line:
@@ -95,10 +96,10 @@ def iterm_sessions() -> dict[str, dict]:
     return out
 
 
-def tmux_sessions() -> dict[str, dict]:
+def tmux_sessions(*, env: Mapping[str, str] | None = None) -> dict[str, dict]:
     """{session name: {...}}. Empty when no tmux server runs, which is normal."""
     r = subprocess.run([TMUX, "list-sessions", "-F", "#{session_name}\t#{pane_current_command}\t#{session_attached}"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     if r.returncode != 0:
         return {}
     out = {}
@@ -135,22 +136,22 @@ def bracketed(text: str) -> str:
     return f"\x1b[200~{text}\x1b[201~" if "\n" in text else text
 
 
-def send_iterm(session_id: str, text: str, enter: bool) -> tuple[bool, str]:
+def send_iterm(session_id: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     r = subprocess.run([OSASCRIPT, "-", session_id, bracketed(text), "1" if enter else "0"],
-                       input=ITERM_SEND, capture_output=True, text=True)
+                       input=ITERM_SEND, capture_output=True, text=True, env=env)
     ok = r.returncode == 0 and r.stdout.strip() == "sent"
     return ok, (r.stderr or r.stdout).strip()[:300]
 
 
-def send_tmux(name: str, text: str, enter: bool) -> tuple[bool, str]:
+def send_tmux(name: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     buf = f"claude-ops-{uuid.uuid4().hex[:10]}"
-    r = subprocess.run([TMUX, "set-buffer", "-b", buf, "--", text], capture_output=True, text=True)
+    r = subprocess.run([TMUX, "set-buffer", "-b", buf, "--", text], capture_output=True, text=True, env=env)
     if r.returncode == 0:
         # -p pastes with the bracketed-paste markers when the program asked for them, which Claude Code does
-        r = subprocess.run([TMUX, "paste-buffer", "-p", "-d", "-b", buf, "-t", name], capture_output=True, text=True)
+        r = subprocess.run([TMUX, "paste-buffer", "-p", "-d", "-b", buf, "-t", name], capture_output=True, text=True, env=env)
     if r.returncode == 0 and enter:
         time.sleep(0.3)  # the paste must be processed before Enter, or Enter lands inside it
-        r = subprocess.run([TMUX, "send-keys", "-t", name, "Enter"], capture_output=True, text=True)
+        r = subprocess.run([TMUX, "send-keys", "-t", name, "Enter"], capture_output=True, text=True, env=env)
     return r.returncode == 0, r.stderr.strip()[:300]
 
 
@@ -161,9 +162,9 @@ def _log(entry: dict, log: Path) -> None:
 
 
 def inject(target: str, text: str, *, transport: str = "iterm", enter: bool = True, force: bool = False,
-           keep_text: bool = False, log: Path = LOG, sessions=None, send=None) -> dict:
+           keep_text: bool = False, log: Path = LOG, sessions=None, send=None, env: Mapping[str, str] | None = None) -> dict:
     """Send `text` to a running chat. Returns {"result": "sent" | "no-session" | "not-claude" | "failed", ...}."""
-    live = sessions() if sessions else (iterm_sessions() if transport == "iterm" else tmux_sessions())
+    live = sessions() if sessions else (iterm_sessions(env=env) if transport == "iterm" else tmux_sessions(env=env))
     matched = resolve(target, live, transport)
     if not matched:
         return {"result": "no-session", "target": target, "open": sorted(v.get("name", k) for k, v in live.items())}
@@ -177,7 +178,9 @@ def inject(target: str, text: str, *, transport: str = "iterm", enter: bool = Tr
     if keep_text:
         entry["text"] = text
     _log(entry, log)
-    send = send or (send_iterm if transport == "iterm" else send_tmux)
+    if send is None:
+        base = send_iterm if transport == "iterm" else send_tmux
+        send = lambda m, t, e: base(m, t, e, env=env)
     ok, detail = send(matched, text, enter)
     _log({"at": datetime.now(timezone.utc).isoformat(), "correlation": corr, "event": "delivered" if ok else "failed",
           "detail": detail}, log)

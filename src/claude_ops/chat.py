@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from .inject import TMUX, tmux_sessions
@@ -43,8 +44,8 @@ def transcripts(cwd: Path) -> set[str]:
     return {p.stem for p in d.glob("*.jsonl")} if d.exists() else set()
 
 
-def pane_text(name: str) -> str:
-    r = subprocess.run([TMUX, "capture-pane", "-p", "-t", name], capture_output=True, text=True)
+def pane_text(name: str, *, env: Mapping[str, str] | None = None) -> str:
+    r = subprocess.run([TMUX, "capture-pane", "-p", "-t", name], capture_output=True, text=True, env=env)
     return r.stdout if r.returncode == 0 else ""
 
 
@@ -80,54 +81,54 @@ def cursor_on_yes(pane: str) -> bool:
     return keys == ["Enter"]
 
 
-def stable_pane(name: str, tries: int = 10, gap: float = 0.5) -> str:
+def stable_pane(name: str, tries: int = 10, gap: float = 0.5, *, env: Mapping[str, str] | None = None) -> str:
     """The pane text once two captures in a row are equal. Keys sent while the prompt is still drawing are lost."""
-    prev = pane_text(name)
+    prev = pane_text(name, env=env)
     for _ in range(tries):
         time.sleep(gap)
-        cur = pane_text(name)
+        cur = pane_text(name, env=env)
         if cur == prev:
             return cur
         prev = cur
     return prev
 
 
-def answer_trust(name: str) -> bool:
+def answer_trust(name: str, *, env: Mapping[str, str] | None = None) -> bool:
     """Move to "Yes, I trust this folder" and press Enter only after seeing the cursor there."""
-    keys = trust_keys(stable_pane(name))
+    keys = trust_keys(stable_pane(name, env=env))
     if keys is None:
         return False
     for k in keys[:-1]:
-        subprocess.run([TMUX, "send-keys", "-t", name, k])
+        subprocess.run([TMUX, "send-keys", "-t", name, k], env=env)
         time.sleep(0.3)
-    if not cursor_on_yes(stable_pane(name)):
+    if not cursor_on_yes(stable_pane(name, env=env)):
         return False  # never press Enter on an option we did not see selected
-    subprocess.run([TMUX, "send-keys", "-t", name, "Enter"])
+    subprocess.run([TMUX, "send-keys", "-t", name, "Enter"], env=env)
     return True
 
 
-def show_in_iterm(tmux_name: str) -> tuple[bool, str]:
+def show_in_iterm(tmux_name: str, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     cmd = f"{TMUX} -CC attach -t {tmux_name}"
     r = subprocess.run(["osascript", "-e", f'tell application "iTerm2" to create window with default profile command "{cmd}"'],
-                       capture_output=True, text=True, timeout=20)
+                       capture_output=True, text=True, timeout=20, env=env)
     if r.returncode != 0:
         return False, f"iTerm2 refused the window: {r.stderr.strip()[:200]}"
     time.sleep(2.0)
-    subprocess.run([TMUX, "send-keys", "-t", tmux_name, "C-l"], capture_output=True)  # redraw
+    subprocess.run([TMUX, "send-keys", "-t", tmux_name, "C-l"], capture_output=True, env=env)  # redraw
     return True, "shown in iTerm2"
 
 
-def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, show: bool = True, wait: int = 30, log=print) -> dict:
+def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, show: bool = True, wait: int = 30, log=print, env: Mapping[str, str] | None = None) -> dict:
     tmux_name = f"claude-{name}"
-    if tmux_name in tmux_sessions():
+    if tmux_name in tmux_sessions(env=env):
         return {"result": "exists", "tmux": tmux_name}
     cwd = cwd.expanduser().resolve()
     cwd.mkdir(parents=True, exist_ok=True)
     before = transcripts(cwd)
-    subprocess.run([TMUX, "new-session", "-d", "-s", tmux_name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="], check=True)
-    shown = show_in_iterm(tmux_name) if show else (False, "not shown")
+    subprocess.run([TMUX, "new-session", "-d", "-s", tmux_name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="], check=True, env=env)
+    shown = show_in_iterm(tmux_name, env=env) if show else (False, "not shown")
     command = f"claude -n {name} {claude_args}".strip()
-    subprocess.run([TMUX, "send-keys", "-t", tmux_name, command, "Enter"], check=True)
+    subprocess.run([TMUX, "send-keys", "-t", tmux_name, command, "Enter"], check=True, env=env)
     chat_id, trusted, blocked = None, False, None
     for _ in range(wait):
         time.sleep(1)
@@ -135,27 +136,27 @@ def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, sho
         if new_ids:
             chat_id = sorted(new_ids)[0]
             break
-        pane = pane_text(tmux_name)
+        pane = pane_text(tmux_name, env=env)
         if trust and not trusted and "yes, i trust" in pane.lower():
-            trusted = answer_trust(tmux_name)
+            trusted = answer_trust(tmux_name, env=env)
             log("answered the trust prompt (--trust)" if trusted else "the trust prompt did not respond as expected, nothing confirmed")
     if not chat_id:
-        blocked = diagnose(pane_text(tmux_name), tmux_name)
+        blocked = diagnose(pane_text(tmux_name, env=env), tmux_name)
     return {"result": "started", "tmux": tmux_name, "cwd": str(cwd), "shown": shown[0], "chat_id": chat_id,
             "trusted": trusted, "waiting_on": blocked[0] if blocked else None, "fix": blocked[1] if blocked else None}
 
 
-def end(name: str) -> dict:
+def end(name: str, *, env: Mapping[str, str] | None = None) -> dict:
     """Stop a chat's tmux session. iTerm2 is detached first, because killing a session it is still
     attached to with -CC leaves an empty control window behind."""
     tmux_name = name if name.startswith("claude-") else f"claude-{name}"
-    if tmux_name not in tmux_sessions():
+    if tmux_name not in tmux_sessions(env=env):
         return {"result": "no-session", "tmux": tmux_name}
-    subprocess.run([TMUX, "detach-client", "-s", tmux_name], capture_output=True)
+    subprocess.run([TMUX, "detach-client", "-s", tmux_name], capture_output=True, env=env)
     time.sleep(0.5)
-    r = subprocess.run([TMUX, "kill-session", "-t", tmux_name], capture_output=True, text=True)
+    r = subprocess.run([TMUX, "kill-session", "-t", tmux_name], capture_output=True, text=True, env=env)
     return {"result": "ended" if r.returncode == 0 else "failed", "tmux": tmux_name, "detail": r.stderr.strip()}
 
 
-def listing() -> list[dict]:
-    return [{"tmux": n, **v} for n, v in sorted(tmux_sessions().items()) if n.startswith("claude-")]
+def listing(*, env: Mapping[str, str] | None = None) -> list[dict]:
+    return [{"tmux": n, **v} for n, v in sorted(tmux_sessions(env=env).items()) if n.startswith("claude-")]
