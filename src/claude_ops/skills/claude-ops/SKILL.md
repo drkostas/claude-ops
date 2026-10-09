@@ -4,8 +4,10 @@ description: >
   Use when you work with other Claude Code chats on the same Mac. That covers finding an old chat
   in any project folder and resuming it, starting a named chat in tmux, sending a message into a
   running chat, handing work to another chat, waiting for a chat to finish its turn, bringing back
-  transcripts that disappeared, and sharing Playwright browser profiles between chats. Also use it
-  when a send into iTerm2 or tmux behaved strangely, or when a chat received half a message.
+  transcripts that disappeared, and sharing Playwright browser profiles between chats. It also
+  covers bringing open chats up to date after Claude Code or a CLAUDE.md changed, giving a chat its
+  own git worktree, and moving a conversation to another folder. Also use it when a send into
+  iTerm2 or tmux behaved strangely, or when a chat received half a message.
 ---
 
 # claude-ops
@@ -202,6 +204,82 @@ claude-ops slots --release-stale     # only removes locks whose browser pid is d
 - "Target page, context or browser has been closed" means a tab died. Close and navigate again.
   "Browser is already in use" means the profile lock is held. Never kill Chrome by name to fix
   either, because that also kills the other chats' browsers.
+
+## Keep open chats up to date
+
+An open chat keeps the Claude Code version, settings, MCP servers and instructions it started
+with. After an update it runs old code until it is restarted, and it does not notice a changed
+CLAUDE.md. `claude_ops.config` reads both sides and `claude_ops.update` says when a chat may be
+touched and restarts it in place.
+
+```python
+from claude_ops import config, update
+config.installed_version()                 # what `claude` starts now, e.g. "2.1.294"
+procs = config.processes()
+config.running_version(pid)                # what one running chat runs (lsof's txt entry)
+config.snapshot()                          # fingerprints of settings, MCP servers, plugins, CLAUDE.md
+update.idle(pid, procs, update.last_activity(update.transcript_of(chat_id)), turn_ended_at, now)
+update.may_be_typing(update.seconds_since_input(), update.front_app())
+update.empty_prompt(update.screen_of("iterm", session_id))
+update.restart_iterm(pid, session_id, cwd, chat_id)    # same conversation, same flags, same mode
+```
+
+- Compare fingerprints, never file times. Claude Code rewrites `~/.claude.json` many times an hour.
+- A chat is busy while a shell runs under its claude process (a command or a background task) and
+  while it has written since its last turn ended. Without a Stop hook to say when a turn ended,
+  wait for ten quiet minutes.
+- Read activity from the last message in the transcript, not the file's time. Claude Code appends
+  bookkeeping after a turn, and a large transcript can end in megabytes of it, so the read grows
+  until it finds a message.
+- Never paste into a chat someone may be typing into, or one that shows a question. The terminal in
+  front plus input in the last two minutes means wait, and so does anything on screen but an empty
+  input line. A paste and Enter would answer a dialog or send their half-typed message.
+- Never restart with /exit. It can open Claude Code's own exit dialog and leave a choice on screen.
+  `restart_iterm` sends SIGTERM, waits for the shell, and types the resume line.
+- A resume loses the permission mode the chat was switched to. `permission_mode` reads it from the
+  footer first. `resume_line` keeps the start flags it knows (name, Remote Control, model, the skip
+  permission flags) and drops the rest, because `ps` prints a first prompt without its quotes and
+  its first word would arrive as a new message.
+- `restart_iterm` checks only that Claude is back. Check the new process runs the installed version
+  before you call the update done, and wait for the new transcript before sending it a note.
+
+## Give a chat its own worktree
+
+Several chats in one checkout switch branches under each other. `claude_ops.worktree` gives each a
+worktree outside the repo, on branch `chat/<name>`, from the remote's default branch.
+
+```python
+from claude_ops import worktree
+out = worktree.prepare(Path("~/code/app/web"), "fix-login")   # cwd, worktree, linked, memory
+worktree.unsafe(Path(out["worktree"]))     # None, or why removing it would lose work
+worktree.remove(Path(out["worktree"]))
+```
+
+- Files kept out of git by `.git/info/exclude` (a local CLAUDE.md) are linked in, and the chat's
+  memory folder is linked to the main checkout's. A pattern in that file is never guessed at.
+- Claude Code names a project folder after the resolved path, and older versions kept dots in it,
+  so memory is looked for under both spellings and worktree paths have no dots.
+- The name is used as given. On a disk that ignores case, `Fix` would find `fix`'s folder, so a
+  folder is reused only when its branch is `chat/<name>` and refused otherwise.
+- Asked for a subfolder, the chat starts in the same subfolder of its worktree.
+- `claude --worktree` puts the worktree inside the repo, which in a synced folder syncs every one.
+
+## Move a conversation to another folder
+
+`claude --resume <id>` finds a conversation only in the project folder of the directory it runs
+in. To carry on in another folder, move its files there first.
+
+```python
+from claude_ops import move
+move.move_files(chat_id, old_project_dir, new_project_dir, archive=archive_root, hold=hold_dir)
+```
+
+- Every file is copied first and checked (sha256 for a file, a file count for a folder). Only then
+  do the originals leave, so the conversation is never in neither place.
+- The originals go to `hold`, never to the bin. If a job keeps a copy of every transcript (a
+  conversation archive), pass its root as `archive` so its copies move too and a restore job does
+  not bring the old one back.
+- Stop the chat before moving it, and resume it in the new folder with `chat.resume_command`.
 
 ## Traps
 

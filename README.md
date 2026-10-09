@@ -56,6 +56,18 @@ A chat in tmux keeps running when its window closes, and other tools can reach i
 - `chat end` detaches iTerm2 before stopping the session, because stopping a session iTerm2 is still attached to leaves an empty window behind.
 - Claude Code names its process after its version, so tmux reports the running command as something like `2.1.286`. claude-ops counts that as Claude Code.
 
+## Keep chats current, give them worktrees, move them
+
+These are Python modules, for a script or a scheduler that looks after many chats.
+
+- `claude_ops.config` reads the Claude Code version that is installed and the version each running chat runs, and fingerprints the settings, MCP servers, plugins and CLAUDE.md files a chat loads at start. A fingerprint, because Claude Code rewrites `~/.claude.json` many times an hour.
+- `claude_ops.update` says whether a chat may be touched (no command running under it, its turn ended, nobody typing into it, nothing asked on its screen) and restarts a chat in iTerm2 as the same conversation, with the flags and permission mode it had. It ends the process with SIGTERM, never /exit, which can open a dialog.
+- `claude_ops.worktree` gives a chat its own git worktree outside the repo, on `chat/<name>`, with the main checkout's local-only files and memory linked in. A folder is reused only by its own branch.
+- `claude_ops.move` moves a conversation's files to another project folder so `claude --resume` finds it there. Every copy is checked before an original leaves, and the originals are kept.
+- `chat.claude_command` and `chat.resume_command` build the start and resume lines for a named chat with Remote Control. The permission mode is an argument with no default.
+
+Every function that starts a process takes `env`, for callers that build their child environment themselves.
+
 ## Wake a chat when something new happens
 
 This is for a job that should bring a chat in to look at something (new issues on a repo, a particular email, a failed build) instead of sending you a notification. A scheduler (launchd, cron or systemd) runs a small script every few minutes, and the script sends one prompt into the chat only when there is something new.

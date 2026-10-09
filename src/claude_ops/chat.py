@@ -16,6 +16,7 @@ iTerm2's tmux integration (`tmux -CC attach`). Lessons kept from real use:
 """
 from __future__ import annotations
 
+import shlex
 import subprocess
 import time
 from collections.abc import Mapping
@@ -160,3 +161,78 @@ def end(name: str, *, env: Mapping[str, str] | None = None) -> dict:
 
 def listing(*, env: Mapping[str, str] | None = None) -> list[dict]:
     return [{"tmux": n, **v} for n, v in sorted(tmux_sessions(env=env).items()) if n.startswith("claude-")]
+
+
+def claude_command(name: str, mode: str | None, *, remote_control: bool = True) -> str:
+    """The command that starts a named chat: `claude -n <name>`, with Remote Control under the same
+    name (it works inside tmux), and `--permission-mode <mode>` when a mode is given.
+
+    `mode` has no default on purpose: which permission mode a chat starts in is the caller's
+    choice (bypassPermissions, acceptEdits, plan, ...), and None means Claude Code's own default."""
+    parts = ["claude", "-n", name]
+    if remote_control:
+        parts += ["--remote-control", name]
+    if mode:
+        parts += ["--permission-mode", mode]
+    return shlex.join(parts)
+
+
+def resume_command(name: str, chat_id: str, mode: str | None, *, remote_control: bool = True) -> str:
+    """The command that reopens conversation `chat_id` under the same name, in the mode given
+    (read a running chat's mode with `update.permission_mode` before ending it)."""
+    parts = ["claude", "--resume", chat_id, "-n", name]
+    if remote_control:
+        parts += ["--remote-control", name]
+    if mode:
+        parts += ["--permission-mode", mode]
+    return shlex.join(parts)
+
+
+def pane_owner(pid: int, *, env: Mapping[str, str] | None = None) -> str | None:
+    """Which tmux session a process is in, by walking up its parents to a pane's pid.
+
+    The process does not know it is in tmux and tmux does not know what it runs, so the process
+    tree is the join, and the answer is derived rather than known."""
+    r = subprocess.run([TMUX, "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"],
+                       capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        return None
+    panes = {}
+    for ln in r.stdout.splitlines():
+        sname, _, ppid = ln.partition("\t")
+        if ppid.isdigit():
+            panes[int(ppid)] = sname
+    seen, cur = 0, pid
+    while cur and cur > 1 and seen < 30:
+        if cur in panes:
+            return panes[cur]
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(cur)], capture_output=True,
+                             text=True, env=env).stdout.strip()
+        cur = int(out) if out.isdigit() else 0
+        seen += 1
+    return None
+
+
+def at_prompt(name: str, wait: float = 90.0, *, env: Mapping[str, str] | None = None) -> bool:
+    """Claude is at its prompt in tmux session `name`: the input marker is on screen and no
+    start-up question is."""
+    end = time.time() + wait
+    while time.time() < end:
+        text = pane_text(name, env=env)
+        if "❯" in text and diagnose(text, name) is None and "trust this folder" not in text.lower():
+            return True
+        time.sleep(2)
+    return False
+
+
+_REPO_NAMES: dict[str, str] = {}
+
+
+def repo_name(path: str, *, env: Mapping[str, str] | None = None) -> str:
+    """The name of the repository a folder is in (its main checkout's folder name), or the
+    folder's own name when it is in none. Cached per path."""
+    if path not in _REPO_NAMES:
+        from .worktree import repo_root  # noqa: PLC0415
+        root = repo_root(Path(path), env=env)
+        _REPO_NAMES[path] = (root or Path(path)).name
+    return _REPO_NAMES[path]
