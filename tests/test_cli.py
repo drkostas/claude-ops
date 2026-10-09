@@ -52,7 +52,7 @@ def test_rover_launch_needs_a_real_payload(tmp_path):
 
 def test_sessions_command(chat_tree, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sessions.build_index, "__defaults__", (chat_tree, tmp_path / "c.json", False))
-    monkeypatch.setattr(sessions, "live_folders", lambda: set())
+    monkeypatch.setattr(sessions, "live_folders", lambda **k: set())
     assert cli.main(["sessions", "login"]) == 0
     out = capsys.readouterr().out
     assert "alpha-login" in out and "claude --resume aaa" in out and "bbb" not in out
@@ -60,6 +60,6 @@ def test_sessions_command(chat_tree, tmp_path, monkeypatch, capsys):
 
 def test_chat_end_without_a_session(monkeypatch, capsys):
     from claude_ops import chat
-    monkeypatch.setattr(chat, "tmux_sessions", lambda: {})
+    monkeypatch.setattr(chat, "tmux_sessions", lambda **k: {})
     assert cli.main(["chat", "end", "nothing"]) == 1
     assert '"no-session"' in capsys.readouterr().out

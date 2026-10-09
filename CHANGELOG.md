@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+- Every function that starts a process (tmux, osascript, pgrep, lsof, rg) takes an optional `env`, passed to the process. `None` keeps the inherited environment
+
 ## 0.2.0
 
 - A main `claude-ops` skill, and more detail in chat-watcher, mentor and rover from the conversations they came from

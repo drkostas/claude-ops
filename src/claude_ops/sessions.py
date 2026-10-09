@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -106,21 +107,21 @@ def build_index(root: Path = ROOT, cache: Path = CACHE, force: bool = False) -> 
     return sorted(idx, key=lambda e: e.get("active_at") or e["mtime"], reverse=True)
 
 
-def live_folders() -> set[str]:
+def live_folders(*, env: Mapping[str, str] | None = None) -> set[str]:
     """Folders a claude process is running in now. A fact about processes, not about which chat each one is."""
     out: set[str] = set()
     try:
-        pids = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, text=True).stdout.split()
+        pids = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, text=True, env=env).stdout.split()
     except OSError:
         return out
     for pid in pids:
-        r = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], capture_output=True, text=True)
+        r = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], capture_output=True, text=True, env=env)
         out.update(ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n"))
     return out
 
 
-def annotate(idx: list[dict], live: set[str] | None = None, now: float | None = None) -> list[dict]:
-    live = live_folders() if live is None else live
+def annotate(idx: list[dict], live: set[str] | None = None, now: float | None = None, *, env: Mapping[str, str] | None = None) -> list[dict]:
+    live = live_folders(env=env) if live is None else live
     now = time.time() if now is None else now
     for e in idx:
         recent = now - (e.get("active_at") or e["mtime"]) < LIVE_WINDOW
@@ -147,12 +148,12 @@ def ripgrep() -> str | None:
     return next((c for c in cand if c and os.path.isfile(c) and os.access(c, os.X_OK)), None)
 
 
-def deep_search(text: str, root: Path = ROOT) -> dict[str, str]:
+def deep_search(text: str, root: Path = ROOT, *, env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Session ids whose full transcript contains `text` (case-insensitive). Subagent files count for their parent chat."""
     rg = ripgrep()
     cmd = [rg, "-l", "--no-messages", "-i", "-F", text, str(root)] if rg else ["grep", "-rliF", text, str(root)]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return {}
     hits: dict[str, str] = {}
