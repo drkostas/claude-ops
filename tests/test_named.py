@@ -11,6 +11,10 @@ def test_commands_carry_the_mode_only_when_given():
         "claude -n soma --remote-control soma --permission-mode bypassPermissions"
     assert chat.claude_command("soma", None) == "claude -n soma --remote-control soma"
     assert chat.claude_command("soma", None, remote_control=False) == "claude -n soma"
+    assert (chat.claude_command("soma", None, remote_control=False, settings="/s.json")
+            == "claude --settings /s.json -n soma")
+    assert (chat.resume_command("soma", "ID", None, remote_control=False, settings="/s.json")
+            == "claude --settings /s.json --resume ID -n soma")
     assert chat.resume_command("soma", "ID", "plan") == \
         "claude --resume ID -n soma --remote-control soma --permission-mode plan"
     assert chat.resume_command("soma", "ID", None) == "claude --resume ID -n soma --remote-control soma"

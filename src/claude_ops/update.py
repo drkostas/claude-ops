@@ -106,7 +106,7 @@ def permission_mode(screen: str | None) -> str | None:
 #: resumed chat as a new message.
 KEEP_FLAGS = {"--allow-dangerously-skip-permissions": False, "--dangerously-skip-permissions": False,
               "-n": True, "--name": True, "--remote-control": True, "--model": True,
-              "--add-dir": True, "--effort": True}
+              "--add-dir": True, "--effort": True, "--settings": True}
 
 
 def resume_line(args: str | None, chat_id: str, mode: str | None = None) -> str:
