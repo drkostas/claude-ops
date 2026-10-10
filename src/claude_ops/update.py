@@ -54,8 +54,10 @@ def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
          quiet_unhooked_s: float = QUIET_UNHOOKED_S) -> tuple[bool, str]:
     """(is the chat idle, why). Every "no" says what it is waiting for.
 
-    `procs` is `config.processes()`, `transcript_at` is `last_activity(...)`, and `turn_ended_at`
-    is when a Stop hook last fired for it (None when the caller has no such hook)."""
+    `procs` is `config.processes()`, `transcript_at` is `last_activity(...)`, `turn_ended_at`
+    is when a Stop hook last fired for it (None when the caller has no such hook), and
+    `prompt_on_screen` whether Claude's empty prompt is on its screen (`empty_prompt`), None when
+    the caller did not look."""
     if shell_children(pid, procs):
         return False, "it is running a command"
     if transcript_at is None:
@@ -69,6 +71,13 @@ def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
             return False, "Claude's prompt is not on its screen"
         return True, f"quiet for {int(quiet_unhooked_s // 60)} minutes with no command running"
     if turn_ended_at < transcript_at - dt.timedelta(seconds=5):
+        # ⚠️ A TURN THAT ENDS IN AN API ERROR FIRES NO STOP HOOK (portal-local-gguf, 2026-10-11).
+        # Its writes are newer than the last recorded end of turn, so without this the chat read as
+        # working for ever. The same rule as a chat with no end on record: a long silence, and
+        # Claude's empty prompt on its screen. Unknown screen stays "working".
+        if quiet >= quiet_unhooked_s and prompt_on_screen is True:
+            return True, (f"its last turn ended without a recorded end (an error), it has been "
+                          f"quiet {int(quiet // 60)} minutes and its prompt is empty")
         return False, "it has written since its last turn ended, so it is working"
     if quiet < quiet_s:
         return False, f"its turn ended {int(quiet)}s ago"

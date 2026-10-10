@@ -27,6 +27,17 @@ def test_idle():
     assert cu.idle(100, MCP_ONLY, ago(70), None, NOW, quiet_unhooked_s=60)[0]
 
 
+def test_a_turn_that_ended_in_an_error_does_not_read_as_working_for_ever():
+    # an API error ends the turn without a Stop hook, so the transcript is newer than the last
+    # recorded end of turn (portal-local-gguf, 2026-10-11)
+    ok, why = cu.idle(100, MCP_ONLY, ago(900), ago(3600), NOW, prompt_on_screen=True)
+    assert ok and "error" in why
+    assert not cu.idle(100, MCP_ONLY, ago(900), ago(3600), NOW)[0]                  # screen unknown
+    assert not cu.idle(100, MCP_ONLY, ago(900), ago(3600), NOW, prompt_on_screen=False)[0]
+    assert not cu.idle(100, MCP_ONLY, ago(120), ago(3600), NOW, prompt_on_screen=True)[0]  # recent
+    assert not cu.idle(100, WITH_CMD, ago(900), ago(3600), NOW, prompt_on_screen=True)[0]  # a command
+
+
 def test_may_be_typing():
     assert cu.may_be_typing(30, "iTerm2")
     assert not cu.may_be_typing(30, "Google Chrome")
