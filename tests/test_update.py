@@ -60,6 +60,23 @@ def test_a_compaction_is_not_activity(tmp_path):
     assert cu.last_activity(t) == dt.datetime(2026, 10, 9, 17, 36, 24, tzinfo=dt.timezone.utc)
 
 
+def test_a_local_command_is_not_activity(tmp_path):
+    t = tmp_path / "refreshed.jsonl"
+    t.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "assistant", "timestamp": "2026-10-09T16:02:48Z"},
+        {"type": "user", "timestamp": "2026-10-09T16:46:47Z", "message": {"content":
+            "<command-name>/reload-plugins</command-name>\n<command-message>reload-plugins</command-message>"}},
+        {"type": "user", "isMeta": True, "timestamp": "2026-10-09T16:46:47Z",
+         "message": {"content": "<local-command-caveat>The command below was run directly</local-command-caveat>"}},
+        {"type": "user", "timestamp": "2026-10-09T16:46:48Z", "message": {"content":
+            "<local-command-stdout>Reloaded 4 plugins</local-command-stdout>"}}]) + "\n")
+    assert cu.last_activity(t) == dt.datetime(2026, 10, 9, 16, 2, 48, tzinfo=dt.timezone.utc)
+    with open(t, "a") as f:                       # a message he types afterwards still counts
+        f.write(json.dumps({"type": "user", "timestamp": "2026-10-09T17:00:00Z",
+                            "message": {"content": "please check the deploy"}}) + "\n")
+    assert cu.last_activity(t).hour == 17
+
+
 def test_last_activity_reads_past_a_long_run_of_bookkeeping(tmp_path):
     t = tmp_path / "deep.jsonl"
     with open(t, "w") as f:
