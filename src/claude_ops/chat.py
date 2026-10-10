@@ -46,7 +46,7 @@ def transcripts(cwd: Path) -> set[str]:
 
 
 def pane_text(name: str, *, env: Mapping[str, str] | None = None) -> str:
-    r = subprocess.run([TMUX, "capture-pane", "-p", "-t", name], capture_output=True, text=True, env=env)
+    r = subprocess.run([TMUX, "-u", "capture-pane", "-p", "-t", name], capture_output=True, text=True, env=env)
     return r.stdout if r.returncode == 0 else ""
 
 
@@ -100,22 +100,22 @@ def answer_trust(name: str, *, env: Mapping[str, str] | None = None) -> bool:
     if keys is None:
         return False
     for k in keys[:-1]:
-        subprocess.run([TMUX, "send-keys", "-t", name, k], env=env)
+        subprocess.run([TMUX, "-u", "send-keys", "-t", name, k], env=env)
         time.sleep(0.3)
     if not cursor_on_yes(stable_pane(name, env=env)):
         return False  # never press Enter on an option we did not see selected
-    subprocess.run([TMUX, "send-keys", "-t", name, "Enter"], env=env)
+    subprocess.run([TMUX, "-u", "send-keys", "-t", name, "Enter"], env=env)
     return True
 
 
 def show_in_iterm(tmux_name: str, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
-    cmd = f"{TMUX} -CC attach -t {tmux_name}"
+    cmd = f"{TMUX} -u -CC attach -t {tmux_name}"
     r = subprocess.run(["osascript", "-e", f'tell application "iTerm2" to create window with default profile command "{cmd}"'],
                        capture_output=True, text=True, timeout=20, env=env)
     if r.returncode != 0:
         return False, f"iTerm2 refused the window: {r.stderr.strip()[:200]}"
     time.sleep(2.0)
-    subprocess.run([TMUX, "send-keys", "-t", tmux_name, "C-l"], capture_output=True, env=env)  # redraw
+    subprocess.run([TMUX, "-u", "send-keys", "-t", tmux_name, "C-l"], capture_output=True, env=env)  # redraw
     return True, "shown in iTerm2"
 
 
@@ -126,10 +126,10 @@ def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, sho
     cwd = cwd.expanduser().resolve()
     cwd.mkdir(parents=True, exist_ok=True)
     before = transcripts(cwd)
-    subprocess.run([TMUX, "new-session", "-d", "-s", tmux_name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="], check=True, env=env)
+    subprocess.run([TMUX, "-u", "new-session", "-d", "-s", tmux_name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="], check=True, env=env)
     shown = show_in_iterm(tmux_name, env=env) if show else (False, "not shown")
     command = f"claude -n {name} {claude_args}".strip()
-    subprocess.run([TMUX, "send-keys", "-t", tmux_name, command, "Enter"], check=True, env=env)
+    subprocess.run([TMUX, "-u", "send-keys", "-t", tmux_name, command, "Enter"], check=True, env=env)
     chat_id, trusted, blocked = None, False, None
     for _ in range(wait):
         time.sleep(1)
@@ -153,9 +153,9 @@ def end(name: str, *, env: Mapping[str, str] | None = None) -> dict:
     tmux_name = name if name.startswith("claude-") else f"claude-{name}"
     if tmux_name not in tmux_sessions(env=env):
         return {"result": "no-session", "tmux": tmux_name}
-    subprocess.run([TMUX, "detach-client", "-s", tmux_name], capture_output=True, env=env)
+    subprocess.run([TMUX, "-u", "detach-client", "-s", tmux_name], capture_output=True, env=env)
     time.sleep(0.5)
-    r = subprocess.run([TMUX, "kill-session", "-t", tmux_name], capture_output=True, text=True, env=env)
+    r = subprocess.run([TMUX, "-u", "kill-session", "-t", tmux_name], capture_output=True, text=True, env=env)
     return {"result": "ended" if r.returncode == 0 else "failed", "tmux": tmux_name, "detail": r.stderr.strip()}
 
 
@@ -193,7 +193,7 @@ def pane_owner(pid: int, *, env: Mapping[str, str] | None = None) -> str | None:
 
     The process does not know it is in tmux and tmux does not know what it runs, so the process
     tree is the join, and the answer is derived rather than known."""
-    r = subprocess.run([TMUX, "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"],
+    r = subprocess.run([TMUX, "-u", "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"],
                        capture_output=True, text=True, env=env)
     if r.returncode != 0:
         return None
