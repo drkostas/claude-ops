@@ -194,6 +194,16 @@ def transcript_of(chat_id: str, projects: Path = PROJECTS) -> Path | None:
 ACTIVITY = {"user", "assistant", "queue-operation"}
 
 
+def _local_command(d: dict) -> bool:
+    """A record of a slash command run inside Claude Code, or of its output."""
+    if d.get("type") != "user":
+        return False
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, list):
+        c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+    return isinstance(c, str) and c.lstrip().startswith(("<command-name>", "<local-command-"))
+
+
 def last_activity(path: Path | None, first: int = 262144, cap: int = 64 << 20) -> dt.datetime | None:
     """When the conversation last moved: the newest message record in the transcript.
 
@@ -227,6 +237,12 @@ def last_activity(path: Path | None, first: int = 262144, cap: int = 64 << 20) -
             # a compaction writes a user record ("This session is being continued ...") with no turn
             # around it, so counting it made an idle chat look busy for ever
             if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
+                continue
+            # a local slash command (/reload-plugins, /model ...) is recorded as user records and
+            # starts no turn, so nothing ends it: keep_current's own refresh made every chat it
+            # refreshed look busy from then on. A command that does start a turn is still seen,
+            # through the assistant records that follow it.
+            if d.get("isMeta") or _local_command(d):
                 continue
             if d.get("type") in ACTIVITY and d.get("timestamp"):
                 try:
