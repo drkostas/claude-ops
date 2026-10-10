@@ -98,7 +98,7 @@ def iterm_sessions(*, env: Mapping[str, str] | None = None) -> dict[str, dict]:
 
 def tmux_sessions(*, env: Mapping[str, str] | None = None) -> dict[str, dict]:
     """{session name: {...}}. Empty when no tmux server runs, which is normal."""
-    r = subprocess.run([TMUX, "list-sessions", "-F", "#{session_name}\t#{pane_current_command}\t#{session_attached}"],
+    r = subprocess.run([TMUX, "-u", "list-sessions", "-F", "#{session_name}\t#{pane_current_command}\t#{session_attached}"],
                        capture_output=True, text=True, env=env)
     if r.returncode != 0:
         return {}
@@ -145,13 +145,13 @@ def send_iterm(session_id: str, text: str, enter: bool, *, env: Mapping[str, str
 
 def send_tmux(name: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     buf = f"claude-ops-{uuid.uuid4().hex[:10]}"
-    r = subprocess.run([TMUX, "set-buffer", "-b", buf, "--", text], capture_output=True, text=True, env=env)
+    r = subprocess.run([TMUX, "-u", "set-buffer", "-b", buf, "--", text], capture_output=True, text=True, env=env)
     if r.returncode == 0:
         # -p pastes with the bracketed-paste markers when the program asked for them, which Claude Code does
-        r = subprocess.run([TMUX, "paste-buffer", "-p", "-d", "-b", buf, "-t", name], capture_output=True, text=True, env=env)
+        r = subprocess.run([TMUX, "-u", "paste-buffer", "-p", "-d", "-b", buf, "-t", name], capture_output=True, text=True, env=env)
     if r.returncode == 0 and enter:
         time.sleep(0.3)  # the paste must be processed before Enter, or Enter lands inside it
-        r = subprocess.run([TMUX, "send-keys", "-t", name, "Enter"], capture_output=True, text=True, env=env)
+        r = subprocess.run([TMUX, "-u", "send-keys", "-t", name, "Enter"], capture_output=True, text=True, env=env)
     return r.returncode == 0, r.stderr.strip()[:300]
 
 

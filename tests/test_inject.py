@@ -65,3 +65,20 @@ def test_no_session_and_failed(tmp_path):
     assert r["result"] == "no-session" and "zsh" in r["open"]
     r = inject.inject("S1", "x", log=log, sessions=lambda: ITERM, send=lambda *a: (False, "timeout"))
     assert r["result"] == "failed" and lines(log)[-1]["event"] == "failed"
+
+
+def test_tmux_lists_survive_a_process_with_no_locale(monkeypatch):
+    """A launchd agent has no locale, and tmux then prints the tab in a -F format as `_`, so a
+    session list came back as `claude-x_2.1.296_1` and no session could be found by name
+    (drlab, 2026-10-10). Every tmux call passes -u, which keeps the tab whatever the locale."""
+    import subprocess
+    seen = []
+
+    class R:
+        returncode, stdout, stderr = 0, "claude-x\t2.1.296\t1\n", ""
+
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: seen.append(argv) or R())
+    from claude_ops import inject
+    assert inject.tmux_sessions(env={}) == {"claude-x": {"name": "claude-x", "command": "2.1.296",
+                                                         "attached": True}}
+    assert seen and seen[0][:2] == [inject.TMUX, "-u"]
