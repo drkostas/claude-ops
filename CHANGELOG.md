@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `chat.claude_command` and `chat.resume_command` take `settings`, a settings file for that chat alone (`--settings <file>`), and a restart keeps the flag
+
 ## 0.4.0
 
 - `claude_ops.config`: the installed Claude Code version, the version a running chat runs, and fingerprints of what a chat loads at start

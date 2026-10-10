@@ -97,6 +97,9 @@ def test_resume_line_and_permission_mode():
             == "claude --allow-dangerously-skip-permissions --name vision "
                "--permission-mode bypassPermissions --resume U")
     assert cu.resume_line("claude --some-new-flag value", "U") == "claude --resume U"
+    # a chat started with its own settings file (a local model, say) stays on it after a restart
+    assert (cu.resume_line("claude --settings /s.json -n x", "U")
+            == "claude --settings /s.json -n x --resume U")
     assert cu.resume_line("/opt/homebrew/bin/node something", "U") == "claude --resume U"
     assert cu.permission_mode("x\n  ⏵⏵ bypass permissions on (shift+tab to cycle)") == "bypassPermissions"
     assert cu.permission_mode("❯ \n────") is None

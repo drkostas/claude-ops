@@ -163,13 +163,18 @@ def listing(*, env: Mapping[str, str] | None = None) -> list[dict]:
     return [{"tmux": n, **v} for n, v in sorted(tmux_sessions(env=env).items()) if n.startswith("claude-")]
 
 
-def claude_command(name: str, mode: str | None, *, remote_control: bool = True) -> str:
+def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
+                   settings: str | None = None) -> str:
     """The command that starts a named chat: `claude -n <name>`, with Remote Control under the same
     name (it works inside tmux), and `--permission-mode <mode>` when a mode is given.
 
     `mode` has no default on purpose: which permission mode a chat starts in is the caller's
-    choice (bypassPermissions, acceptEdits, plan, ...), and None means Claude Code's own default."""
-    parts = ["claude", "-n", name]
+    choice (bypassPermissions, acceptEdits, plan, ...), and None means Claude Code's own default.
+
+    `settings` is a settings file for this chat alone (`--settings <file>`), for example one that
+    sends its requests to a local model. It is a flag rather than environment, so it shows in the
+    chat's command line and a restart keeps it (`update.KEEP_FLAGS`)."""
+    parts = ["claude"] + (["--settings", settings] if settings else []) + ["-n", name]
     if remote_control:
         parts += ["--remote-control", name]
     if mode:
@@ -177,10 +182,12 @@ def claude_command(name: str, mode: str | None, *, remote_control: bool = True) 
     return shlex.join(parts)
 
 
-def resume_command(name: str, chat_id: str, mode: str | None, *, remote_control: bool = True) -> str:
+def resume_command(name: str, chat_id: str, mode: str | None, *, remote_control: bool = True,
+                   settings: str | None = None) -> str:
     """The command that reopens conversation `chat_id` under the same name, in the mode given
     (read a running chat's mode with `update.permission_mode` before ending it)."""
-    parts = ["claude", "--resume", chat_id, "-n", name]
+    parts = (["claude"] + (["--settings", settings] if settings else [])
+             + ["--resume", chat_id, "-n", name])
     if remote_control:
         parts += ["--remote-control", name]
     if mode:
