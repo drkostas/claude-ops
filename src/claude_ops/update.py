@@ -224,6 +224,10 @@ def last_activity(path: Path | None, first: int = 262144, cap: int = 64 << 20) -
                 d = json.loads(raw)
             except ValueError:
                 continue
+            # a compaction writes a user record ("This session is being continued ...") with no turn
+            # around it, so counting it made an idle chat look busy for ever
+            if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
+                continue
             if d.get("type") in ACTIVITY and d.get("timestamp"):
                 try:
                     return dt.datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00"))

@@ -49,6 +49,17 @@ def test_last_activity_is_the_last_message(tmp_path):
     assert cu.last_activity(None) is None
 
 
+def test_a_compaction_is_not_activity(tmp_path):
+    t = tmp_path / "compacted.jsonl"
+    t.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "assistant", "timestamp": "2026-10-09T17:36:24Z"},
+        {"type": "system", "subtype": "stop_hook_summary", "timestamp": "2026-10-09T17:36:25Z"},
+        {"type": "system", "subtype": "compact_boundary", "timestamp": "2026-10-09T18:32:00Z"},
+        {"type": "user", "isCompactSummary": True, "isVisibleInTranscriptOnly": True,
+         "timestamp": "2026-10-09T18:32:00Z"}]) + "\n")
+    assert cu.last_activity(t) == dt.datetime(2026, 10, 9, 17, 36, 24, tzinfo=dt.timezone.utc)
+
+
 def test_last_activity_reads_past_a_long_run_of_bookkeeping(tmp_path):
     t = tmp_path / "deep.jsonl"
     with open(t, "w") as f:
