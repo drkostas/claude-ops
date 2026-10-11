@@ -118,11 +118,40 @@ KEEP_FLAGS = {"--allow-dangerously-skip-permissions": False, "--dangerously-skip
               "--add-dir": True, "--effort": True, "--settings": True}
 
 
-def resume_line(args: str | None, chat_id: str, mode: str | None = None) -> str:
+def remote_control_of(path: Path | None) -> bool:
+    """Whether the conversation had Remote Control on: its newest `bridge_status` record says
+    "/remote-control is active".
+
+    ⛔ A RESTART DROPPED REMOTE CONTROL THAT WAS SWITCHED ON INSIDE THE CHAT (2026-10-11). A chat
+    started without --remote-control and given /remote-control later came back from a restart
+    without it, because the resume only repeats the start flags, and it left his phone's list.
+    Claude Code writes the state into the transcript, so the restart reads it there."""
+    if path is None:
+        return False
+    newest = None
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if '"bridge_status"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("type") == "system" and d.get("subtype") == "bridge_status":
+                    newest = str(d.get("content") or "")
+    except OSError:
+        return False
+    return newest is not None and "is active" in newest
+
+
+def resume_line(args: str | None, chat_id: str, mode: str | None = None,
+                remote_control: str | bool | None = None) -> str:
     """The command that reopens this conversation with the flags it was started with.
 
     `args` is the process's command line (`ps -o args=`), and `mode` the permission mode it was
-    in (from `permission_mode`)."""
+    in (from `permission_mode`). `remote_control` keeps Remote Control on for a chat that had it
+    without the flag (`remote_control_of`): a name, or True for an unnamed one."""
     argv = (args or "").split()
     out = ["claude"]
     if argv and Path(argv[0]).name == "claude":
@@ -138,6 +167,10 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None) -> str:
                 elif a not in out:
                     out.append(a)
             i += 1
+    if remote_control and "--remote-control" not in out:
+        name = remote_control if isinstance(remote_control, str) else next(
+            (out[k + 1] for k, a in enumerate(out[:-1]) if a in ("-n", "--name")), None)
+        out += ["--remote-control"] + ([name] if name else [])
     tail = ["--permission-mode", mode] if mode else []
     return shlex.join(out + tail + ["--resume", chat_id])
 
@@ -315,6 +348,7 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
     answer is (back at Claude's prompt, what happened)."""
     mode = permission_mode(screen_of("iterm", session_id, env=env))
     args = process_args(pid, env=env)
+    rc = remote_control_of(transcript_of(chat_id)) or None
     try:
         os.kill(int(pid), signal.SIGTERM)
     except (OSError, TypeError, ValueError) as e:
@@ -329,7 +363,7 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
 
     if not _wait(at_shell, stop_s):
         return False, f"Claude did not stop within {int(stop_s)} seconds of being asked to"
-    cmd = resume_line(args, chat_id, mode)
+    cmd = resume_line(args, chat_id, mode, remote_control=rc)
     ok, detail = _inject.send_iterm(session_id, f"cd {shlex.quote(cwd)} && {cmd}", True, env=env)
     if not ok:
         return False, f"could not type the resume command ({detail})"

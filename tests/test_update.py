@@ -166,3 +166,36 @@ def test_restart_iterm_terminates_waits_and_types_the_resume_line(monkeypatch):
     ok, how = cu.restart_iterm(100, "ABC", "/work/soma", "NEW", stop_s=5, back_s=5)
     assert ok and killed == [100]
     assert typed == ["cd /work/soma && claude -n soma --permission-mode plan --resume NEW"]
+
+
+def test_remote_control_of_reads_the_newest_bridge_status(tmp_path):
+    t = tmp_path / "chat.jsonl"
+    active = {"type": "system", "subtype": "bridge_status",
+              "content": "/remote-control is active · Continue here, on your phone"}
+    blocked = {"type": "system", "subtype": "informational",
+               "content": "Remote Control not started here · another Claude Code has it"}
+    t.write_text(json.dumps(active) + "\n" + json.dumps(blocked) + "\n")
+    # the newest bridge_status decides; a note that it could not start here is not him turning it off
+    assert cu.remote_control_of(t) is True
+    t.write_text(json.dumps(active) + "\n" + json.dumps(
+        {"type": "system", "subtype": "bridge_status", "content": "/remote-control is off"}) + "\n")
+    assert cu.remote_control_of(t) is False
+    t.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+    assert cu.remote_control_of(t) is False
+    assert cu.remote_control_of(None) is False
+    assert cu.remote_control_of(tmp_path / "missing.jsonl") is False
+
+
+def test_resume_line_keeps_remote_control_switched_on_inside_the_chat():
+    started = "claude --allow-dangerously-skip-permissions -n drlab-core"
+    assert (cu.resume_line(started, "U", remote_control=True)
+            == "claude --allow-dangerously-skip-permissions -n drlab-core --remote-control drlab-core --resume U")
+    assert (cu.resume_line("claude --allow-dangerously-skip-permissions", "U", "bypassPermissions",
+                           remote_control=True)
+            == "claude --allow-dangerously-skip-permissions --remote-control --permission-mode bypassPermissions --resume U")
+    assert (cu.resume_line("claude", "U", remote_control="core")
+            == "claude --remote-control core --resume U")
+    # started with the flag: kept once, never doubled
+    assert (cu.resume_line("claude -n x --remote-control x", "U", remote_control=True)
+            == "claude -n x --remote-control x --resume U")
+    assert cu.resume_line("claude -n x", "U") == "claude -n x --resume U"
