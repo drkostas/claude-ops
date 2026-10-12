@@ -57,3 +57,13 @@ def test_processes_and_running_version_carry_the_env(monkeypatch):
     assert 100 in cc.processes(env=env)
     assert cc.running_version(100, env=env) == "2.1.294"
     assert seen == [env, env]
+
+
+def test_descendants_are_every_process_under_one():
+    procs = {1: {"ppid": 0, "comm": "launchd"}, 10: {"ppid": 1, "comm": "claude"},
+             11: {"ppid": 10, "comm": "node"}, 12: {"ppid": 11, "comm": "Google Chrome for Testing"},
+             13: {"ppid": 12, "comm": "Google Chrome Helper"}, 20: {"ppid": 1, "comm": "Brave Browser"}}
+    assert cc.descendants(10, procs) == {11, 12, 13}
+    assert cc.descendants(13, procs) == set()
+    looped = {5: {"ppid": 6, "comm": "a"}, 6: {"ppid": 5, "comm": "b"}}
+    assert cc.descendants(5, looped) == {5, 6}          # a parent loop ends instead of hanging

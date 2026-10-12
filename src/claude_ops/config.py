@@ -124,6 +124,24 @@ def processes(*, env: Mapping[str, str] | None = None) -> dict[int, dict]:
     return parse_ps(_run(["/bin/ps", "-A", "-o", "pid=,ppid=,lstart=,comm="], env) or "")
 
 
+def descendants(pid: int, procs: dict[int, dict]) -> set[int]:
+    """Every process started under `pid`, at any depth (`procs` is `processes()`). Used to find what
+    a chat made: a window belongs to a chat when the process that owns it descends from the chat's
+    claude process (a Playwright browser, an app a command started)."""
+    kids: dict[int, list[int]] = {}
+    for p, v in procs.items():
+        kids.setdefault(v.get("ppid"), []).append(p)
+    out: set[int] = set()
+    todo = list(kids.get(pid, []))
+    while todo:
+        p = todo.pop()
+        if p in out:
+            continue
+        out.add(p)
+        todo.extend(kids.get(p, []))
+    return out
+
+
 def is_claude(proc: dict | None) -> bool:
     return bool(proc) and Path(proc["comm"]).name == "claude"
 
