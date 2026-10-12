@@ -378,16 +378,24 @@ def seconds_since_input(*, env: Mapping[str, str] | None = None) -> float | None
     return min(vals) / 1e9 if vals else None
 
 
-def front_app(*, env: Mapping[str, str] | None = None) -> str | None:
-    """The name of the application in front."""
+def front_app(*, bundle_id: bool = False, env: Mapping[str, str] | None = None) -> str | None:
+    """The name of the application in front, or its bundle id (e.g. "com.googlecode.iterm2").
+
+    `lsappinfo` asks LaunchServices, so it needs no Automation grant and always gives a fresh
+    answer. ⚠️ AppKit's frontmostApplication does not: inside one process with no run loop it keeps
+    its first answer (measured 2026-10-11, it still said Brave after Finder had come forward). On a
+    locked screen the app in front is com.apple.loginwindow."""
+    field, key = ("bundleid", "CFBundleIdentifier") if bundle_id else ("name", "LSDisplayName")
     try:
         asn = subprocess.run(["/usr/bin/lsappinfo", "front"], capture_output=True, text=True,
                              timeout=5, env=env).stdout.strip()
-        out = subprocess.run(["/usr/bin/lsappinfo", "info", "-only", "name", asn],
+        if not asn:
+            return None
+        out = subprocess.run(["/usr/bin/lsappinfo", "info", "-only", field, asn],
                              capture_output=True, text=True, timeout=5, env=env).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
-    m = re.search(r'"LSDisplayName"="([^"]*)"', out)
+    m = re.search(rf'"{key}"="([^"]*)"', out)
     return m.group(1) if m else None
 
 

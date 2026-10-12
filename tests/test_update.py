@@ -317,3 +317,19 @@ def test_restart_into_tmux_refuses_a_server_that_cannot_script_iterm(monkeypatch
     monkeypatch.setattr(cu.os, "kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("killed")))
     ok, detail = cu.restart_into_tmux(300, "TAB", "/w", "C5", title="vision")
     assert not ok and detail["step"] == "check" and "iTerm2" in detail["why"]
+
+
+def test_front_app_gives_the_name_or_the_bundle_id(monkeypatch):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        out = {"front": "ASN:0x0-0x1234:\n",
+               "name": '"LSDisplayName"="iTerm2"\n',
+               "bundleid": '"CFBundleIdentifier"="com.googlecode.iterm2"\n'}
+        key = "front" if argv[1] == "front" else argv[3]
+        return subprocess.CompletedProcess(argv, 0, out[key], "")
+
+    monkeypatch.setattr(cu.subprocess, "run", run)
+    assert cu.front_app() == "iTerm2"
+    assert cu.front_app(bundle_id=True) == "com.googlecode.iterm2"
