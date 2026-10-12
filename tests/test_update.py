@@ -333,3 +333,48 @@ def test_front_app_gives_the_name_or_the_bundle_id(monkeypatch):
     monkeypatch.setattr(cu.subprocess, "run", run)
     assert cu.front_app() == "iTerm2"
     assert cu.front_app(bundle_id=True) == "com.googlecode.iterm2"
+
+
+def _assistant(model, effort, *, requested=None, sidechain=False):
+    r = {"type": "assistant", "isSidechain": sidechain, "message": {"model": model}, "effort": effort}
+    if requested:
+        r["requestedModel"] = requested
+    return json.dumps(r)
+
+
+def test_model_of_reads_the_newest_turn_of_the_chat_itself(tmp_path):
+    t = tmp_path / "c.jsonl"
+    t.write_text("\n".join([
+        _assistant("claude-opus-5-5", "medium"),
+        json.dumps({"type": "user", "message": {"content": "/model"}}),
+        _assistant("claude-sonnet-5", "high", requested="claude-sonnet-5[1m]"),
+        _assistant("claude-haiku-5-5", "low", sidechain=True),      # a subagent's turn
+        _assistant("<synthetic>", None),
+    ]) + "\n")
+    assert cu.model_of(t) == ("claude-sonnet-5[1m]", "high")
+    assert cu.model_of(None) == (None, None)
+    assert cu.model_of(tmp_path / "missing.jsonl") == (None, None)
+    (tmp_path / "old.jsonl").write_text(_assistant("claude-opus-4-8", None) + "\n")
+    assert cu.model_of(tmp_path / "old.jsonl") == ("claude-opus-4-8", None)
+
+
+def test_model_of_reads_backwards_across_blocks(tmp_path):
+    t = tmp_path / "long.jsonl"
+    filler = json.dumps({"type": "user", "message": {"content": "x" * 300}})
+    t.write_text(_assistant("claude-opus-5-5", "xhigh") + "\n" + "\n".join([filler] * 50) + "\n")
+    lines = list(cu._lines_from_end(t, block=97))
+    assert len(lines) == 51 and json.loads(lines[-1])["effort"] == "xhigh"
+    assert cu.model_of(t) == ("claude-opus-5-5", "xhigh")
+
+
+def test_resume_line_keeps_the_model_and_effort_chosen_inside_the_chat():
+    started = "claude --allow-dangerously-skip-permissions -n ops --model opus --effort medium"
+    assert (cu.resume_line(started, "U", model="claude-sonnet-5", effort="high")
+            == "claude --allow-dangerously-skip-permissions -n ops --model claude-sonnet-5 "
+               "--effort high --resume U")
+    assert (cu.resume_line("claude -n ops", "U", model="claude-opus-5-5[1m]", effort="xhigh")
+            == "claude -n ops --model 'claude-opus-5-5[1m]' --effort xhigh --resume U")
+    assert cu.resume_line("claude -n ops --model opus", "U") == "claude -n ops --model opus --resume U"
+    # a settings file names its own model, so a chat started with one keeps it
+    assert (cu.resume_line("claude --settings /s.json -n ops", "U", model="local-model", effort="high")
+            == "claude --settings /s.json -n ops --resume U")

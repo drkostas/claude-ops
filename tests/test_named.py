@@ -48,3 +48,12 @@ def test_project_for_is_the_closest_folder():
     assert sessions.project_for("/w/src", projects) == "web"
     assert sessions.project_for("/wx", projects) is None
     assert sessions.project_for(None, projects) is None
+
+
+def test_resume_command_reopens_on_the_model_and_effort_it_last_ran_on():
+    assert (chat.resume_command("ops", "ID", None, remote_control=False, model="claude-sonnet-5",
+                                effort="high")
+            == "claude --resume ID -n ops --model claude-sonnet-5 --effort high")
+    assert (chat.resume_command("ops", "ID", None, remote_control=False, settings="/s.json",
+                                model="claude-sonnet-5", effort="high")
+            == "claude --settings /s.json --resume ID -n ops")
