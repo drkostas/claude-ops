@@ -185,11 +185,16 @@ def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
 
 
 def resume_command(name: str, chat_id: str, mode: str | None, *, remote_control: bool = True,
-                   settings: str | None = None) -> str:
+                   settings: str | None = None, model: str | None = None,
+                   effort: str | None = None) -> str:
     """The command that reopens conversation `chat_id` under the same name, in the mode given
-    (read a running chat's mode with `update.permission_mode` before ending it)."""
+    (read a running chat's mode with `update.permission_mode` before ending it). `model` and
+    `effort` reopen it on what it last ran on (`update.model_of`). With `settings`, the settings
+    file decides the model, so neither is added."""
     parts = (["claude"] + (["--settings", settings] if settings else [])
              + ["--resume", chat_id, "-n", name])
+    if not settings:
+        parts += (["--model", model] if model else []) + (["--effort", effort] if effort else [])
     if remote_control:
         parts += ["--remote-control", name]
     if mode:

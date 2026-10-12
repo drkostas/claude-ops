@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `update.model_of` reads the model and effort level a chat last ran on from its transcript, and every restart and `chat.resume_command` pass them on (`--model`, `--effort`), so a model or effort chosen inside the chat survives a restart. A chat started with `--settings` keeps the model its settings file names
 - `update.restart_into_tmux` moves a chat from an iTerm2 tab into tmux shown in that same tab, and `update.restart_tmux` restarts a tmux chat inside its own pane. Neither opens a window
 - `update.ready` puts every check on a chat in one place, adds `update.background_agent` (a background agent keeps a chat busy), and names a question waiting for the person instead of calling the chat "working"
 - `update.remote_control_of` and `update.title_of` read a chat's Remote Control state and title from its transcript, so a restart keeps Remote Control

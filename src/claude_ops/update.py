@@ -150,6 +150,56 @@ def remote_control_of(path: Path | None) -> bool:
     return newest is not None and "is active" in newest
 
 
+def _lines_from_end(path: Path, block: int = 1 << 20):
+    """The file's lines, newest first, read backwards in blocks so a long transcript is not read
+    whole to find its last few records."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        end, rest = f.tell(), b""
+        while end > 0:
+            start = max(0, end - block)
+            f.seek(start)
+            chunk = f.read(end - start) + rest
+            lines = chunk.split(b"\n")
+            rest = lines.pop(0) if start > 0 else b""
+            for line in reversed(lines):
+                if line.strip():
+                    yield line.decode("utf-8", "replace")
+            end = start
+
+
+def model_of(path: Path | None) -> tuple[str | None, str | None]:
+    """The model and the effort level the conversation's newest turn ran on, each None when the
+    transcript does not say.
+
+    A restart repeats the flags the chat was started with, so a model or effort chosen inside the
+    chat (`/model`, `/effort`) was lost and the chat came back on the default. Claude Code writes
+    both on every assistant record, so the restart reads the newest one. The model is
+    `requestedModel`, the exact value the chat asked for (a context suffix such as "[1m]"
+    included), or `message.model` from versions that do not write it. Turns of a subagent
+    (`isSidechain`) and synthetic messages are skipped. A model chosen after the chat's last answer
+    is not in the transcript yet, so it is not seen."""
+    if path is None:
+        return None, None
+    try:
+        for line in _lines_from_end(Path(path)):
+            if '"assistant"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("type") != "assistant" or d.get("isSidechain"):
+                continue
+            model = d.get("requestedModel") or (d.get("message") or {}).get("model")
+            if not model or model.startswith("<"):
+                continue
+            return model, d.get("effort") or None
+    except OSError:
+        pass
+    return None, None
+
+
 def title_of(path: Path | None) -> str | None:
     """The chat's own title (`/rename` or `-n`): its newest `custom-title` record."""
     if path is None:
@@ -191,12 +241,16 @@ def background_agent(chat_id: str, now: float | None = None, projects: Path = PR
 
 
 def resume_line(args: str | None, chat_id: str, mode: str | None = None,
-                remote_control: str | bool | None = None) -> str:
+                remote_control: str | bool | None = None, model: str | None = None,
+                effort: str | None = None) -> str:
     """The command that reopens this conversation with the flags it was started with.
 
     `args` is the process's command line (`ps -o args=`), and `mode` the permission mode it was
     in (from `permission_mode`). `remote_control` keeps Remote Control on for a chat that had it
-    without the flag (`remote_control_of`): a name, or True for an unnamed one."""
+    without the flag (`remote_control_of`): a name, or True for an unnamed one. `model` and
+    `effort` are what the chat last ran on (`model_of`), and they win over the start flags, so a
+    choice made inside the chat survives the restart. A chat started with `--settings` keeps the
+    model its settings file names."""
     argv = (args or "").split()
     out = ["claude"]
     if argv and Path(argv[0]).name == "claude":
@@ -212,6 +266,16 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
                 elif a not in out:
                     out.append(a)
             i += 1
+    def put(flag: str, value: str) -> None:
+        if flag in out:
+            out[out.index(flag) + 1] = value
+        else:
+            out.extend([flag, value])
+
+    if model and "--settings" not in out:
+        put("--model", model)
+    if effort and "--settings" not in out:
+        put("--effort", effort)
     if remote_control and "--remote-control" not in out:
         name = remote_control if isinstance(remote_control, str) else next(
             (out[k + 1] for k, a in enumerate(out[:-1]) if a in ("-n", "--name")), None)
@@ -428,6 +492,7 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
     mode = permission_mode(screen_of("iterm", session_id, env=env))
     args = process_args(pid, env=env)
     rc = remote_control_of(transcript_of(chat_id)) or None
+    model, effort = model_of(transcript_of(chat_id))
     try:
         os.kill(int(pid), signal.SIGTERM)
     except (OSError, TypeError, ValueError) as e:
@@ -442,7 +507,7 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
 
     if not _wait(at_shell, stop_s):
         return False, f"Claude did not stop within {int(stop_s)} seconds of being asked to"
-    cmd = resume_line(args, chat_id, mode, remote_control=rc)
+    cmd = resume_line(args, chat_id, mode, remote_control=rc, model=model, effort=effort)
     ok, detail = _inject.send_iterm(session_id, f"cd {shlex.quote(cwd)} && {cmd}", True, env=env)
     if not ok:
         return False, f"could not type the resume command ({detail})"
@@ -467,7 +532,9 @@ def restart_tmux(pid: int, name: str, chat_id: str, *, command: str | None = Non
     if command is None:
         mode = permission_mode(screen_of("tmux", name, env=env))
         rc = remote_control_of(transcript_of(chat_id)) or None
-        command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=rc)
+        model, effort = model_of(transcript_of(chat_id))
+        command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=rc,
+                              model=model, effort=effort)
     try:
         os.kill(int(pid), signal.SIGTERM)
     except (OSError, TypeError, ValueError) as e:
@@ -514,7 +581,9 @@ def restart_into_tmux(pid: int, session_id: str, cwd: str, chat_id: str, *,
     if name in _inject.tmux_sessions(env=env):
         return False, {"step": "check", "why": f"a tmux session called {name} already exists"}
     mode = permission_mode(screen_of("iterm", session_id, env=env))
-    command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=title or True)
+    model, effort = model_of(transcript_of(chat_id))
+    command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=title or True,
+                          model=model, effort=effort)
     try:
         os.kill(int(pid), signal.SIGTERM)
     except (OSError, TypeError, ValueError) as e:
