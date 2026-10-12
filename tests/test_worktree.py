@@ -66,7 +66,7 @@ def test_a_folder_that_is_not_a_repo_is_used_as_it_is(world):
     assert p["cwd"] == str(plain.resolve()) and p["worktree"] is None
 
 
-@pytest.mark.parametrize("name", ["latent_space", "Fix", "drlab-core"])
+@pytest.mark.parametrize("name", ["latent_space", "Fix", "ops-core"])
 def test_a_name_as_typed_is_kept(world, name):
     plain = world["base"] / "plain"
     plain.mkdir(exist_ok=True)

@@ -129,7 +129,7 @@ def remote_control_of(path: Path | None) -> bool:
 
     ⛔ A RESTART DROPPED REMOTE CONTROL THAT WAS SWITCHED ON INSIDE THE CHAT (2026-10-11). A chat
     started without --remote-control and given /remote-control later came back from a restart
-    without it, because the resume only repeats the start flags, and it left his phone's list.
+    without it, because the resume only repeats the start flags, and it dropped out of the session list in the Claude app.
     Claude Code writes the state into the transcript, so the restart reads it there."""
     if path is None:
         return False
@@ -255,8 +255,8 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
     what is on its screen, its transcript and process (`idle`), and its background agents.
 
     A question on its screen is named first. While Claude waits for an answer the turn has not
-    ended, and `idle` alone said "it is working" for a chat that had waited hours for the person
-    (drlab-statistics, 2026-10-11). Restarting it would lose the question, so it waits either way,
+    ended, and `idle` alone said "it is working" for a chat that had waited hours for the person.
+    Restarting it would lose the question, so it waits either way,
     but the reason has to say who it is waiting for."""
     prompt = empty_prompt(screen)
     if not prompt[0] and prompt[1] == ASKING:

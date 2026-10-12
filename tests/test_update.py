@@ -175,7 +175,7 @@ def test_remote_control_of_reads_the_newest_bridge_status(tmp_path):
     blocked = {"type": "system", "subtype": "informational",
                "content": "Remote Control not started here · another Claude Code has it"}
     t.write_text(json.dumps(active) + "\n" + json.dumps(blocked) + "\n")
-    # the newest bridge_status decides; a note that it could not start here is not him turning it off
+    # the newest bridge_status decides; a note that it could not start here is not the user turning it off
     assert cu.remote_control_of(t) is True
     t.write_text(json.dumps(active) + "\n" + json.dumps(
         {"type": "system", "subtype": "bridge_status", "content": "/remote-control is off"}) + "\n")
@@ -187,9 +187,9 @@ def test_remote_control_of_reads_the_newest_bridge_status(tmp_path):
 
 
 def test_resume_line_keeps_remote_control_switched_on_inside_the_chat():
-    started = "claude --allow-dangerously-skip-permissions -n drlab-core"
+    started = "claude --allow-dangerously-skip-permissions -n ops-core"
     assert (cu.resume_line(started, "U", remote_control=True)
-            == "claude --allow-dangerously-skip-permissions -n drlab-core --remote-control drlab-core --resume U")
+            == "claude --allow-dangerously-skip-permissions -n ops-core --remote-control ops-core --resume U")
     assert (cu.resume_line("claude --allow-dangerously-skip-permissions", "U", "bypassPermissions",
                            remote_control=True)
             == "claude --allow-dangerously-skip-permissions --remote-control --permission-mode bypassPermissions --resume U")
@@ -212,8 +212,8 @@ def test_title_of_is_the_newest_custom_title(tmp_path):
     t = tmp_path / "c.jsonl"
     t.write_text("\n".join(json.dumps(r) for r in (
         {"type": "custom-title", "customTitle": "old"}, {"type": "user"},
-        {"type": "custom-title", "customTitle": "drlab-statistics"})) + "\n")
-    assert cu.title_of(t) == "drlab-statistics"
+        {"type": "custom-title", "customTitle": "stats-chat"})) + "\n")
+    assert cu.title_of(t) == "stats-chat"
     assert cu.title_of(None) is None and cu.title_of(tmp_path / "missing.jsonl") is None
 
 
@@ -251,7 +251,7 @@ def test_ready_names_a_question_waiting_for_the_person(tmp_path, monkeypatch):
 
 
 def test_tmux_name_keeps_only_safe_characters():
-    assert cu.tmux_name("drlab-core", "abc") == "claude-drlab-core"
+    assert cu.tmux_name("ops-core", "abc") == "claude-ops-core"
     assert cu.tmux_name("my.chat:1", "abc") == "claude-my-chat-1"
     assert cu.tmux_name(None, "2296e6b7-452a") == "claude-2296e6b7"
 
@@ -303,7 +303,7 @@ def test_restart_into_tmux_types_one_line_into_the_same_tab(monkeypatch):
 
     monkeypatch.setattr(cu._inject, "send_iterm", send)
     monkeypatch.setattr(cu.time, "sleep", lambda s: None)
-    ok, detail = cu.restart_into_tmux(300, "TAB", "/work/drlab", "C5", title="vision", stop_s=5, back_s=5)
+    ok, detail = cu.restart_into_tmux(300, "TAB", "/work/project", "C5", title="vision", stop_s=5, back_s=5)
     assert ok and detail == {"tmux": "claude-vision", "tab": "TAB", "shown": "plain tmux"}
     assert killed == [300] and len(typed) == 1 and typed[0][0] == "TAB"
     line = typed[0][1]

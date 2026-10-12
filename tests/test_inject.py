@@ -69,8 +69,8 @@ def test_no_session_and_failed(tmp_path):
 
 def test_tmux_lists_survive_a_process_with_no_locale(monkeypatch):
     """A launchd agent has no locale, and tmux then prints the tab in a -F format as `_`, so a
-    session list came back as `claude-x_2.1.296_1` and no session could be found by name
-    (drlab, 2026-10-10). Every tmux call passes -u, which keeps the tab whatever the locale."""
+    session list came back as `claude-x_2.1.296_1` and no session could be found by name.
+    Every tmux call passes -u, which keeps the tab whatever the locale."""
     import subprocess
     seen = []
 

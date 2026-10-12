@@ -8,7 +8,7 @@ from the remote's default branch on a branch `chat/<name>`.
   `.git/info/exclude` (a local CLAUDE.md, say) is not in it, and the chat's memory lives in a
   project folder named after the worktree's path, not the repo's. Both are linked here.
 - `claude --worktree` is not used: it puts the worktree inside the repo, which inside a synced
-  folder (Insync, Dropbox) would sync every worktree.
+  folder (Dropbox, Google Drive) would sync every worktree.
 - Claude Code's folder name for a path changed. Older versions turned only "/" into "-", newer ones
   turn "." into "-" too. Memory is looked for under both, and worktree paths have no dots.
 - The name is used as given. A disk that ignores case would let `Fix` and `fix` share a folder, so
