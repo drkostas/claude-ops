@@ -12,7 +12,10 @@ dozen chats open at once.
 - Never over a half-written message. A chat at its prompt reads as idle while a person types into
   it, and a paste would join their draft and send both. `may_be_typing` and `empty_prompt` check.
 - Never /exit. A pasted /exit can open Claude Code's own exit dialog and leave a choice on screen
-  that belongs to the person. `restart_iterm` sends SIGTERM; the conversation is on disk already.
+  that belongs to the person. `restart_iterm`, `restart_tmux` and `restart_into_tmux` send SIGTERM;
+  the conversation is on disk already.
+- Never a new window. A tmux chat restarts inside its own pane, and a chat moves from an iTerm2 tab
+  into tmux inside that same tab.
 - The permission mode does not survive a resume. It is read from the footer before the restart
   and passed back with --permission-mode.
 """
@@ -39,6 +42,8 @@ QUIET_S = 30
 QUIET_UNHOOKED_S = 600
 #: someone may be typing when the terminal is in front and they touched the Mac this recently
 TYPING_WINDOW_S = 120
+#: a background agent whose file was written this recently is still working
+AGENT_QUIET_S = 120
 PROJECTS = Path.home() / ".claude" / "projects"
 
 
@@ -145,6 +150,46 @@ def remote_control_of(path: Path | None) -> bool:
     return newest is not None and "is active" in newest
 
 
+def title_of(path: Path | None) -> str | None:
+    """The chat's own title (`/rename` or `-n`): its newest `custom-title` record."""
+    if path is None:
+        return None
+    title = None
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if '"custom-title"' not in line:
+                    continue
+                try:
+                    title = json.loads(line).get("customTitle") or title
+                except ValueError:
+                    continue
+    except OSError:
+        return None
+    return title
+
+
+def background_agent(chat_id: str, now: float | None = None, projects: Path = PROJECTS,
+                     quiet_s: float = AGENT_QUIET_S) -> str | None:
+    """The name of a background agent this chat started that is still writing, or None.
+
+    ⛔ A BACKGROUND AGENT IS NOT A SHELL (2026-10-11). It runs inside the chat's own Claude process
+    and writes to <transcript folder>/<chat id>/subagents/, not to the chat's transcript, so a chat
+    whose turn had ended read as idle while its agent worked, and a restart would have ended the
+    agent with the process. A subagent file written in the last `quiet_s` counts as working."""
+    t = transcript_of(chat_id, projects)
+    if t is None:
+        return None
+    now = time.time() if now is None else now
+    for f in sorted((t.parent / chat_id / "subagents").glob("*.jsonl")):
+        try:
+            if now - f.stat().st_mtime < quiet_s:
+                return f.stem
+        except OSError:
+            continue
+    return None
+
+
 def resume_line(args: str | None, chat_id: str, mode: str | None = None,
                 remote_control: str | bool | None = None) -> str:
     """The command that reopens this conversation with the flags it was started with.
@@ -180,6 +225,9 @@ DIALOG = ("enter to confirm", "esc to cancel", "esc to discard", "do you want", 
           "trust this folder", "press enter", "(y/n)")
 
 
+ASKING = "Claude is asking something on its screen"
+
+
 def empty_prompt(screen: str | None) -> tuple[bool, str]:
     """Is Claude showing its empty input line, with nothing asked on screen?
 
@@ -191,13 +239,36 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     lines = [ln.rstrip() for ln in screen.splitlines() if ln.strip()]
     tail = "\n".join(lines[-15:]).lower()
     if any(d in tail for d in DIALOG):
-        return False, "Claude is asking something on its screen"
+        return False, ASKING
     prompts = [ln.strip() for ln in lines[-8:] if ln.strip().startswith("❯")]
     if not prompts:
         return False, "Claude's input line is not on its screen"
     if prompts[-1] != "❯":
         return False, "something is typed in its input line"
     return True, "its input line is empty"
+
+
+def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
+          turn_ended_at: dt.datetime | None, now: dt.datetime, *,
+          projects: Path = PROJECTS) -> tuple[bool, str]:
+    """(may this chat be restarted or typed into now, why). Everything a chat produces is read:
+    what is on its screen, its transcript and process (`idle`), and its background agents.
+
+    A question on its screen is named first. While Claude waits for an answer the turn has not
+    ended, and `idle` alone said "it is working" for a chat that had waited hours for the person
+    (drlab-statistics, 2026-10-11). Restarting it would lose the question, so it waits either way,
+    but the reason has to say who it is waiting for."""
+    prompt = empty_prompt(screen)
+    if not prompt[0] and prompt[1] == ASKING:
+        return False, "Claude is asking a question on its screen and waits for an answer"
+    ok, why = idle(pid, procs, last_activity(transcript_of(chat_id, projects)), turn_ended_at,
+                   now, prompt_on_screen=prompt[0])
+    if not ok:
+        return ok, why
+    agent = background_agent(chat_id, now.timestamp(), projects)
+    if agent:
+        return False, f"a background agent it started is still working ({agent})"
+    return prompt
 
 
 ITERM_SCREEN = """on run argv
@@ -373,3 +444,89 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
         return s is not None and _inject.looks_like_claude("iterm", s)
 
     return _wait(back, back_s), f"iTerm session {session_id} resumed"
+
+
+def restart_tmux(pid: int, name: str, chat_id: str, *, command: str | None = None,
+                 env: Mapping[str, str] | None = None, stop_s: float = 30,
+                 back_s: float = 90) -> tuple[bool, str]:
+    """End the chat in tmux session `name` and resume the same conversation INSIDE ITS OWN PANE.
+
+    The pane's shell outlives Claude (`chat.new` and `restart_into_tmux` both start a shell and type
+    claude into it), so the session, the terminal showing it and its desktop all stay as they are.
+    ⛔ This used to end the session and start a new one, which opened a new window for a chat that
+    had been shown in a tab the person chose (2026-10-11). `command` is the resume line when the
+    caller knows better (a chat on a local model); by default it is built from the process."""
+    if command is None:
+        mode = permission_mode(screen_of("tmux", name, env=env))
+        rc = remote_control_of(transcript_of(chat_id)) or None
+        command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=rc)
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except (OSError, TypeError, ValueError) as e:
+        return False, f"could not end the Claude process in {name}: {e}"
+
+    def pane():
+        return _inject.tmux_sessions(env=env).get(name)
+
+    if not _wait(lambda: pane() is not None and not _inject.looks_like_claude("tmux", pane()), stop_s):
+        return False, f"Claude did not stop in {name} within {int(stop_s)} seconds"
+    ok, how = _inject.send_tmux(name, command, True, env=env)
+    if not ok:
+        return False, f"could not type the resume line into {name} ({how})"
+    if not _wait(lambda: pane() is not None and _inject.looks_like_claude("tmux", pane()), back_s):
+        return False, f"{name} did not come back to Claude within {int(back_s)} seconds"
+    return True, f"tmux {name} resumed in its own pane"
+
+
+def tmux_name(title: str | None, chat_id: str) -> str:
+    """The tmux session for a chat: claude-<its title>, or claude-<the start of its id>. Only
+    letters, digits, - and _, because tmux reads . and : in a target."""
+    return "claude-" + re.sub(r"[^A-Za-z0-9_-]", "-", title or chat_id[:8] or "chat")
+
+
+def restart_into_tmux(pid: int, session_id: str, cwd: str, chat_id: str, *,
+                      title: str | None = None, cc: bool = False,
+                      env: Mapping[str, str] | None = None, stop_s: float = 30,
+                      back_s: float = 90) -> tuple[bool, dict]:
+    """Move a chat that runs in an iTerm2 tab into a tmux session shown in THAT SAME TAB.
+
+    It is a restart with a different last line: the mode and flags are read, Claude gets SIGTERM,
+    and once the tab is back at its shell one line (`chat.attach_line`) starts the session, resumes
+    the conversation in it and attaches the tab. No window is made or moved. The caller decides
+    whether the chat may be touched (`ready`, `may_be_typing`). Refused when the running tmux
+    server cannot script iTerm2 (`chat.server_context`), because the chat would lose iTerm2's
+    permissions. Remote Control comes back named after the chat, since a chat in tmux is reached
+    by name. The answer is (moved, detail): "tmux", "tab" and "shown", or "step" and "why"."""
+    context = _chat.server_context(env=env)
+    if context not in ("none", "iterm"):
+        return False, {"step": "check", "why": f"the tmux server cannot script iTerm2 ({context}), "
+                                               "so the chat would lose iTerm2's permissions"}
+    title = title or title_of(transcript_of(chat_id))
+    name = tmux_name(title, chat_id)
+    if name in _inject.tmux_sessions(env=env):
+        return False, {"step": "check", "why": f"a tmux session called {name} already exists"}
+    mode = permission_mode(screen_of("iterm", session_id, env=env))
+    command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=title or True)
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except (OSError, TypeError, ValueError) as e:
+        return False, {"step": "stop", "why": f"could not end the Claude process: {e}"}
+
+    def at_shell():
+        s = _inject.iterm_sessions(env=env).get(session_id)
+        return s is not None and not _inject.looks_like_claude("iterm", s)
+
+    if not _wait(at_shell, stop_s):
+        return False, {"step": "stop", "why": f"Claude did not stop within {int(stop_s)} seconds"}
+    sent, how = _inject.send_iterm(session_id, _chat.attach_line(cwd, name, command, cc), True, env=env)
+    if not sent:
+        return False, {"step": "type", "why": f"could not type into the tab ({how})"}
+
+    def back():
+        s = _inject.tmux_sessions(env=env).get(name)
+        return s is not None and _inject.looks_like_claude("tmux", s)
+
+    if not _wait(back, back_s):
+        return False, {"step": "resume", "tmux": name,
+                       "why": f"the chat did not come back in tmux within {int(back_s)} seconds"}
+    return True, {"tmux": name, "tab": session_id, "shown": "iTerm tmux mode" if cc else "plain tmux"}

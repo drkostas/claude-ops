@@ -43,3 +43,31 @@ def test_enter_is_not_pressed_unless_yes_is_selected(monkeypatch):
     monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **k: sent.append(cmd[-1]))
     assert chat.answer_trust("claude-x") is False
     assert sent == ["Down"]
+
+
+def test_in_tmux_walks_up_to_a_tmux_server():
+    procs = {1: {"ppid": 0, "comm": "launchd"}, 50: {"ppid": 1, "comm": "/opt/homebrew/bin/tmux"},
+             51: {"ppid": 50, "comm": "-zsh"}, 52: {"ppid": 51, "comm": "claude"},
+             60: {"ppid": 1, "comm": "iTerm2"}, 61: {"ppid": 60, "comm": "-zsh"}, 62: {"ppid": 61, "comm": "claude"}}
+    assert chat.in_tmux(52, procs) is True
+    assert chat.in_tmux(62, procs) is False
+    assert chat.in_tmux(99, procs) is None
+
+
+def test_attach_line_keeps_the_tab_and_its_name():
+    line = chat.attach_line("/work/my dir", "claude-x", "claude --resume U")
+    assert line.startswith("cd '/work/my dir' && ")
+    assert "-e ITERM_SESSION_ID=" in line and "send-keys -t claude-x -l 'claude --resume U'" in line
+    for opt in ("status off", "mouse on", "set-titles on", "'#{pane_title}'", "focus-events on"):
+        assert opt in line, opt
+    assert line.endswith("attach -t claude-x") and "-CC" not in line
+    cc = chat.attach_line("/w", "claude-x", "claude", cc=True)
+    assert cc.endswith("-CC attach -t claude-x") and "set-titles" not in cc
+
+
+def test_server_context_is_none_without_a_server(monkeypatch):
+    class R:
+        returncode = 1
+        stdout = ""
+    monkeypatch.setattr(chat.subprocess, "run", lambda *a, **k: R())
+    assert chat.server_context() == "none"

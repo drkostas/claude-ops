@@ -16,8 +16,10 @@ iTerm2's tmux integration (`tmux -CC attach`). Lessons kept from real use:
 """
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
+import tempfile
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -218,6 +220,87 @@ def pane_owner(pid: int, *, env: Mapping[str, str] | None = None) -> str | None:
         cur = int(out) if out.isdigit() else 0
         seen += 1
     return None
+
+
+def in_tmux(pid: int, procs: dict[int, dict]) -> bool | None:
+    """Whether a process runs inside a tmux pane: one of its parents is a tmux server. None when
+    the process is not in `procs` (`config.processes()`), which is unknown.
+
+    The cheap form of `pane_owner`: no tmux or ps call per process, so a caller that already holds
+    the process table can ask it of every chat. A tmux client (`tmux attach` in an iTerm tab) is
+    not a parent of claude, so a chat shown through tmux is still found by its server."""
+    if pid not in procs:
+        return None
+    seen, p = set(), procs[pid].get("ppid")
+    while p and p not in seen and p in procs:
+        seen.add(p)
+        if Path(procs[p].get("comm") or "").name.lower() == "tmux":
+            return True
+        p = procs[p].get("ppid")
+    return False
+
+
+def plain_look(name: str) -> list[list[str]]:
+    """The tmux commands that make plain tmux (shown with `tmux attach`, not iTerm's tmux mode)
+    look and behave like the terminal tab it is shown in.
+
+    - No status bar, so the tab looks as it did.
+    - Mouse on, because iTerm cannot scroll a plain tmux screen and the wheel then scrolls tmux's.
+    - The pane's title goes to the terminal. Claude Code titles its terminal with the chat's name
+      ("✳ my-chat") by an escape code, and inside plain tmux that title stays on tmux's pane: every
+      tab read "cd (tmux)" until set-titles handed it on (2026-10-11).
+    - focus-events, which Claude Code asks for inside tmux. It is a server option."""
+    return [[TMUX, "-u", "set-option", "-t", name, "status", "off"],
+            [TMUX, "-u", "set-option", "-t", name, "mouse", "on"],
+            [TMUX, "-u", "set-option", "-t", name, "set-titles", "on"],
+            [TMUX, "-u", "set-option", "-t", name, "set-titles-string", "#{pane_title}"],
+            [TMUX, "-u", "set-option", "-s", "focus-events", "on"]]
+
+
+def attach_line(cwd: str, name: str, resume: str, cc: bool = False) -> str:
+    """One shell line, typed into a terminal tab, that starts tmux session `name` in `cwd`, types
+    `resume` into it and shows the session in that same tab.
+
+    The session gets a shell first and the command is typed into it, as `new` does, so the session
+    outlives Claude and a later restart can resume in the same pane. ITERM_SESSION_ID is cleared,
+    because a pane must never claim the tab's iTerm session as its own. `cc` shows the session
+    through iTerm's tmux mode instead, which opens it as a new tab or window."""
+    q = shlex.quote
+    look = "" if cc else "".join("&& " + shlex.join(c) + " " for c in plain_look(name))
+    attach = f"{TMUX} -u {'-CC ' if cc else ''}attach -t {q(name)}"
+    return (f"cd {q(cwd)} && {TMUX} -u new-session -d -s {q(name)} -c {q(cwd)} -e ITERM_SESSION_ID= "
+            f"{look}&& {TMUX} -u send-keys -t {q(name)} -l {q(resume)} "
+            f"&& {TMUX} -u send-keys -t {q(name)} Enter && {attach}")
+
+
+def server_context(*, env: Mapping[str, str] | None = None) -> str:
+    """Whose context the running tmux server has: "none" (no server; the next one starts wherever
+    it is started from), "iterm" (it can script iTerm2), "outside" (it cannot), or "unknown".
+
+    ⛔ EVERYTHING IN A TMUX SERVER RUNS IN THE CONTEXT OF WHATEVER STARTED THE SERVER. One started by
+    a background job (launchd) cannot script iTerm2, and the macOS permissions its chats ask for
+    are judged for that job. A chat moved from an iTerm2 tab into such a server would lose what it
+    had in iTerm2, so a move asks this first. The question is asked from inside the server."""
+    if subprocess.run([TMUX, "-u", "ls"], capture_output=True, text=True, env=env).returncode != 0:
+        return "none"
+    fd, path = tempfile.mkstemp(prefix="claude-ops-tmux-context-")
+    os.close(fd)
+    try:
+        # run-shell runs in the server itself; with no client attached it shows nothing, so the
+        # answer is written to a file
+        subprocess.run([TMUX, "-u", "run-shell",
+                        f"osascript -e 'tell application \"iTerm2\" to count windows' > {path} 2>&1"],
+                       capture_output=True, text=True, env=env, timeout=30)
+        with open(path) as f:
+            out = f.read().strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return "iterm" if out.isdigit() else "outside"
 
 
 def at_prompt(name: str, wait: float = 90.0, *, env: Mapping[str, str] | None = None) -> bool:

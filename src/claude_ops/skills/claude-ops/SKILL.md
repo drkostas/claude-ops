@@ -221,7 +221,9 @@ config.snapshot()                          # fingerprints of settings, MCP serve
 update.idle(pid, procs, update.last_activity(update.transcript_of(chat_id)), turn_ended_at, now)
 update.may_be_typing(update.seconds_since_input(), update.front_app())
 update.empty_prompt(update.screen_of("iterm", session_id))
+update.ready(pid, procs, chat_id, update.screen_of(kind, handle), turn_ended_at, now)  # all of the checks above
 update.restart_iterm(pid, session_id, cwd, chat_id)    # same conversation, same flags, same mode
+update.restart_tmux(pid, "claude-<name>", chat_id)     # the same, inside the chat's own tmux pane
 ```
 
 - Compare fingerprints, never file times. Claude Code rewrites `~/.claude.json` many times an hour.
@@ -240,8 +242,42 @@ update.restart_iterm(pid, session_id, cwd, chat_id)    # same conversation, same
   footer first. `resume_line` keeps the start flags it knows (name, Remote Control, model, the skip
   permission flags) and drops the rest, because `ps` prints a first prompt without its quotes and
   its first word would arrive as a new message.
+- A chat is also busy while a background agent it started writes (`background_agent`: a file
+  under `<chat id>/subagents/` written in the last two minutes). The agent runs inside the chat's
+  process and dies with it, and it never writes to the chat's own transcript.
+- A chat waiting for an answer to a question has not ended its turn. `ready` says so in those
+  words, rather than "working", so whoever reads the reason knows the person is the one to act.
+- `restart_tmux` restarts a tmux chat inside its own pane: SIGTERM, wait for the pane's shell, type
+  the resume line there. Never end the session and make a new one: that opens a new window for a
+  chat the person had in a tab of their choosing.
 - `restart_iterm` checks only that Claude is back. Check the new process runs the installed version
   before you call the update done, and wait for the new transcript before sending it a note.
+
+## Move a running chat into tmux, inside its own tab
+
+A chat started in an iTerm2 tab can move into tmux without a new window: it is a restart whose
+last line starts a session and attaches the same tab to it.
+
+```python
+from claude_ops import chat, update
+update.restart_into_tmux(pid, iterm_session_id, cwd, chat_id, title="vision")
+# (True, {"tmux": "claude-vision", "tab": "...", "shown": "plain tmux"}) or (False, {"step", "why"})
+chat.in_tmux(pid, procs)          # is a process inside a tmux pane (from the process table)
+chat.server_context()             # "none", "iterm", "outside" or "unknown"
+```
+
+- Check `ready` and `may_be_typing` first. A background command or agent dies with the process,
+  so a chat with one waits.
+- The session must have iTerm2's context. Everything in a tmux server runs in the context of
+  whatever started the server, and one started by a launchd job cannot script iTerm2, so the
+  chat would lose iTerm2's permissions. `restart_into_tmux` asks `server_context` and refuses
+  "outside". With no server running, the line typed into the tab starts one there, inside iTerm2.
+- Plain tmux stays in the tab. iTerm2's tmux mode (`-CC`) shows the session as a new tab or
+  window and leaves the old tab behind, so it is not the default.
+- `chat.plain_look` makes the tab look and behave as before: no status bar, the mouse wheel
+  scrolls tmux's history, and the pane's title (the chat's name, set by Claude Code) is passed to
+  the tab. Without set-titles every moved tab read "cd (tmux)".
+- Remote Control comes back named after the chat (`title_of` reads the chat's own title).
 
 ## Give a chat its own worktree
 
