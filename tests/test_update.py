@@ -199,3 +199,137 @@ def test_resume_line_keeps_remote_control_switched_on_inside_the_chat():
     assert (cu.resume_line("claude -n x --remote-control x", "U", remote_control=True)
             == "claude -n x --remote-control x --resume U")
     assert cu.resume_line("claude -n x", "U") == "claude -n x --resume U"
+
+
+def _chat_dir(tmp_path, chat_id="C1"):
+    proj = tmp_path / "projects" / "-work-x"
+    proj.mkdir(parents=True)
+    (proj / f"{chat_id}.jsonl").write_text(json.dumps({"type": "user", "timestamp": "2026-10-09T11:00:00Z"}) + "\n")
+    return tmp_path / "projects", proj
+
+
+def test_title_of_is_the_newest_custom_title(tmp_path):
+    t = tmp_path / "c.jsonl"
+    t.write_text("\n".join(json.dumps(r) for r in (
+        {"type": "custom-title", "customTitle": "old"}, {"type": "user"},
+        {"type": "custom-title", "customTitle": "drlab-statistics"})) + "\n")
+    assert cu.title_of(t) == "drlab-statistics"
+    assert cu.title_of(None) is None and cu.title_of(tmp_path / "missing.jsonl") is None
+
+
+def test_a_background_agent_keeps_a_chat_busy(tmp_path):
+    projects, proj = _chat_dir(tmp_path)
+    assert cu.background_agent("C1", projects=projects) is None
+    sub = proj / "C1" / "subagents"
+    sub.mkdir(parents=True)
+    f = sub / "agent-a1.jsonl"
+    f.write_text("{}\n")
+    assert cu.background_agent("C1", projects=projects) == "agent-a1"
+    old = f.stat().st_mtime - 3600
+    import os
+    os.utime(f, (old, old))
+    assert cu.background_agent("C1", projects=projects) is None
+
+
+def test_ready_names_a_question_waiting_for_the_person(tmp_path, monkeypatch):
+    projects, _ = _chat_dir(tmp_path)
+    asking = "❯ 1. Digest them (Recommended)\n  2. Push them too\nEnter to select · Esc to cancel\n"
+    ok, why = cu.ready(100, MCP_ONLY, "C1", asking, ago(3600), NOW, projects=projects)
+    assert not ok and "question" in why
+    monkeypatch.setattr(cu, "last_activity", lambda p: ago(120))
+    ok, why = cu.ready(100, MCP_ONLY, "C1", "ok\n❯ \n", ago(110), NOW, projects=projects)
+    assert ok, why
+    assert not cu.ready(100, WITH_CMD, "C1", "ok\n❯ \n", ago(110), NOW, projects=projects)[0]
+    agent = projects / "-work-x" / "C1" / "subagents"
+    agent.mkdir(parents=True)
+    (agent / "agent-b2.jsonl").write_text("{}\n")
+    monkeypatch.setattr(cu.time, "time", lambda: NOW.timestamp())
+    import os
+    os.utime(agent / "agent-b2.jsonl", (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    ok, why = cu.ready(100, MCP_ONLY, "C1", "ok\n❯ \n", ago(110), NOW, projects=projects)
+    assert not ok and "agent-b2" in why
+
+
+def test_tmux_name_keeps_only_safe_characters():
+    assert cu.tmux_name("drlab-core", "abc") == "claude-drlab-core"
+    assert cu.tmux_name("my.chat:1", "abc") == "claude-my-chat-1"
+    assert cu.tmux_name(None, "2296e6b7-452a") == "claude-2296e6b7"
+
+
+def test_restart_tmux_resumes_inside_the_same_pane(monkeypatch):
+    killed, typed = [], []
+    state = {"claude": True}
+    monkeypatch.setattr(cu.os, "kill", lambda pid, sig: (killed.append(pid), state.update(claude=False)))
+    monkeypatch.setattr(cu._inject, "tmux_sessions", lambda env=None: {
+        "claude-x": {"name": "claude-x", "command": "2.1.296" if state["claude"] else "zsh"}})
+
+    def send(name, text, enter, env=None):
+        typed.append((name, text))
+        state["claude"] = True
+        return True, ""
+
+    monkeypatch.setattr(cu._inject, "send_tmux", send)
+    monkeypatch.setattr(cu.time, "sleep", lambda s: None)
+    ok, how = cu.restart_tmux(200, "claude-x", "U", command="claude --resume U -n x", stop_s=5, back_s=5)
+    assert ok and killed == [200] and typed == [("claude-x", "claude --resume U -n x")]
+    # no new session is made: the only tmux call that changes anything is the typing into its pane
+
+
+def test_restart_tmux_reports_a_claude_that_will_not_stop(monkeypatch):
+    monkeypatch.setattr(cu.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(cu._inject, "tmux_sessions", lambda env=None: {"claude-x": {"command": "2.1.296"}})
+    monkeypatch.setattr(cu.time, "sleep", lambda s: None)
+    ok, how = cu.restart_tmux(200, "claude-x", "U", command="claude", stop_s=0.01, back_s=0.01)
+    assert not ok and "did not stop" in how
+
+
+def test_restart_into_tmux_types_one_line_into_the_same_tab(monkeypatch):
+    killed, typed = [], []
+    state = {"claude": True, "tmux": False}
+    monkeypatch.setattr(cu._chat, "server_context", lambda env=None: "iterm")
+    monkeypatch.setattr(cu, "screen_of", lambda kind, h, env=None: "⏵⏵ accept edits on")
+    monkeypatch.setattr(cu, "process_args", lambda pid, env=None: "claude --allow-dangerously-skip-permissions")
+    monkeypatch.setattr(cu, "transcript_of", lambda cid, projects=None: None)
+    monkeypatch.setattr(cu.os, "kill", lambda pid, sig: (killed.append(pid), state.update(claude=False)))
+    monkeypatch.setattr(cu._inject, "iterm_sessions", lambda env=None: {
+        "TAB": {"name": "vision (node)" if state["claude"] else "vision (-zsh)"}})
+    monkeypatch.setattr(cu._inject, "tmux_sessions", lambda env=None: (
+        {"claude-vision": {"command": "2.1.296"}} if state["tmux"] else {}))
+
+    def send(sid, text, enter, env=None):
+        typed.append((sid, text))
+        state["tmux"] = True
+        return True, ""
+
+    monkeypatch.setattr(cu._inject, "send_iterm", send)
+    monkeypatch.setattr(cu.time, "sleep", lambda s: None)
+    ok, detail = cu.restart_into_tmux(300, "TAB", "/work/drlab", "C5", title="vision", stop_s=5, back_s=5)
+    assert ok and detail == {"tmux": "claude-vision", "tab": "TAB", "shown": "plain tmux"}
+    assert killed == [300] and len(typed) == 1 and typed[0][0] == "TAB"
+    line = typed[0][1]
+    assert "new-session -d -s claude-vision" in line and "attach -t claude-vision" in line
+    assert "set-titles on" in line and "--remote-control vision" in line
+    assert "--permission-mode acceptEdits" in line and "--resume C5" in line
+
+
+def test_restart_into_tmux_refuses_a_server_that_cannot_script_iterm(monkeypatch):
+    monkeypatch.setattr(cu._chat, "server_context", lambda env=None: "outside")
+    monkeypatch.setattr(cu.os, "kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("killed")))
+    ok, detail = cu.restart_into_tmux(300, "TAB", "/w", "C5", title="vision")
+    assert not ok and detail["step"] == "check" and "iTerm2" in detail["why"]
+
+
+def test_front_app_gives_the_name_or_the_bundle_id(monkeypatch):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        out = {"front": "ASN:0x0-0x1234:\n",
+               "name": '"LSDisplayName"="iTerm2"\n',
+               "bundleid": '"CFBundleIdentifier"="com.googlecode.iterm2"\n'}
+        key = "front" if argv[1] == "front" else argv[3]
+        return subprocess.CompletedProcess(argv, 0, out[key], "")
+
+    monkeypatch.setattr(cu.subprocess, "run", run)
+    assert cu.front_app() == "iTerm2"
+    assert cu.front_app(bundle_id=True) == "com.googlecode.iterm2"
