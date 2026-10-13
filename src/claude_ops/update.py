@@ -335,11 +335,13 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
     return prompt
 
 
+# The screen decides whether a chat is idle, so it must be the screen of the session whose id
+# matched: `(get ...)` holds ids, where the bare collections hold positions (see inject.py).
 ITERM_SCREEN = """on run argv
   tell application "iTerm2"
-    repeat with w in windows
-      repeat with t in tabs of w
-        repeat with s in sessions of t
+    repeat with w in (get windows)
+      repeat with t in (get tabs of w)
+        repeat with s in (get sessions of t)
           if (id of s as text) is (item 1 of argv) then return contents of s
         end repeat
       end repeat

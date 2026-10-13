@@ -34,15 +34,22 @@ TMUX = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
 OSASCRIPT = "/usr/bin/osascript"
 
 # The text is an argument, never part of the script, so quotes and backslashes need no escaping.
+#
+# Every loop takes `(get ...)` first. A loop over the bare `windows` collection makes the loop
+# variable a position ("item 1 of every session of item 2 of every tab of item 3 of every window")
+# that iTerm2 looks up again on every use, so a window that closes, or a tab that moves, between
+# the id check and the write sends the text, or the Enter half a second later, to another session.
+# `(get sessions of t)` is a fixed list of "session id ..." references: the write reaches that
+# session or fails.
 ITERM_SEND = """on run argv
   set wanted to item 1 of argv
   set payload to item 2 of argv
   set wantEnter to item 3 of argv
   with timeout of 30 seconds
     tell application "iTerm2"
-      repeat with w in windows
-        repeat with t in tabs of w
-          repeat with s in sessions of t
+      repeat with w in (get windows)
+        repeat with t in (get tabs of w)
+          repeat with s in (get sessions of t)
             if (id of s) is wanted then
               tell s to write text payload newline NO
               if wantEnter is "1" then
@@ -63,9 +70,9 @@ end run
 ITERM_LIST = """with timeout of 20 seconds
  tell application "iTerm2"
   set out to ""
-  repeat with w in windows
-   repeat with t in tabs of w
-    repeat with s in sessions of t
+  repeat with w in (get windows)
+   repeat with t in (get tabs of w)
+    repeat with s in (get sessions of t)
      set out to out & (id of s) & (ASCII character 9) & (name of s) & linefeed
     end repeat
    end repeat
