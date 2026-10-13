@@ -447,3 +447,14 @@ def test_unfinished_background_lists_commands_with_no_notification(tmp_path):
     assert got[0]["command"] == "watch-a.sh" and got[0]["description"] == "watch A" and got[0]["at"] == "t1"
     assert update.unfinished_background(None) == [] and update.unfinished_background(tmp_path / "x") == []
     assert update.unfinished_background(f, since="t2") == [], "a command started before `since` is not listed"
+
+
+def test_last_start_is_the_newest_session_start_record(tmp_path):
+    import json
+    from claude_ops import update
+    rows = [{"type": "attachment", "timestamp": "t1", "attachment": {"type": "hook_success", "hookName": "SessionStart:startup", "hookEvent": "SessionStart"}},
+            {"type": "user", "timestamp": "t2", "message": {"content": "SessionStart is just a word here"}},
+            {"type": "attachment", "timestamp": "t3", "attachment": {"type": "hook_success", "hookName": "SessionStart:resume", "hookEvent": "SessionStart"}}]
+    f = tmp_path / "c.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    assert update.last_start(f) == "t3" and update.last_start(None) is None

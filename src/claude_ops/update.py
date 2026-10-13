@@ -421,6 +421,30 @@ def screen_of(kind: str, handle: str, *, env: Mapping[str, str] | None = None) -
     return r.stdout if r.returncode == 0 and r.stdout.strip() else None
 
 
+def last_start(path: Path | None) -> str | None:
+    """When the chat's newest instance started: the timestamp of the last SessionStart hook record
+    Claude Code wrote into the transcript, or None. Read at the start of a new instance, before its
+    own record is written, it is when the instance that just ended started."""
+    if path is None:
+        return None
+    found = None
+    try:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if b"SessionStart" not in raw or b'"attachment"' not in raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                a = rec.get("attachment") or {}
+                if str(a.get("hookEvent") or a.get("hookName") or "").startswith("SessionStart"):
+                    found = rec.get("timestamp") or found
+    except OSError:
+        return None
+    return found
+
+
 def unfinished_background(path: Path | None, since: str | None = None) -> list[dict]:
     """Background shell commands a chat started that never finished: a `run_in_background` tool
     call with no task notification after it. Each is {"tool_use_id", "command", "description",
