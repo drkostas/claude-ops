@@ -242,7 +242,7 @@ def background_agent(chat_id: str, now: float | None = None, projects: Path = PR
 
 def resume_line(args: str | None, chat_id: str, mode: str | None = None,
                 remote_control: str | bool | None = None, model: str | None = None,
-                effort: str | None = None) -> str:
+                effort: str | None = None, name: str | None = None) -> str:
     """The command that reopens this conversation with the flags it was started with.
 
     `args` is the process's command line (`ps -o args=`), and `mode` the permission mode it was
@@ -250,7 +250,8 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
     without the flag (`remote_control_of`): a name, or True for an unnamed one. `model` and
     `effort` are what the chat last ran on (`model_of`), and they win over the start flags, so a
     choice made inside the chat survives the restart. A chat started with `--settings` keeps the
-    model its settings file names."""
+    model its settings file names. `name` is the chat's name now: a chat renamed after it started
+    still carries its old `-n` in its command line, and a restart must not undo the rename."""
     argv = (args or "").split()
     out = ["claude"]
     if argv and Path(argv[0]).name == "claude":
@@ -272,6 +273,14 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
         else:
             out.extend([flag, value])
 
+    if name:
+        if "--name" in out:
+            out[out.index("--name") + 1] = name
+        else:
+            put("-n", name)
+        if "--remote-control" in out and out.index("--remote-control") + 1 < len(out) \
+                and not out[out.index("--remote-control") + 1].startswith("-"):
+            out[out.index("--remote-control") + 1] = name
     if model and "--settings" not in out:
         put("--model", model)
     if effort and "--settings" not in out:
