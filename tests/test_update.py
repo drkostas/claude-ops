@@ -123,6 +123,43 @@ def test_empty_prompt():
     assert not cu.empty_prompt(None)[0]
 
 
+RULE = "\x1b[38;5;244m" + "─" * 40
+FOOTER = "\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m"
+
+
+def test_a_suggested_prompt_is_not_typed_text():
+    # Claude Code draws a suggested next prompt dim after the ❯; real typing is plain text
+    suggested = "\n".join([RULE, "\x1b[39m❯\xa0\x1b[2mrun the tests again\x1b[0m", RULE, FOOTER])
+    assert cu.empty_prompt(cu.plain_screen(suggested)) == (True, "its input line is empty")
+    typed = "\n".join([RULE, "\x1b[38;5;246m\x1b[48;5;237m❯ \x1b[38;5;231mhalf a sentence\x1b[39m", RULE, FOOTER])
+    assert cu.empty_prompt(cu.plain_screen(typed)) == (False, cu.TYPED)
+    both = "\n".join([RULE, "\x1b[39m❯ half\x1b[2m a suggestion\x1b[22m", RULE])
+    assert cu.plain_screen(both).splitlines()[1] == "❯ half"
+
+
+def test_plain_screen_keeps_everything_off_the_input_line():
+    # a dim hint outside the input line still names a dialog
+    dialog = "Allow this edit?\n\x1b[2mEnter to confirm · Esc to cancel\x1b[0m"
+    assert cu.plain_screen(dialog) == "Allow this edit?\nEnter to confirm · Esc to cancel"
+    assert cu.empty_prompt(cu.plain_screen(dialog)) == (False, cu.ASKING)
+    # a 2 inside a 24-bit colour is a colour, not dim, and dim carries over a line break
+    assert cu.plain_screen("\x1b[38;2;2;2;2m❯ typed") == "❯ typed"
+    assert cu.plain_screen("\x1b[2mhint\n❯\xa0ghost\x1b[0m") == "hint\n❯"
+    assert cu.plain_screen("\x1b]8;;https://example.org\x07link\x1b]8;;\x07") == "link"
+
+
+def test_screen_of_a_tmux_pane_reads_it_styled(monkeypatch):
+    seen = []
+
+    def fake(argv, **k):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "\x1b[39m❯\xa0\x1b[2mrun the tests again\x1b[0m\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert cu.screen_of("tmux", "chat-a") == "❯\xa0\n"
+    assert "-e" in seen[0]
+
+
 def test_transcript_of_finds_the_newest(tmp_path):
     (tmp_path / "-a").mkdir()
     (tmp_path / "-a" / "ID.jsonl").write_text("x")

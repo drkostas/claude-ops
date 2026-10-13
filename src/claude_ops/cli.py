@@ -69,7 +69,8 @@ def cmd_inject(a) -> int:
     text = Path(a.file).read_text() if a.file else (a.text if a.text is not None else sys.stdin.read())
     r = inject.inject(a.target, text, transport=a.transport, enter=not a.no_enter, force=a.force, keep_text=a.keep_text)
     print(json.dumps(r))
-    return {"sent": 0, "no-session": inject.NO_SESSION, "not-claude": inject.NOT_CLAUDE}.get(r["result"], 1)
+    return {"sent": 0, "no-session": inject.NO_SESSION, "not-claude": inject.NOT_CLAUDE,
+            "not-ready": inject.NOT_READY}.get(r["result"], 1)
 
 
 def cmd_chat(a) -> int:

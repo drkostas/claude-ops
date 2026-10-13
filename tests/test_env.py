@@ -25,7 +25,8 @@ def test_tmux_listing_and_send_carry_the_env(monkeypatch):
 
 
 def test_inject_passes_the_env_to_the_default_sender(monkeypatch):
-    seen = _capture(monkeypatch, "claude-x\tclaude\t0\n")
+    # the session listing, the screen read (an empty input line) and the send all see the env
+    seen = _capture(monkeypatch, "claude-x\tclaude\t0\n❯ \n")
     r = inject.inject("claude-x", "hi", transport="tmux", env=ENV, log=__import__("pathlib").Path("/dev/null"))
     assert r["result"] == "sent"
     assert seen and all(e is ENV for e in seen)

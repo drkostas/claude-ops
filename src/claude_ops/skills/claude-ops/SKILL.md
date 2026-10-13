@@ -94,7 +94,7 @@ claude-ops inject --target <session id> --file prompt.txt
 claude-ops inject --transport tmux --target claude-build --text "please run the tests again"
 ```
 
-Three things decide whether a send works.
+Four things decide whether a send works.
 
 1. Multi-line text must be one bracketed paste. Writing text into a terminal types it, and a typed
    newline is Enter. A long handover once reached a chat as many separate messages, and the chat
@@ -107,6 +107,11 @@ Three things decide whether a send works.
 3. Enter is sent separately, after a short pause (half a second in iTerm2, 0.3 seconds in tmux).
    If Enter arrives while the paste is still being processed, it lands inside the paste and the
    message is not submitted. Use `--no-enter` to paste without submitting.
+4. The chat must show its empty input line. A paste joins whatever a person has half-typed there,
+   and the Enter sends both as one message; a question on screen takes the Enter as its answer.
+   `inject` reads the screen first and answers `not-ready` (exit code 5) for anything else, so a
+   watcher keeps the message and tries again. The suggested next prompt Claude Code draws dim in
+   an empty input line is not typed text, and `update.plain_screen` drops it from a tmux capture.
 
 More rules.
 

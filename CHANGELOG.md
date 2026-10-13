@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `inject` sends only into an empty input line: a half-typed message, a question on screen or a screen it cannot read answers `not-ready` (exit code 5) and sends nothing. `--force` still skips the checks
+- `update.screen_of` reads a tmux pane with its styles and `update.plain_screen` drops the suggested next prompt Claude Code draws dim in an empty input line, so `empty_prompt` no longer reads a suggestion as text somebody typed. `chat.pane_text(styled=True)` keeps the codes, and `update.TYPED` names the typed-text answer
 - `update.resume_line(..., name=...)`: the chat's current name replaces the `-n`/`--name` (and a named `--remote-control`) it started with, so a restart does not undo a rename.
 - `update.model_of` reads the model and effort level a chat last ran on from its transcript, and every restart and `chat.resume_command` pass them on (`--model`, `--effort`), so a model or effort chosen inside the chat survives a restart. A chat started with `--settings` keeps the model its settings file names
 - `update.restart_into_tmux` moves a chat from an iTerm2 tab into tmux shown in that same tab, and `update.restart_tmux` restarts a tmux chat inside its own pane. Neither opens a window
