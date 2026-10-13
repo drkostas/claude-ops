@@ -82,3 +82,19 @@ def test_tmux_lists_survive_a_process_with_no_locale(monkeypatch):
     assert inject.tmux_sessions(env={}) == {"claude-x": {"name": "claude-x", "command": "2.1.296",
                                                          "attached": True}}
     assert seen and seen[0][:2] == [inject.TMUX, "-u"]
+
+
+def test_applescript_loops_hold_ids_not_positions():
+    """A loop over the bare windows, tabs or sessions collection re-reads a position on every use,
+    so the session it checked and the session it writes to can differ. Every loop in the package
+    takes (get ...) first, which is a fixed list of id references."""
+    import re
+    from pathlib import Path
+
+    bare = re.compile(r"repeat with \w+ in (?!\(get )(?:every )?(?:windows|tabs|sessions)\b")
+    root = Path(inject.__file__).parent
+    found = [f"{p.name}:{n}" for p in root.rglob("*.py")
+             for n, line in enumerate(p.read_text().splitlines(), 1) if bare.search(line)]
+    assert found == []
+    assert bare.search("repeat with w in windows") and not bare.search("repeat with w in (get windows)")
+    assert "(get sessions of t)" in inject.ITERM_SEND

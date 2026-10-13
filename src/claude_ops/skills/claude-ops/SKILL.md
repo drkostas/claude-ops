@@ -327,6 +327,16 @@ move.move_files(chat_id, old_project_dir, new_project_dir, archive=archive_root,
   no AppleScript at all.
 - Asking iTerm2 anything when it is closed launches it, which from a background job returns empty
   or garbled output. claude-ops asks System Events whether iTerm2 runs first.
+- Loop over `(get windows)`, `(get tabs of w)` and `(get sessions of t)`, never over the bare
+  collections. A bare loop variable is a position, read again on every use, and Brave and Chrome
+  list their windows front to back, so a window brought forward in the middle of a loop makes
+  `id of w` and `tabs of w` name two different windows. With `get`, the loop holds "window id"
+  and "session id" references: a write reaches the session that matched, or fails.
+- A read can crash iTerm2. `get (variable named "...") of every session of every tab of every
+  window`, one request over every session, ended iTerm2 3.6.10 with an uncaught exception in its
+  AppleScript handler, and every window closed. Read a variable one session at a time, inside
+  `try`. iTerm2's session server keeps the shells, so relaunching iTerm2 brings the windows back,
+  but all of them on one desktop, and the relaunched iTerm2 asks again for consent to script it.
 - AppleScript says "sent" in its output and exits 0 even when it found nothing. Read the output,
   not only the exit code. Inside a `tell application "iTerm2"` block, `tab` is iTerm2's tab class,
   so join fields with `(ASCII character 9)`.

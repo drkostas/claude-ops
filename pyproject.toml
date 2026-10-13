@@ -28,3 +28,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 claude_ops = ["skills/*/SKILL.md", "rover/*.sh", "rover/*.plist", "rover/*.example"]
+
+[tool.pytest.ini_options]
+# the checkout under test, ahead of any installed copy of the package
+pythonpath = ["src"]
