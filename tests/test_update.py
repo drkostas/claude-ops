@@ -378,3 +378,13 @@ def test_resume_line_keeps_the_model_and_effort_chosen_inside_the_chat():
     # a settings file names its own model, so a chat started with one keeps it
     assert (cu.resume_line("claude --settings /s.json -n ops", "U", model="local-model", effort="high")
             == "claude --settings /s.json -n ops --resume U")
+
+
+def test_a_restart_keeps_the_name_the_chat_has_now():
+    """A chat renamed after it started still has its old -n in its command line."""
+    from claude_ops import update
+    args = "claude -n old-name --remote-control old-name --model opus"
+    line = update.resume_line(args, "abc", name="new-name")
+    assert "-n new-name" in line and "--remote-control new-name" in line and "old-name" not in line
+    assert update.resume_line("claude --model opus", "abc", name="fresh").count("-n fresh") == 1
+    assert "-n old-name" in update.resume_line(args, "abc"), "no name given: the start flags stand"
