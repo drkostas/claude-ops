@@ -425,3 +425,25 @@ def test_a_restart_keeps_the_name_the_chat_has_now():
     assert "-n new-name" in line and "--remote-control new-name" in line and "old-name" not in line
     assert update.resume_line("claude --model opus", "abc", name="fresh").count("-n fresh") == 1
     assert "-n old-name" in update.resume_line(args, "abc"), "no name given: the start flags stand"
+
+
+def test_unfinished_background_lists_commands_with_no_notification(tmp_path):
+    import json
+    from claude_ops import update
+    rows = [
+        {"type": "assistant", "timestamp": "t1", "message": {"content": [{"type": "tool_use", "id": "toolu_A",
+         "input": {"command": "watch-a.sh", "description": "watch A", "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "t2", "message": {"content": [{"type": "tool_use", "id": "toolu_B",
+         "input": {"command": "build.sh", "description": "build", "run_in_background": True}}]}},
+        {"type": "assistant", "timestamp": "t3", "message": {"content": [{"type": "tool_use", "id": "toolu_C",
+         "input": {"command": "ls", "description": "list"}}]}},
+        {"type": "user", "message": {"content": "<task-notification>\n<task-id>b1</task-id>\n"
+         "<tool-use-id>toolu_B</tool-use-id>\n<status>completed</status>\n</task-notification>"}},
+    ]
+    f = tmp_path / "chat.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+    got = update.unfinished_background(f)
+    assert [t["tool_use_id"] for t in got] == ["toolu_A"]
+    assert got[0]["command"] == "watch-a.sh" and got[0]["description"] == "watch A" and got[0]["at"] == "t1"
+    assert update.unfinished_background(None) == [] and update.unfinished_background(tmp_path / "x") == []
+    assert update.unfinished_background(f, since="t2") == [], "a command started before `since` is not listed"
