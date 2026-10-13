@@ -421,6 +421,44 @@ def screen_of(kind: str, handle: str, *, env: Mapping[str, str] | None = None) -
     return r.stdout if r.returncode == 0 and r.stdout.strip() else None
 
 
+def unfinished_background(path: Path | None, since: str | None = None) -> list[dict]:
+    """Background shell commands a chat started that never finished: a `run_in_background` tool
+    call with no task notification after it. Each is {"tool_use_id", "command", "description",
+    "at"}, oldest first, or [] when the transcript cannot be read.
+
+    When a chat is stopped (a restart, a crash), its background commands stop with it, and the
+    resumed chat is told only that "a background shell command didn't finish", without the
+    command. `since` (an ISO time, as the transcript writes it) keeps only commands started from
+    then on: pass when the instance that just ended started, or older stops come back each time.
+    Read this when a conversation is resumed, before Claude Code writes those notices,
+    and hand the commands back to it so it can start again what it still needs. Lines are read
+    with a cheap substring test first, so a transcript of hundreds of megabytes takes seconds."""
+    if path is None:
+        return []
+    started: dict[str, dict] = {}
+    seen: set[str] = set()
+    try:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if b"run_in_background" in raw and b'"tool_use"' in raw:
+                    try:
+                        rec = json.loads(raw)
+                    except ValueError:
+                        continue
+                    for c in (rec.get("message") or {}).get("content") or []:
+                        inp = c.get("input") or {} if isinstance(c, dict) else {}
+                        if c.get("type") == "tool_use" and inp.get("run_in_background") and c.get("id"):
+                            started[c["id"]] = {"tool_use_id": c["id"], "command": str(inp.get("command", "")),
+                                                "description": str(inp.get("description", "")),
+                                                "at": rec.get("timestamp")}
+                elif b"<task-notification>" in raw:
+                    seen.update(m.decode() for m in re.findall(rb"<tool-use-id>([^<]+)</tool-use-id>", raw))
+    except OSError:
+        return []
+    return [t for k, t in started.items()
+            if k not in seen and (since is None or (t["at"] or "") >= since)]
+
+
 def transcript_of(chat_id: str, projects: Path = PROJECTS) -> Path | None:
     """The transcript of a conversation, in whichever project folder holds it (newest if several)."""
     hits = list(projects.glob(f"*/{chat_id}.jsonl"))
