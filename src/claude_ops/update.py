@@ -483,6 +483,61 @@ def unfinished_background(path: Path | None, since: str | None = None) -> list[d
             if k not in seen and (since is None or (t["at"] or "") >= since)]
 
 
+def files_seen(path: Path | None, since: str | None = None) -> dict[Path, str]:
+    """When the conversation last had each file's whole content: it wrote the file (Write, Edit,
+    MultiEdit) or read all of it (a Read that started at the first line and reached the last). It is
+    {resolved path: the time of that tool's result, as the transcript writes it}, keeping results
+    from `since` on, or {} when the transcript cannot be read.
+
+    Claude Code refuses to change a file the conversation has not read, or one that changed since it
+    was read, so after a successful write the conversation's copy is the file. A failed call leaves
+    only an error text, and an edit the person changed before accepting it (`userModified`) leaves
+    a file the conversation has not seen, so neither counts.
+
+    Use it before telling a chat that a file it loads has changed: a chat that changed the file
+    itself already knows. Compare each file's modification time with its time here, and a file
+    modified later than that was changed by someone else."""
+    if path is None:
+        return {}
+    seen: dict[Path, str] = {}
+    try:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if b'"toolUseResult"' not in raw or b'"filePath"' not in raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                at = rec.get("timestamp")
+                if not isinstance(at, str) or (since is not None and at < since):
+                    continue
+                name = _whole_file(rec.get("toolUseResult"))
+                if name:
+                    try:
+                        seen[Path(name).resolve()] = at
+                    except (OSError, RuntimeError):
+                        continue
+    except OSError:
+        return {}
+    return seen
+
+
+def _whole_file(result) -> str | None:
+    """The path a tool result shows the whole content of, or None (a range, an image, an error)."""
+    if not isinstance(result, dict) or result.get("userModified"):
+        return None
+    f = result.get("file")
+    if isinstance(f, dict):
+        n, total = f.get("numLines"), f.get("totalLines")
+        whole = (result.get("type") == "text" and f.get("startLine", 1) == 1
+                 and isinstance(n, int) and isinstance(total, int) and n >= total)
+        return f.get("filePath") if whole else None
+    if "structuredPatch" in result or "edits" in result or result.get("type") in ("create", "update"):
+        return result.get("filePath")
+    return None
+
+
 def transcript_of(chat_id: str, projects: Path = PROJECTS) -> Path | None:
     """The transcript of a conversation, in whichever project folder holds it (newest if several)."""
     hits = list(projects.glob(f"*/{chat_id}.jsonl"))

@@ -458,3 +458,33 @@ def test_last_start_is_the_newest_session_start_record(tmp_path):
     f = tmp_path / "c.jsonl"
     f.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     assert update.last_start(f) == "t3" and update.last_start(None) is None
+
+
+def test_files_seen_is_what_the_chat_wrote_or_read_whole(tmp_path):
+    a, b, c, d, e, g = (tmp_path / n for n in ("a.md", "b.md", "c.md", "d.md", "e.md", "g.md"))
+
+    def res(at, result):
+        return {"type": "user", "timestamp": at, "toolUseResult": result,
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "x"}]}}
+    rows = [
+        res("2026-10-01T10:00:00.000Z", {"filePath": str(a), "oldString": "x", "newString": "y",
+                                         "structuredPatch": [], "userModified": False}),
+        res("2026-10-01T10:01:00.000Z", {"type": "create", "filePath": str(b), "content": "x",
+                                         "structuredPatch": []}),
+        res("2026-10-01T10:02:00.000Z", {"type": "text", "file": {"filePath": str(c), "content": "x",
+                                         "numLines": 3, "startLine": 1, "totalLines": 3}}),
+        res("2026-10-01T10:03:00.000Z", {"type": "text", "file": {"filePath": str(d), "content": "x",
+                                         "numLines": 2, "startLine": 1, "totalLines": 9}}),
+        res("2026-10-01T10:04:00.000Z", {"filePath": str(e), "oldString": "x", "newString": "y",
+                                         "structuredPatch": [], "userModified": True}),
+        res("2026-10-01T10:05:00.000Z", f"Error: String to replace not found in {g}, filePath"),
+        res("2026-10-01T10:06:00.000Z", {"filePath": str(a), "edits": [], "structuredPatch": []}),
+    ]
+    f = tmp_path / "chat.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+    seen = cu.files_seen(f)
+    assert seen == {a.resolve(): "2026-10-01T10:06:00.000Z", b.resolve(): "2026-10-01T10:01:00.000Z",
+                    c.resolve(): "2026-10-01T10:02:00.000Z"}, seen
+    assert cu.files_seen(f, since="2026-10-01T10:01:30.000Z") == {
+        a.resolve(): "2026-10-01T10:06:00.000Z", c.resolve(): "2026-10-01T10:02:00.000Z"}
+    assert cu.files_seen(None) == {} and cu.files_seen(tmp_path / "missing.jsonl") == {}
