@@ -299,6 +299,55 @@ DIALOG = ("enter to confirm", "esc to cancel", "esc to discard", "do you want", 
 
 
 ASKING = "Claude is asking something on its screen"
+TYPED = "something is typed in its input line"
+
+#: a colour or attribute code (SGR) and an OSC 8 hyperlink, as a styled tmux capture writes them
+_SGR = re.compile(r"\x1b\[([0-9;:]*)m")
+_OSC8 = re.compile(r"\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _dim_after(params: str, dim: bool) -> bool:
+    """Whether text is dim after one SGR code. 2 turns dim on, 22 and a reset turn it off, and the
+    arguments of an extended colour (38;5;n, 38;2;r;g;b) are skipped, so a 2 inside one is a colour."""
+    codes = re.split(r"[;:]", params) if params else ["0"]
+    i = 0
+    while i < len(codes):
+        c = codes[i] or "0"
+        if c in ("38", "48", "58"):
+            i += 3 if codes[i + 1:i + 2] == ["5"] else 5 if codes[i + 1:i + 2] == ["2"] else 1
+            continue
+        if c == "0":
+            dim = False
+        elif c == "2":
+            dim = True
+        elif c == "22":
+            dim = False
+        i += 1
+    return dim
+
+
+def plain_screen(styled: str) -> str:
+    """A styled capture as plain text, without the next prompt Claude Code suggests.
+
+    After a turn Claude Code may show a suggested next prompt in its empty input line, drawn dim,
+    which Tab accepts. Nobody typed it, and a check for a half-written message must not see it, or
+    a chat with a suggestion on screen reads as one somebody is typing into. Dim text is dropped on
+    the input line only (the line that starts with ❯); everywhere else the text stays, so a dim
+    hint such as "Esc to cancel" still names a dialog. Attributes carry from line to line, as the
+    capture writes them only where they change."""
+    out, dim = [], False
+    for line in _OSC8.sub("", styled).split("\n"):
+        cells, pos = [], 0                     # (character, drawn dim)
+        for m in _SGR.finditer(line):
+            cells += [(ch, dim) for ch in line[pos:m.start()]]
+            dim, pos = _dim_after(m.group(1), dim), m.end()
+        cells += [(ch, dim) for ch in line[pos:]]
+        text = "".join(ch for ch, _ in cells)
+        if text.lstrip().startswith("❯"):
+            mark = text.index("❯")             # the glyph and what precedes it always stay
+            text = "".join(ch for i, (ch, d) in enumerate(cells) if i <= mark or not d)
+        out.append(text)
+    return "\n".join(out)
 
 
 def empty_prompt(screen: str | None) -> tuple[bool, str]:
@@ -317,7 +366,7 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     if not prompts:
         return False, "Claude's input line is not on its screen"
     if prompts[-1] != "❯":
-        return False, "something is typed in its input line"
+        return False, TYPED
     return True, "its input line is empty"
 
 
@@ -363,7 +412,7 @@ end run"""
 def screen_of(kind: str, handle: str, *, env: Mapping[str, str] | None = None) -> str | None:
     """The text on a chat's screen: a tmux session by name, or an iTerm2 session by id."""
     if kind == "tmux":
-        return _chat.pane_text(handle, env=env) or None
+        return plain_screen(_chat.pane_text(handle, styled=True, env=env)) or None
     try:
         r = subprocess.run(["/usr/bin/osascript", "-e", ITERM_SCREEN, handle], capture_output=True,
                            text=True, timeout=20, env=env)

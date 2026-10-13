@@ -8,6 +8,11 @@ and would submit each line as its own message.
 Before sending, the target must look like it is running Claude Code. Sending into a plain shell
 would run the text as a command. The check fails closed: when unsure, nothing is sent.
 
+It must also show Claude's empty input line. A paste joins whatever is already typed there, and the
+Enter that follows sends both as one message; a question on screen would take the Enter as its
+answer. The screen is read before every send, and anything but an empty input line (a suggested
+next prompt counts as empty) answers "not-ready" and sends nothing, so a watcher can try again.
+
 Every attempt is written to an append-only log BEFORE sending, and the delivery result after, as a
 second line with the same correlation id. A crash in between leaves an attempt with no result,
 which is honest. This is a record, not a lock: anything running as your user can type into a
@@ -29,6 +34,7 @@ from pathlib import Path
 
 NO_SESSION = 3
 NOT_CLAUDE = 4
+NOT_READY = 5
 LOG = Path(os.environ.get("CLAUDE_OPS_INJECT_LOG", Path.home() / ".local" / "state" / "claude-ops" / "inject.jsonl"))
 TMUX = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
 OSASCRIPT = "/usr/bin/osascript"
@@ -169,14 +175,22 @@ def _log(entry: dict, log: Path) -> None:
 
 
 def inject(target: str, text: str, *, transport: str = "iterm", enter: bool = True, force: bool = False,
-           keep_text: bool = False, log: Path = LOG, sessions=None, send=None, env: Mapping[str, str] | None = None) -> dict:
-    """Send `text` to a running chat. Returns {"result": "sent" | "no-session" | "not-claude" | "failed", ...}."""
+           keep_text: bool = False, log: Path = LOG, sessions=None, send=None, screen=None,
+           env: Mapping[str, str] | None = None) -> dict:
+    """Send `text` to a running chat. Returns {"result": "sent" | "no-session" | "not-claude" | "not-ready" |
+    "failed", ...}. `screen(transport, session)` gives the text on the chat's screen (update.screen_of)."""
     live = sessions() if sessions else (iterm_sessions(env=env) if transport == "iterm" else tmux_sessions(env=env))
     matched = resolve(target, live, transport)
     if not matched:
         return {"result": "no-session", "target": target, "open": sorted(v.get("name", k) for k, v in live.items())}
     if not force and not looks_like_claude(transport, live[matched]):
         return {"result": "not-claude", "target": target, "session": live[matched]}
+    if not force:
+        from . import update  # noqa: PLC0415 - update imports this module
+        read = screen or (lambda t, m: update.screen_of(t, m, env=env))
+        ok, why = update.empty_prompt(read(transport, matched))
+        if not ok:
+            return {"result": "not-ready", "target": target, "session": matched, "why": why}
     corr = uuid.uuid4().hex
     entry = {"at": datetime.now(timezone.utc).isoformat(), "correlation": corr, "event": "attempt",
              "transport": transport, "target": target, "session": matched, "name": live[matched].get("name"),

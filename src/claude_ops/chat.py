@@ -47,8 +47,10 @@ def transcripts(cwd: Path) -> set[str]:
     return {p.stem for p in d.glob("*.jsonl")} if d.exists() else set()
 
 
-def pane_text(name: str, *, env: Mapping[str, str] | None = None) -> str:
-    r = subprocess.run([TMUX, "-u", "capture-pane", "-p", "-t", name], capture_output=True, text=True, env=env)
+def pane_text(name: str, *, styled: bool = False, env: Mapping[str, str] | None = None) -> str:
+    """The text on a tmux pane's screen. `styled` keeps the colour and attribute codes (`-e`)."""
+    flags = ["-p", "-e"] if styled else ["-p"]
+    r = subprocess.run([TMUX, "-u", "capture-pane", *flags, "-t", name], capture_output=True, text=True, env=env)
     return r.stdout if r.returncode == 0 else ""
 
 

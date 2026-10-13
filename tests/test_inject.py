@@ -3,6 +3,7 @@ import json
 from claude_ops import inject
 
 ITERM = {"S1": {"name": "alpha-login (node)"}, "S2": {"name": "zsh"}, "S3": {"name": "beta (claude)"}}
+EMPTY = lambda transport, session: "───\n❯ \n───\n  ⏵⏵ accept edits on"  # noqa: E731
 
 
 def lines(log):
@@ -37,7 +38,7 @@ def test_multiline_text_is_one_bracketed_paste():
 def test_sent_is_logged_before_and_after(tmp_path):
     log = tmp_path / "inject.jsonl"
     sent = []
-    r = inject.inject("alpha", "hello", log=log, sessions=lambda: ITERM,
+    r = inject.inject("alpha", "hello", log=log, sessions=lambda: ITERM, screen=EMPTY,
                       send=lambda s, t, e: sent.append((s, t, e)) or (True, ""))
     assert r["result"] == "sent" and sent == [("S1", "hello", True)]
     a, b = lines(log)
@@ -47,7 +48,8 @@ def test_sent_is_logged_before_and_after(tmp_path):
 
 def test_keep_text_stores_the_text(tmp_path):
     log = tmp_path / "inject.jsonl"
-    inject.inject("S1", "hi", log=log, keep_text=True, sessions=lambda: ITERM, send=lambda *a: (True, ""))
+    inject.inject("S1", "hi", log=log, keep_text=True, sessions=lambda: ITERM, screen=EMPTY,
+                  send=lambda *a: (True, ""))
     assert lines(log)[0]["text"] == "hi"
 
 
@@ -59,11 +61,24 @@ def test_refuses_a_plain_shell_and_sends_nothing(tmp_path):
     assert r["result"] == "sent"
 
 
+def test_waits_for_an_empty_input_line(tmp_path):
+    log = tmp_path / "inject.jsonl"
+    typed = lambda t, s: "───\n❯ half a sentence\n───"  # noqa: E731
+    r = inject.inject("S1", "x", log=log, sessions=lambda: ITERM, screen=typed, send=lambda *a: 1 / 0)
+    assert r["result"] == "not-ready" and "typed" in r["why"] and not log.exists()
+    asking = lambda t, s: "Allow this edit?\nEnter to confirm · Esc to cancel"  # noqa: E731
+    assert inject.inject("S1", "x", log=log, sessions=lambda: ITERM, screen=asking, send=lambda *a: 1 / 0)["result"] == "not-ready"
+    assert inject.inject("S1", "x", log=log, sessions=lambda: ITERM, screen=lambda t, s: None,
+                         send=lambda *a: 1 / 0)["result"] == "not-ready"   # an unread screen is not empty
+    r = inject.inject("S1", "x", log=log, force=True, sessions=lambda: ITERM, screen=typed, send=lambda *a: (True, ""))
+    assert r["result"] == "sent"
+
+
 def test_no_session_and_failed(tmp_path):
     log = tmp_path / "inject.jsonl"
     r = inject.inject("nothing", "x", log=log, sessions=lambda: ITERM, send=lambda *a: 1 / 0)
     assert r["result"] == "no-session" and "zsh" in r["open"]
-    r = inject.inject("S1", "x", log=log, sessions=lambda: ITERM, send=lambda *a: (False, "timeout"))
+    r = inject.inject("S1", "x", log=log, sessions=lambda: ITERM, screen=EMPTY, send=lambda *a: (False, "timeout"))
     assert r["result"] == "failed" and lines(log)[-1]["event"] == "failed"
 
 
