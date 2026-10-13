@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `update.files_seen(transcript, since=None)`: each file the conversation wrote (Write, Edit, MultiEdit) or read whole, with the time of that result. Check it before telling a chat that a file it loads has changed, because a chat that changed the file itself already knows. Compare with the file's modification time to see whether someone else changed it afterwards
 - `update.unfinished_background(transcript)`: the background commands a chat started that never got a task notification, with their command text, so a chat resumed after a restart can start again what it still needs. `update.last_start(transcript)` gives when the newest instance started, to pass as `since`.
 - `inject` sends only into an empty input line: a half-typed message, a question on screen or a screen it cannot read answers `not-ready` (exit code 5) and sends nothing. `--force` still skips the checks
 - `update.screen_of` reads a tmux pane with its styles and `update.plain_screen` drops the suggested next prompt Claude Code draws dim in an empty input line, so `empty_prompt` no longer reads a suggestion as text somebody typed. `chat.pane_text(styled=True)` keeps the codes, and `update.TYPED` names the typed-text answer
