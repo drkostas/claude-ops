@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The iTerm2 listings (`inject.iterm_sessions`, `inject.send_iterm`, `update.screen_of`) skip a window iTerm2 keeps in its scripting model after it closed, whose tabs cannot be read. One such window made every listing fail, so no iTerm2 session was found at all; an error after the session was found is still raised
 - `update.background_agent` also sees a workflow's agents, which write one folder deeper (`subagents/workflows/<run>/`), and counts a workflow as running between its phases while its journal is recent and it has no final state file. A chat running a workflow no longer reads as idle, so a restart does not end the run halfway
 - `update.files_seen(transcript, since=None)`: each file the conversation wrote (Write, Edit, MultiEdit) or read whole, with the time of that result. Check it before telling a chat that a file it loads has changed, because a chat that changed the file itself already knows. Compare with the file's modification time to see whether someone else changed it afterwards
 - `update.unfinished_background(transcript)`: the background commands a chat started that never got a task notification, with their command text, so a chat resumed after a restart can start again what it still needs. `update.last_start(transcript)` gives when the newest instance started, to pass as `since`.

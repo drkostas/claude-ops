@@ -54,18 +54,26 @@ ITERM_SEND = """on run argv
   with timeout of 30 seconds
     tell application "iTerm2"
       repeat with w in (get windows)
-        repeat with t in (get tabs of w)
-          repeat with s in (get sessions of t)
-            if (id of s) is wanted then
-              tell s to write text payload newline NO
-              if wantEnter is "1" then
-                delay 0.5
-                tell s to write text "" newline YES
+        set found to false
+        -- a window iTerm2 keeps after it closed has tabs that cannot be read: skip it, but an
+        -- error once the session is found (the write itself) is raised, never taken for "absent"
+        try
+          repeat with t in (get tabs of w)
+            repeat with s in (get sessions of t)
+              if (id of s) is wanted then
+                set found to true
+                tell s to write text payload newline NO
+                if wantEnter is "1" then
+                  delay 0.5
+                  tell s to write text "" newline YES
+                end if
+                return "sent"
               end if
-              return "sent"
-            end if
+            end repeat
           end repeat
-        end repeat
+        on error e
+          if found then error e
+        end try
       end repeat
       return "no-session"
     end tell
@@ -77,11 +85,14 @@ ITERM_LIST = """with timeout of 20 seconds
  tell application "iTerm2"
   set out to ""
   repeat with w in (get windows)
-   repeat with t in (get tabs of w)
-    repeat with s in (get sessions of t)
-     set out to out & (id of s) & (ASCII character 9) & (name of s) & linefeed
+   -- a window iTerm2 keeps after it closed has tabs that cannot be read: skip it, never fail
+   try
+    repeat with t in (get tabs of w)
+     repeat with s in (get sessions of t)
+      set out to out & (id of s) & (ASCII character 9) & (name of s) & linefeed
+     end repeat
     end repeat
-   end repeat
+   end try
   end repeat
   return out
  end tell
