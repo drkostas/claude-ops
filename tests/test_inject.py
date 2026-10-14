@@ -113,3 +113,17 @@ def test_applescript_loops_hold_ids_not_positions():
     assert found == []
     assert bare.search("repeat with w in windows") and not bare.search("repeat with w in (get windows)")
     assert "(get sessions of t)" in inject.ITERM_SEND
+
+
+def test_a_closed_window_iterm2_still_lists_is_skipped():
+    # iTerm2 keeps a window it closed in its scripting model for a while, and reading its tabs
+    # fails ("Can't make missing value into type specifier"). Without a guard around each window,
+    # one such window made every listing fail, so no session was found anywhere.
+    from claude_ops import update
+    for name, script in (("ITERM_LIST", inject.ITERM_LIST), ("ITERM_SEND", inject.ITERM_SEND),
+                         ("ITERM_SCREEN", update.ITERM_SCREEN)):
+        body = script.split("repeat with w in (get windows)", 1)[1]
+        assert body.lstrip().split("\n")[0].strip().startswith(("try", "set found to false")), name
+        assert "end try" in body, name
+    # and the send raises an error that happens after the session was found, never "no-session"
+    assert "if found then error e" in inject.ITERM_SEND

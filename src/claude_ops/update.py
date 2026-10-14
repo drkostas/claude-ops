@@ -421,11 +421,14 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
 ITERM_SCREEN = """on run argv
   tell application "iTerm2"
     repeat with w in (get windows)
-      repeat with t in (get tabs of w)
-        repeat with s in (get sessions of t)
-          if (id of s as text) is (item 1 of argv) then return contents of s
+      -- a window iTerm2 keeps after it closed has tabs that cannot be read: skip it, never fail
+      try
+        repeat with t in (get tabs of w)
+          repeat with s in (get sessions of t)
+            if (id of s as text) is (item 1 of argv) then return contents of s
+          end repeat
         end repeat
-      end repeat
+      end try
     end repeat
   end tell
   return ""
