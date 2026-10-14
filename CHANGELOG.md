@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `update.background_agent` also sees a workflow's agents, which write one folder deeper (`subagents/workflows/<run>/`), and counts a workflow as running between its phases while its journal is recent and it has no final state file. A chat running a workflow no longer reads as idle, so a restart does not end the run halfway
 - `update.files_seen(transcript, since=None)`: each file the conversation wrote (Write, Edit, MultiEdit) or read whole, with the time of that result. Check it before telling a chat that a file it loads has changed, because a chat that changed the file itself already knows. Compare with the file's modification time to see whether someone else changed it afterwards
 - `update.unfinished_background(transcript)`: the background commands a chat started that never got a task notification, with their command text, so a chat resumed after a restart can start again what it still needs. `update.last_start(transcript)` gives when the newest instance started, to pass as `since`.
 - `inject` sends only into an empty input line: a half-typed message, a question on screen or a screen it cannot read answers `not-ready` (exit code 5) and sends nothing. `--force` still skips the checks

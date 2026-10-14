@@ -268,6 +268,32 @@ def test_a_background_agent_keeps_a_chat_busy(tmp_path):
     assert cu.background_agent("C1", projects=projects) is None
 
 
+def test_a_running_workflow_keeps_a_chat_busy(tmp_path):
+    import os
+    projects, proj = _chat_dir(tmp_path)
+    run = proj / "C1" / "subagents" / "workflows" / "wf_0001"
+    run.mkdir(parents=True)
+    agent = run / "agent-b2.jsonl"
+    agent.write_text("{}\n")
+    assert cu.background_agent("C1", projects=projects) == "workflows/wf_0001/agent-b2", \
+        "a workflow's agent writing one folder deeper is working"
+    journal = run / "journal.jsonl"
+    journal.write_text('{"type":"started"}\n')
+    old = agent.stat().st_mtime - 600
+    os.utime(agent, (old, old))
+    assert cu.background_agent("C1", projects=projects) == "workflow wf_0001", \
+        "between phases no agent writes, and the run still counts while its journal is recent"
+    state = proj / "C1" / "workflows" / "wf_0001.json"
+    state.parent.mkdir(parents=True)
+    state.write_text('{"status": "completed"}')
+    assert cu.background_agent("C1", projects=projects) is None, "a run with a final state is over"
+    state.unlink()
+    stale = journal.stat().st_mtime - 7200
+    os.utime(journal, (stale, stale))
+    assert cu.background_agent("C1", projects=projects) is None, \
+        "a run whose process died without a final state does not hold the chat for ever"
+
+
 def test_ready_names_a_question_waiting_for_the_person(tmp_path, monkeypatch):
     projects, _ = _chat_dir(tmp_path)
     asking = "❯ 1. Digest them (Recommended)\n  2. Push them too\nEnter to select · Esc to cancel\n"

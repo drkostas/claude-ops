@@ -44,6 +44,8 @@ QUIET_UNHOOKED_S = 600
 TYPING_WINDOW_S = 120
 #: a background agent whose file was written this recently is still working
 AGENT_QUIET_S = 120
+#: a workflow with no final state whose journal was written this recently is still running
+WORKFLOW_QUIET_S = 1800
 PROJECTS = Path.home() / ".claude" / "projects"
 
 
@@ -220,21 +222,42 @@ def title_of(path: Path | None) -> str | None:
 
 
 def background_agent(chat_id: str, now: float | None = None, projects: Path = PROJECTS,
-                     quiet_s: float = AGENT_QUIET_S) -> str | None:
-    """The name of a background agent this chat started that is still writing, or None.
+                     quiet_s: float = AGENT_QUIET_S,
+                     workflow_quiet_s: float = WORKFLOW_QUIET_S) -> str | None:
+    """The name of a background agent or workflow this chat started that is still working, or None.
 
-    ⛔ A BACKGROUND AGENT IS NOT A SHELL (2026-10-11). It runs inside the chat's own Claude process
-    and writes to <transcript folder>/<chat id>/subagents/, not to the chat's transcript, so a chat
-    whose turn had ended read as idle while its agent worked, and a restart would have ended the
-    agent with the process. A subagent file written in the last `quiet_s` counts as working."""
+    ⛔ A BACKGROUND AGENT IS NOT A SHELL. It runs inside the chat's own Claude process and writes to
+    <transcript folder>/<chat id>/subagents/, not to the chat's transcript, so a chat whose turn had
+    ended read as idle while its agent worked, and a restart would have ended the agent with the
+    process. A subagent file written in the last `quiet_s` counts as working, at any depth.
+
+    ⛔ AND A WORKFLOW'S AGENTS ARE ONE FOLDER DEEPER. They write to
+    subagents/workflows/<run>/agent-*.jsonl beside the run's journal.jsonl, and only the top folder
+    was read, so a chat running a thirty-agent workflow read as idle and a restart ended the whole
+    run. A workflow also waits between phases with no agent writing, so a run counts as running
+    while its journal was written in the last `workflow_quiet_s` and the run has no final state
+    file (<chat id>/workflows/<run>.json, written when it completes, fails or is killed)."""
     t = transcript_of(chat_id, projects)
     if t is None:
         return None
     now = time.time() if now is None else now
-    for f in sorted((t.parent / chat_id / "subagents").glob("*.jsonl")):
+    base = t.parent / chat_id
+    sub = base / "subagents"
+    for f in sorted(sub.rglob("*.jsonl")):
+        if f.name == "journal.jsonl":          # a workflow's own log, read below
+            continue
         try:
             if now - f.stat().st_mtime < quiet_s:
-                return f.stem
+                return str(f.relative_to(sub).with_suffix(""))
+        except OSError:
+            continue
+    for journal in sorted((sub / "workflows").glob("*/journal.jsonl")):
+        run = journal.parent.name
+        if (base / "workflows" / f"{run}.json").exists():
+            continue
+        try:
+            if now - journal.stat().st_mtime < workflow_quiet_s:
+                return f"workflow {run}"
         except OSError:
             continue
     return None
