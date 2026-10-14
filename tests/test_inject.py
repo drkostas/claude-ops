@@ -123,7 +123,9 @@ def test_a_closed_window_iterm2_still_lists_is_skipped():
     for name, script in (("ITERM_LIST", inject.ITERM_LIST), ("ITERM_SEND", inject.ITERM_SEND),
                          ("ITERM_SCREEN", update.ITERM_SCREEN)):
         body = script.split("repeat with w in (get windows)", 1)[1]
-        assert body.lstrip().split("\n")[0].strip().startswith(("try", "set found to false")), name
+        first = next(ln.strip() for ln in body.split("\n")
+                     if ln.strip() and not ln.strip().startswith("--") and ln.strip() != "set found to false")
+        assert first == "try", name
         assert "end try" in body, name
     # and the send raises an error that happens after the session was found, never "no-session"
     assert "if found then error e" in inject.ITERM_SEND
