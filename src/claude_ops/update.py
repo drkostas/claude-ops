@@ -135,21 +135,20 @@ def remote_control_of(path: Path | None) -> bool:
     Claude Code writes the state into the transcript, so the restart reads it there."""
     if path is None:
         return False
-    newest = None
     try:
-        with open(path, errors="replace") as f:
-            for line in f:
-                if '"bridge_status"' not in line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                if d.get("type") == "system" and d.get("subtype") == "bridge_status":
-                    newest = str(d.get("content") or "")
+        # newest first: a long transcript is not read whole for its last record of this kind
+        for line in _lines_from_end(Path(path)):
+            if '"bridge_status"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and d.get("type") == "system" and d.get("subtype") == "bridge_status":
+                return "is active" in str(d.get("content") or "")
     except OSError:
         return False
-    return newest is not None and "is active" in newest
+    return False
 
 
 def _lines_from_end(path: Path, block: int = 1 << 20):
@@ -203,22 +202,23 @@ def model_of(path: Path | None) -> tuple[str | None, str | None]:
 
 
 def title_of(path: Path | None) -> str | None:
-    """The chat's own title (`/rename` or `-n`): its newest `custom-title` record."""
+    """The chat's own title (`/rename` or `-n`): its newest `custom-title` record, read from the end,
+    so a long transcript is not read whole (one of 1.8 GB took two seconds)."""
     if path is None:
         return None
-    title = None
     try:
-        with open(path, errors="replace") as f:
-            for line in f:
-                if '"custom-title"' not in line:
-                    continue
-                try:
-                    title = json.loads(line).get("customTitle") or title
-                except ValueError:
-                    continue
+        for line in _lines_from_end(Path(path)):
+            if '"custom-title"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and d.get("customTitle"):
+                return d["customTitle"]
     except OSError:
         return None
-    return title
+    return None
 
 
 def background_agent(chat_id: str, now: float | None = None, projects: Path = PROJECTS,
@@ -694,8 +694,10 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
     answer is (back at Claude's prompt, what happened)."""
     mode = permission_mode(screen_of("iterm", session_id, env=env))
     args = process_args(pid, env=env)
-    rc = remote_control_of(transcript_of(chat_id)) or None
-    model, effort = model_of(transcript_of(chat_id))
+    transcript = transcript_of(chat_id)
+    rc = remote_control_of(transcript) or None
+    model, effort = model_of(transcript)
+    name = title_of(transcript)   # a rename after the start is kept, not undone by the old -n
     try:
         os.kill(int(pid), signal.SIGTERM)
     except (OSError, TypeError, ValueError) as e:
@@ -710,7 +712,7 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
 
     if not _wait(at_shell, stop_s):
         return False, f"Claude did not stop within {int(stop_s)} seconds of being asked to"
-    cmd = resume_line(args, chat_id, mode, remote_control=rc, model=model, effort=effort)
+    cmd = resume_line(args, chat_id, mode, remote_control=rc, model=model, effort=effort, name=name)
     ok, detail = _inject.send_iterm(session_id, f"cd {shlex.quote(cwd)} && {cmd}", True, env=env)
     if not ok:
         return False, f"could not type the resume command ({detail})"
@@ -734,10 +736,12 @@ def restart_tmux(pid: int, name: str, chat_id: str, *, command: str | None = Non
     caller knows better (a chat on a local model); by default it is built from the process."""
     if command is None:
         mode = permission_mode(screen_of("tmux", name, env=env))
-        rc = remote_control_of(transcript_of(chat_id)) or None
-        model, effort = model_of(transcript_of(chat_id))
+        transcript = transcript_of(chat_id)
+        rc = remote_control_of(transcript) or None
+        model, effort = model_of(transcript)
+        # the title the chat has now: a rename after the start is kept, not undone by the old -n
         command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=rc,
-                              model=model, effort=effort)
+                              model=model, effort=effort, name=title_of(transcript))
     try:
         os.kill(int(pid), signal.SIGTERM)
     except (OSError, TypeError, ValueError) as e:
