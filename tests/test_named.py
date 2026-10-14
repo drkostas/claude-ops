@@ -33,6 +33,20 @@ def test_rc_url_is_the_last_bridge_status(tmp_path):
     assert sessions.rc_url(str(tmp_path / "missing")) is None
 
 
+def test_rc_url_reads_only_what_was_added(tmp_path, monkeypatch):
+    t = tmp_path / "c.jsonl"
+    t.write_text(json.dumps({"type": "system", "subtype": "bridge_status", "url": "https://claude.ai/code/one"}) + "\n")
+    assert sessions.rc_url(str(t)) == "https://claude.ai/code/one"
+    parsed = []
+    real = sessions._record
+    monkeypatch.setattr(sessions, "_record", lambda raw: parsed.append(raw) or real(raw))
+    with t.open("a") as f:
+        f.write(json.dumps({"type": "system", "subtype": "bridge_status", "url": "https://claude.ai/code/two"}) + "\n")
+    os.utime(t, (time.time() + 5, time.time() + 5))
+    assert sessions.rc_url(str(t)) == "https://claude.ai/code/two"
+    assert len(parsed) == 1  # the first link was not read again
+
+
 def test_pick_keeps_the_most_recent_conversation_per_name():
     idx = [{"title": "soma", "path": "/p/a.jsonl", "active_at": 1},
            {"title": "soma", "path": "/p/b.jsonl", "active_at": 5},

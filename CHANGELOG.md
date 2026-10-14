@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The session index reads a transcript that grew only from where its last read stopped, and writes its cache only when something changed. The chats in use are the largest files, and reading a 100 MB transcript whole on each change took about a second. `sessions.rc_url` reads the same way, and `sessions.live_folders` asks `lsof` once for every process instead of once for each
 - The iTerm2 listings (`inject.iterm_sessions`, `inject.send_iterm`, `update.screen_of`) skip a window iTerm2 keeps in its scripting model after it closed, whose tabs cannot be read. One such window made every listing fail, so no iTerm2 session was found at all; an error after the session was found is still raised
 - `update.background_agent` also sees a workflow's agents, which write one folder deeper (`subagents/workflows/<run>/`), and counts a workflow as running between its phases while its journal is recent and it has no final state file. A chat running a workflow no longer reads as idle, so a restart does not end the run halfway
 - `update.files_seen(transcript, since=None)`: each file the conversation wrote (Write, Edit, MultiEdit) or read whole, with the time of that result. Check it before telling a chat that a file it loads has changed, because a chat that changed the file itself already knows. Compare with the file's modification time to see whether someone else changed it afterwards
