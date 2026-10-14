@@ -338,6 +338,64 @@ def test_restart_tmux_resumes_inside_the_same_pane(monkeypatch):
     # no new session is made: the only tmux call that changes anything is the typing into its pane
 
 
+def _renamed(tmp_path, chat_id="NEW"):
+    """A transcript started as `soma` and renamed `soma-core` later."""
+    t = tmp_path / f"{chat_id}.jsonl"
+    t.write_text("\n".join(json.dumps(r) for r in (
+        {"type": "custom-title", "customTitle": "soma"}, {"type": "user", "message": {"content": "hi"}},
+        {"type": "custom-title", "customTitle": "soma-core"})) + "\n")
+    return t
+
+
+def test_restart_iterm_keeps_a_rename(monkeypatch, tmp_path):
+    typed, state = [], {"claude": True}
+    t = _renamed(tmp_path)
+    monkeypatch.setattr(cu, "transcript_of", lambda chat_id, projects=None: t)
+    monkeypatch.setattr(cu, "screen_of", lambda kind, h, env=None: "")
+    monkeypatch.setattr(cu, "process_args", lambda pid, env=None: "claude -n soma --remote-control soma --resume OLD")
+    monkeypatch.setattr(cu.os, "kill", lambda pid, sig: state.update(claude=False))
+    monkeypatch.setattr(cu._inject, "iterm_sessions", lambda env=None: {
+        "ABC": {"name": "soma (2.1.294)" if state["claude"] else "soma (-zsh)"}})
+    monkeypatch.setattr(cu._inject, "send_iterm", lambda sid, text, enter, env=None: (
+        typed.append(text), state.update(claude=True)) and (True, "sent"))
+    monkeypatch.setattr(cu.time, "sleep", lambda s: None)
+    cu.restart_iterm(100, "ABC", "/work/soma", "NEW", stop_s=5, back_s=5)
+    # the old -n would be written back as the chat's title and undo the rename
+    assert typed == ["cd /work/soma && claude -n soma-core --remote-control soma-core --resume NEW"]
+
+
+def test_restart_tmux_keeps_a_rename(monkeypatch, tmp_path):
+    typed, state = [], {"claude": True}
+    t = _renamed(tmp_path)
+    monkeypatch.setattr(cu, "transcript_of", lambda chat_id, projects=None: t)
+    monkeypatch.setattr(cu, "screen_of", lambda kind, h, env=None: "")
+    monkeypatch.setattr(cu, "process_args", lambda pid, env=None: "claude -n soma --resume OLD")
+    monkeypatch.setattr(cu.os, "kill", lambda pid, sig: state.update(claude=False))
+    monkeypatch.setattr(cu._inject, "tmux_sessions", lambda env=None: {
+        "claude-soma": {"name": "claude-soma", "command": "2.1.296" if state["claude"] else "zsh"}})
+    monkeypatch.setattr(cu._inject, "send_tmux", lambda name, text, enter, env=None: (
+        typed.append(text), state.update(claude=True)) and (True, ""))
+    monkeypatch.setattr(cu.time, "sleep", lambda s: None)
+    cu.restart_tmux(200, "claude-soma", "NEW", stop_s=5, back_s=5)
+    assert typed == ["claude -n soma-core --resume NEW"]
+
+
+def test_title_and_remote_control_are_read_from_the_end(tmp_path):
+    t = tmp_path / "long.jsonl"
+    filler = json.dumps({"type": "assistant", "message": {"content": "x" * 900}}) + "\n"
+    with t.open("w") as f:
+        f.write(json.dumps({"type": "custom-title", "customTitle": "first"}) + "\n")
+        f.write(json.dumps({"type": "system", "subtype": "bridge_status", "content": "/remote-control is active"}) + "\n")
+        f.write(filler * 3000)   # about 3 MB, so the records sit several read blocks back
+        f.write(json.dumps({"type": "custom-title", "customTitle": "renamed"}) + "\n")
+        f.write(filler * 3000)
+    assert cu.title_of(t) == "renamed"
+    assert cu.remote_control_of(t) is True
+    with t.open("a") as f:
+        f.write(json.dumps({"type": "system", "subtype": "bridge_status", "content": "/remote-control is off"}) + "\n")
+    assert cu.remote_control_of(t) is False
+
+
 def test_restart_tmux_reports_a_claude_that_will_not_stop(monkeypatch):
     monkeypatch.setattr(cu.os, "kill", lambda pid, sig: None)
     monkeypatch.setattr(cu._inject, "tmux_sessions", lambda env=None: {"claude-x": {"command": "2.1.296"}})
