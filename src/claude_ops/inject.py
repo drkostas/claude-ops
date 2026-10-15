@@ -169,7 +169,9 @@ def send_iterm(session_id: str, text: str, enter: bool, *, env: Mapping[str, str
 
 def send_tmux(name: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     buf = f"claude-ops-{uuid.uuid4().hex[:10]}"
-    r = subprocess.run([TMUX, "-u", "set-buffer", "-b", buf, "--", text], capture_output=True, text=True, env=env)
+    # load-buffer reads the text from stdin: set-buffer takes it as one command argument, and tmux
+    # refuses a command longer than about 16 KB ("command too long"), so a long message never arrived
+    r = subprocess.run([TMUX, "-u", "load-buffer", "-b", buf, "-"], input=text, capture_output=True, text=True, env=env)
     if r.returncode == 0:
         # -p pastes with the bracketed-paste markers when the program asked for them, which Claude Code does
         r = subprocess.run([TMUX, "-u", "paste-buffer", "-p", "-d", "-b", buf, "-t", name], capture_output=True, text=True, env=env)

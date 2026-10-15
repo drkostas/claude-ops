@@ -1,4 +1,7 @@
 import json
+import subprocess
+
+import pytest
 
 from claude_ops import inject
 
@@ -129,3 +132,44 @@ def test_a_closed_window_iterm2_still_lists_is_skipped():
         assert "end try" in body, name
     # and the send raises an error that happens after the session was found, never "no-session"
     assert "if found then error e" in inject.ITERM_SEND
+
+
+def test_a_long_message_reaches_tmux(tmp_path):
+    """tmux refuses a command argument above about 16 KB, so the text goes to the buffer through
+    stdin. A 20 KB message pasted into a session running `cat` arrives whole."""
+    import os
+    import shutil
+    import tempfile
+    import time
+    if not shutil.which("tmux"):
+        pytest.skip("no tmux")
+    # a private server. ⛔ Without $TMUX: inside a tmux pane tmux follows $TMUX before TMUX_TMPDIR,
+    # so the kill-server below ended the real server and every session in it (twice, the first
+    # time this test ran)
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+    # and a short folder: a socket path longer than 104 bytes fails on macOS ("File name too long")
+    short = tempfile.mkdtemp(prefix="co-", dir="/tmp")
+    env["TMUX_TMPDIR"] = short
+    out = tmp_path / "out.txt"
+    subprocess.run(["tmux", "-u", "new-session", "-d", "-s", "claude-x", f"cat > {out}"], check=True, env=env)
+    try:
+        text = ("x" * 99 + "\n") * 200   # 20,000 bytes
+        ok, why = inject.send_tmux("claude-x", text, False, env=env)
+        assert ok, why
+        for _ in range(50):
+            if out.exists() and out.stat().st_size >= len(text):
+                break
+            time.sleep(0.1)
+        assert out.read_text() == text
+    finally:
+        subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_no_test_reaches_the_real_tmux_server():
+    """conftest's guard: $TMUX is unset and TMUX_TMPDIR is private while the suite runs, so a
+    `tmux kill-server` in a test can only end a server the test made."""
+    import os
+    import tempfile
+    assert "TMUX" not in os.environ
+    assert os.environ.get("TMUX_TMPDIR", "").startswith("/tmp/co-")

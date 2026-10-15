@@ -1,7 +1,30 @@
 import json
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_real_tmux():
+    """No test reaches the tmux server of the person running the suite. Inside a tmux pane, tmux
+    follows $TMUX before TMUX_TMPDIR, so a test's `tmux kill-server` once ended every session on
+    the machine. Every test runs with $TMUX unset and its own TMUX_TMPDIR."""
+    saved = {k: os.environ.get(k) for k in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR")}
+    os.environ.pop("TMUX", None)
+    os.environ.pop("TMUX_PANE", None)
+    # a short folder: a socket path longer than 104 bytes fails on macOS
+    private = tempfile.mkdtemp(prefix="co-", dir="/tmp")
+    os.environ["TMUX_TMPDIR"] = private
+    yield
+    shutil.rmtree(private, ignore_errors=True)
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 def write_chat(root: Path, folder: str, sid: str, records: list[dict]) -> Path:
