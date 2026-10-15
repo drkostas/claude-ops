@@ -257,6 +257,12 @@ update.restart_tmux(pid, "claude-<name>", chat_id)     # the same, inside the ch
   chat the person had in a tab of their choosing.
 - `restart_iterm` checks only that Claude is back. Check the new process runs the installed version
   before you call the update done, and wait for the new transcript before sending it a note.
+- A restart does not refresh the MCP tools a chat already loaded. Claude Code writes each deferred
+  tool's definition into the transcript when the chat first loads it, and a resumed conversation
+  keeps using those until it is compacted, so an argument the server gained since then cannot be
+  passed and its new description is not seen. `update.tools_held(transcript)` lists the definitions
+  the chat holds. Compare them with the server's tools, and tell the chat which arguments it cannot
+  pass yet and how else to reach them (a command-line twin, for example).
 
 ## Move a running chat into tmux, inside its own tab
 
