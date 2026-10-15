@@ -549,6 +549,51 @@ def files_seen(path: Path | None, since: str | None = None) -> dict[Path, str]:
     return seen
 
 
+def tools_held(path: Path | None) -> dict[str, dict]:
+    """The deferred tool definitions the conversation holds now: {tool name: {"description": its
+    text, "args": the names of its arguments}} for each tool it loaded since its last compaction, as
+    its newest load recorded it. {} when the transcript cannot be read or holds none.
+
+    Claude Code loads a deferred tool (an MCP tool found through its tool search) once and writes
+    the definition it got into the transcript. A resumed conversation keeps using those recorded
+    definitions until it is compacted, so restarting a chat does not give it an argument the server
+    gained since: the model never sees it, and the call goes out without it. A compaction clears the
+    loaded tools, and the next load reads the server again.
+
+    Compare these with the server's live tool list before telling a resumed chat that its tools
+    are current, and name the arguments it cannot pass yet."""
+    if path is None:
+        return {}
+    held: dict[str, dict] = {}
+    try:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if b'"deferred_tools_record"' not in raw and b'"compact_boundary"' not in raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("type") == "system" and rec.get("subtype") == "compact_boundary":
+                    held = {}
+                    continue
+                a = rec.get("attachment")
+                if rec.get("type") != "attachment" or not isinstance(a, dict) \
+                        or a.get("type") != "deferred_tools_record":
+                    continue
+                for e in a.get("entries") or []:
+                    if not isinstance(e, dict) or not e.get("name"):
+                        continue
+                    schema = e.get("input_schema") if isinstance(e.get("input_schema"), dict) else {}
+                    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+                    held[e["name"]] = {"description": str(e.get("description") or ""), "args": set(props)}
+    except OSError:
+        return {}
+    return held
+
+
 def _whole_file(result) -> str | None:
     """The path a tool result shows the whole content of, or None (a range, an image, an error)."""
     if not isinstance(result, dict) or result.get("userModified"):

@@ -572,3 +572,27 @@ def test_files_seen_is_what_the_chat_wrote_or_read_whole(tmp_path):
     assert cu.files_seen(f, since="2026-10-01T10:01:30.000Z") == {
         a.resolve(): "2026-10-01T10:06:00.000Z", c.resolve(): "2026-10-01T10:02:00.000Z"}
     assert cu.files_seen(None) == {} and cu.files_seen(tmp_path / "missing.jsonl") == {}
+
+
+def test_tools_held_is_what_the_conversation_loaded_since_its_last_compaction(tmp_path):
+    def loaded(at, *tools):
+        return {"type": "attachment", "timestamp": at, "attachment": {"type": "deferred_tools_record", "entries": [
+            {"name": n, "description": d, "input_schema": {"type": "object", "properties": {a: {} for a in args}}}
+            for n, d, args in tools]}}
+    compacted = {"type": "system", "subtype": "compact_boundary", "timestamp": "t2", "content": "Conversation compacted"}
+    rows = [
+        loaded("t1", ("mcp__srv__ask", "before", ["a"]), ("mcp__srv__gone", "x", [])),
+        compacted,
+        loaded("t3", ("mcp__srv__ask", "after", ["a", "b"])),
+        # a message that only names the record types is not one
+        {"type": "user", "timestamp": "t4", "message": {"content": "deferred_tools_record compact_boundary"}},
+        loaded("t5", ("mcp__srv__list", "list", []), ("mcp__srv__ask", "newest", ["a", "b", "c"])),
+    ]
+    f = tmp_path / "chat.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+    held = cu.tools_held(f)
+    assert held == {"mcp__srv__ask": {"description": "newest", "args": {"a", "b", "c"}},
+                    "mcp__srv__list": {"description": "list", "args": set()}}, held
+    f.write_text("\n".join(json.dumps(r) for r in rows + [compacted]) + "\n")
+    assert cu.tools_held(f) == {}, "a compaction after the last load leaves nothing held"
+    assert cu.tools_held(None) == {} and cu.tools_held(tmp_path / "missing.jsonl") == {}
