@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `sessions.build_index` writes the cache through a temp file of its own: with one shared name, two processes indexing at once renamed each other's file away and the second failed
 - The test suite never reaches the tmux server of the person running it: a session-wide fixture unsets `$TMUX` and gives tmux a private `TMUX_TMPDIR` under /tmp. Inside a tmux pane, tmux follows `$TMUX` before `TMUX_TMPDIR`, so a test's `tmux kill-server` cleanup ended the real server and every session in it
 - `inject.send_tmux` loads the text into the tmux buffer through stdin (`load-buffer -`). It passed the whole text as one `set-buffer` argument, and tmux refuses a command longer than about 16 KB with "command too long", so a long message never arrived and the error text was all the sender got
 - `update.tools_held(transcript)`: the deferred tool definitions a conversation holds now, each tool as its newest load since the last compaction recorded it, with its description and argument names. A resumed chat keeps those until it is compacted, so a restart does not give it an argument a server gained in the meantime. Compare them with the server's tools before telling a chat its tools are current
