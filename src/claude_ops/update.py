@@ -700,6 +700,51 @@ def _whole_file(result) -> str | None:
     return None
 
 
+#: error kinds of an "API Error:" stop that waiting and asking again will not cure
+NOT_TRANSIENT = {"invalid_request", "authentication_failed", "billing_error"}
+
+
+def _text_of(d: dict) -> str:
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, list):
+        c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+    return c if isinstance(c, str) else ""
+
+
+def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
+    """The transient API error a conversation stopped on, or None.
+
+    When the connection to the API drops mid-turn ("API Error: Connection lost mid-response"),
+    Claude Code ends the turn with an assistant record marked `isApiErrorMessage`, and the session
+    then waits at its prompt as if it had finished. This answers {"uuid", "at", "error", "text"} when
+    that record is the conversation's newest message (nothing typed or queued after it) and its error
+    is transient: the text starts with "API Error:" and the kind is not one of NOT_TRANSIENT. A usage
+    limit ("You've hit your session limit"), a prompt that is too long, billing or an expired login
+    are not, since asking again cannot help. At most `scan` lines are read from the end."""
+    if path is None:
+        return None
+    try:
+        for n, line in enumerate(_lines_from_end(Path(path))):
+            if n >= scan:
+                return None
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict) or d.get("type") not in ACTIVITY or d.get("isSidechain"):
+                continue
+            if d.get("type") != "assistant" or not d.get("isApiErrorMessage"):
+                return None
+            text = _text_of(d).strip()
+            if not text.startswith("API Error:") or d.get("error") in NOT_TRANSIENT:
+                return None
+            return {"uuid": d.get("uuid"), "at": d.get("timestamp"), "error": d.get("error"),
+                    "text": text}
+    except OSError:
+        return None
+    return None
+
+
 def transcript_of(chat_id: str, projects: Path = PROJECTS) -> Path | None:
     """The transcript of a conversation, in whichever project folder holds it (newest if several)."""
     hits = list(projects.glob(f"*/{chat_id}.jsonl"))

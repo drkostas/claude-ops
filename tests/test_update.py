@@ -638,3 +638,50 @@ def test_command_lines_reads_one_ps():
     assert cu.command_lines([103, 104], run=run) == {103: "/bin/zsh -c eval 'x'", 104: "sleep 60"}
     assert calls == [["/bin/ps", "-o", "pid=,command=", "-p", "103,104"]]
     assert cu.command_lines([], run=run) == {}
+
+
+def _err(text, error="server_error", **extra):
+    return {"type": "assistant", "isApiErrorMessage": True, "error": error, "uuid": "E1",
+            "timestamp": "2026-10-16T18:50:28.314Z",
+            "message": {"content": [{"type": "text", "text": text}]}, **extra}
+
+
+def _write(path, *records):
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return path
+
+
+def test_a_turn_cut_by_a_lost_connection_is_a_transient_stop(tmp_path):
+    lost = "API Error: Connection lost mid-response. The response above may be incomplete."
+    t = _write(tmp_path / "c.jsonl", {"type": "user"}, _err(lost),
+               {"type": "system", "subtype": "turn_duration"}, {"type": "last-prompt"})
+    assert cu.stopped_on_api_error(t) == {"uuid": "E1", "at": "2026-10-16T18:50:28.314Z",
+                                         "error": "server_error", "text": lost}
+    socket = _write(tmp_path / "s.jsonl", _err("API Error: The socket connection was closed "
+                                               "unexpectedly.", error="unknown"))
+    assert cu.stopped_on_api_error(socket)["error"] == "unknown"
+    busy = _write(tmp_path / "b.jsonl", _err("API Error: Server is temporarily limiting requests "
+                                             "(not your usage limit)", error="rate_limit"))
+    assert cu.stopped_on_api_error(busy) is not None
+
+
+def test_a_usage_limit_or_a_bad_request_is_not_retried(tmp_path):
+    for text, error in (("You've hit your session limit · resets 9pm", "rate_limit"),
+                        ("Prompt is too long", "invalid_request"),
+                        ("Credit balance is too low", "billing_error"),
+                        ("Login expired · Please run /login", "authentication_failed"),
+                        ("API Error: Prompt is too long", "invalid_request")):
+        t = _write(tmp_path / "c.jsonl", _err(text, error=error))
+        assert cu.stopped_on_api_error(t) is None, text
+
+
+def test_anything_after_the_error_means_the_chat_moved_on(tmp_path):
+    lost = _err("API Error: Connection lost mid-response.")
+    assert cu.stopped_on_api_error(_write(tmp_path / "u.jsonl", lost, {"type": "user"})) is None
+    assert cu.stopped_on_api_error(_write(tmp_path / "q.jsonl", lost, {"type": "queue-operation"})) is None
+    assert cu.stopped_on_api_error(_write(tmp_path / "a.jsonl", lost, {"type": "assistant"})) is None
+    # a subagent's record is not the conversation's own turn
+    side = _write(tmp_path / "side.jsonl", lost, {"type": "assistant", "isSidechain": True})
+    assert cu.stopped_on_api_error(side) is not None
+    assert cu.stopped_on_api_error(None) is None
+    assert cu.stopped_on_api_error(tmp_path / "missing.jsonl") is None
