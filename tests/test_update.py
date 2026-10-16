@@ -618,6 +618,23 @@ def test_a_wait_that_then_acts_or_writes_is_not_a_waiter():
     assert not cu.is_waiter(WRAP.format("until [ -f x ]; do sleep 5; done; rtk proxy bash -c 'rm -rf x'"))
 
 
+def test_a_report_loop_after_the_wait_still_only_reads():
+    # the shape a chat writes to report a train's pull requests once its log ends
+    assert cu.is_waiter(WRAP.format(
+        'until grep -q "train exit" /tmp/x/t.log; do sleep 60; done; tail -15 /tmp/x/t.log; '
+        'for n in 11 12; do echo "$n $(gh pr view $n --json state -q .state)"; done'))
+    assert cu.is_waiter(WRAP.format(
+        "until [ -f x ]; do sleep 5; done; if grep -q ok x; then echo ok; else echo no; fi"))
+
+
+def test_a_substitution_or_loop_that_acts_is_not_a_waiter():
+    assert not cu.is_waiter(WRAP.format('until [ -f x ]; do sleep 5; done; echo "$(rm -rf x)"'))
+    assert not cu.is_waiter(WRAP.format("until [ -f x ]; do sleep 5; done; echo `rm x`"))
+    assert not cu.is_waiter(WRAP.format("until [ -f x ]; do sleep 5; done; for n in 1 2; do gh pr merge $n; done"))
+    assert not cu.is_waiter(WRAP.format('until [ -f x ]; do sleep 5; done; echo "$(cat x'))
+    assert not cu.is_waiter(WRAP.format("until [ -f x ]; do sleep 5; done; gh pr close 1"))
+
+
 def test_idle_looks_through_shells_that_only_wait():
     procs = {**MCP_ONLY, 103: {"ppid": 100, "comm": "/bin/zsh"}, 104: {"ppid": 103, "comm": "sleep"}}
     wait = {103: WRAP.format('until grep -q done /tmp/x.log; do sleep 60; done; tail -5 /tmp/x.log')}
