@@ -58,6 +58,11 @@ def shell_children(pid: int, procs: dict[int, dict]) -> list[int]:
 #: what may run after a wait loop for the shell to be only a wait: commands that read and print
 READ_ONLY = frozenset({"tail", "cat", "head", "grep", "echo", "printf", "ls", "wc", "date", "sort",
                        "uniq", "cut", "sed", "awk", "jq"})
+#: `gh` subcommands that only read: a report after a wait often asks GitHub for a pull request's state
+GH_READS = frozenset({("pr", "view"), ("pr", "checks"), ("pr", "list"), ("pr", "status"),
+                      ("run", "view"), ("run", "list"), ("issue", "view"), ("issue", "list")})
+#: shell words that open or close a loop or a branch; what follows them on the line is a command
+_KEYWORDS = frozenset({"if", "do", "done", "then", "else", "fi"})
 _EVAL = re.compile(r"\beval '(?P<cmd>.*)' < /dev/null", re.S)
 _LOOP = re.compile(r"^\s*(?:until|while)\s+.+?;\s*do\s+sleep\s+[\d.]+\s*;\s*done\b(?P<after>.*)$", re.S)
 _PROXY = re.compile(r"^rtk\s+proxy\s+(?:bash|sh|zsh)\s+-c\s+(?P<inner>.*)$", re.S)
@@ -83,7 +88,15 @@ def is_waiter(command: str) -> bool:
 def _only_reads(text: str) -> bool:
     """Every command in `text` (split by shell rules, so a quoted `|` stays inside its argument) is
     one that reads and prints, `rtk proxy bash -c '<commands>'` is looked into, and nothing writes
-    a file with `>`."""
+    a file with `>`. A `for NAME in ...` loop, its `do`/`done`, and `if`'s `then`/`else`/`fi` are
+    shell words around commands, and the commands inside them are checked. Every `$( ... )` is
+    checked too, wherever it stands (an `echo "$(rm x)"` is not only an echo), and a backtick is
+    refused."""
+    if "`" in text:
+        return False
+    for inner in _substitutions(text):
+        if inner is None or not _only_reads(inner):
+            return False
     try:
         lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>")
         lex.whitespace_split = True
@@ -99,7 +112,13 @@ def _only_reads(text: str) -> bool:
             cur.append(t)
     commands.append(cur)
     for cmd in commands:
+        while cmd and cmd[0] in _KEYWORDS:
+            cmd = cmd[1:]
         if not cmd:
+            continue
+        if cmd[0] == "for":
+            if len(cmd) < 3 or cmd[2] != "in" or not re.fullmatch(r"[A-Za-z_]\w*", cmd[1]):
+                return False            # not the plain `for NAME in WORDS` shape
             continue
         for i, t in enumerate(cmd):
             if t and set(t) <= set("<>&") and ">" in t and (cmd[i + 1:i + 2] != ["/dev/null"]):
@@ -108,9 +127,33 @@ def _only_reads(text: str) -> bool:
             if not _only_reads(cmd[4]):
                 return False
             continue
+        if cmd[0] == "gh" and tuple(cmd[1:3]) in GH_READS:
+            continue
         if cmd[0] not in READ_ONLY:
             return False
     return True
+
+
+def _substitutions(text: str) -> list[str | None]:
+    """The contents of each `$( ... )` in `text`, outermost first, or None for one left open."""
+    out: list[str | None] = []
+    i = 0
+    while True:
+        start = text.find("$(", i)
+        if start < 0:
+            return out
+        depth, j = 1, start + 2
+        while j < len(text) and depth:
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+            j += 1
+        if depth:
+            out.append(None)
+            return out
+        out.append(text[start + 2:j - 1])
+        i = j
 
 
 def waiting_shells(shells: list[int], procs: dict[int, dict], commands: Mapping[int, str]) -> list[int]:
