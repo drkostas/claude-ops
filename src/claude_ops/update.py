@@ -55,17 +55,106 @@ def shell_children(pid: int, procs: dict[int, dict]) -> list[int]:
             if v["ppid"] == pid and Path(v["comm"]).name.lstrip("-") in SHELLS]
 
 
+#: what may run after a wait loop for the shell to be only a wait: commands that read and print
+READ_ONLY = frozenset({"tail", "cat", "head", "grep", "echo", "printf", "ls", "wc", "date", "sort",
+                       "uniq", "cut", "sed", "awk", "jq"})
+_EVAL = re.compile(r"\beval '(?P<cmd>.*)' < /dev/null", re.S)
+_LOOP = re.compile(r"^\s*(?:until|while)\s+.+?;\s*do\s+sleep\s+[\d.]+\s*;\s*done\b(?P<after>.*)$", re.S)
+_PROXY = re.compile(r"^rtk\s+proxy\s+(?:bash|sh|zsh)\s+-c\s+(?P<inner>.*)$", re.S)
+
+
+def is_waiter(command: str) -> bool:
+    """Pure. Whether a background shell only waits: a loop whose body is `sleep N` (``until <test>;
+    do sleep 60; done``), followed by nothing or only commands that read and print (READ_ONLY,
+    also inside ``rtk proxy bash -c '...'``), with no redirection that writes. Claude Code wraps
+    each command as ``eval '<command>' < /dev/null`` in a shell; the wrapper is looked through.
+
+    Such a shell loses nothing when its chat restarts: the next instance is told which background
+    commands did not finish and starts again the ones it still needs. A wait followed by a command
+    that acts (``... done && deploy``) is not a waiter, and neither is any other command."""
+    m = _EVAL.search(command or "")
+    inner = (m.group("cmd") if m else (command or "")).replace("'\"'\"'", "'")
+    loop = _LOOP.match(inner)
+    if not loop:
+        return False
+    return _only_reads(loop.group("after"))
+
+
+def _only_reads(text: str) -> bool:
+    """Every command in `text` (split by shell rules, so a quoted `|` stays inside its argument) is
+    one that reads and prints, `rtk proxy bash -c '<commands>'` is looked into, and nothing writes
+    a file with `>`."""
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>")
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return False                    # unbalanced quotes: not a shape we can vouch for
+    commands, cur = [], []
+    for t in tokens:
+        if t and set(t) <= set(";&|"):
+            commands.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    commands.append(cur)
+    for cmd in commands:
+        if not cmd:
+            continue
+        for i, t in enumerate(cmd):
+            if t and set(t) <= set("<>&") and ">" in t and (cmd[i + 1:i + 2] != ["/dev/null"]):
+                return False            # a redirection that writes a file (not /dev/null)
+        if cmd[:2] == ["rtk", "proxy"] and len(cmd) >= 5 and cmd[3] == "-c":
+            if not _only_reads(cmd[4]):
+                return False
+            continue
+        if cmd[0] not in READ_ONLY:
+            return False
+    return True
+
+
+def waiting_shells(shells: list[int], procs: dict[int, dict], commands: Mapping[int, str]) -> list[int]:
+    """The shells among `shells` that are only waiting right now: a waiter (`is_waiter`) whose
+    children are all `sleep`, so it is between two looks and not running what follows the loop."""
+    out = []
+    for s in shells:
+        kids = [v for v in procs.values() if v["ppid"] == s]
+        if is_waiter(commands.get(s, "")) and kids and all(Path(k["comm"]).name == "sleep" for k in kids):
+            out.append(s)
+    return out
+
+
+def command_lines(pids: list[int], *, run=subprocess.run) -> dict[int, str]:
+    """{pid: its full command line} for the given processes, from one `ps`."""
+    if not pids:
+        return {}
+    r = run(["/bin/ps", "-o", "pid=,command=", "-p", ",".join(str(p) for p in pids)],
+            capture_output=True, text=True, timeout=10)
+    out = {}
+    for line in (getattr(r, "stdout", "") or "").splitlines():
+        head, _, rest = line.strip().partition(" ")
+        if head.isdigit():
+            out[int(head)] = rest.strip()
+    return out
+
+
 def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
          turn_ended_at: dt.datetime | None, now: dt.datetime,
          prompt_on_screen: bool | None = None, *, quiet_s: float = QUIET_S,
-         quiet_unhooked_s: float = QUIET_UNHOOKED_S) -> tuple[bool, str]:
+         quiet_unhooked_s: float = QUIET_UNHOOKED_S,
+         commands: Mapping[int, str] | None = None) -> tuple[bool, str]:
     """(is the chat idle, why). Every "no" says what it is waiting for.
 
     `procs` is `config.processes()`, `transcript_at` is `last_activity(...)`, `turn_ended_at`
     is when a Stop hook last fired for it (None when the caller has no such hook), and
     `prompt_on_screen` whether Claude's empty prompt is on its screen (`empty_prompt`), None when
-    the caller did not look."""
-    if shell_children(pid, procs):
+    the caller did not look. `commands` holds the full command line of the chat's shells
+    (`command_lines`); with it, a shell that only waits (`waiting_shells`) does not count as a
+    running command, because a restart loses nothing of it."""
+    shells = shell_children(pid, procs)
+    if commands is not None:
+        shells = [s for s in shells if s not in waiting_shells(shells, procs, commands)]
+    if shells:
         return False, "it is running a command"
     if transcript_at is None:
         return False, "its transcript was not found, so whether it is working is unknown"
@@ -395,7 +484,7 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
 
 def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
           turn_ended_at: dt.datetime | None, now: dt.datetime, *,
-          projects: Path = PROJECTS) -> tuple[bool, str]:
+          projects: Path = PROJECTS, commands: Mapping[int, str] | None = None) -> tuple[bool, str]:
     """(may this chat be restarted or typed into now, why). Everything a chat produces is read:
     what is on its screen, its transcript and process (`idle`), and its background agents.
 
@@ -406,8 +495,10 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
     prompt = empty_prompt(screen)
     if not prompt[0] and prompt[1] == ASKING:
         return False, "Claude is asking a question on its screen and waits for an answer"
+    if commands is None:
+        commands = command_lines(shell_children(pid, procs))
     ok, why = idle(pid, procs, last_activity(transcript_of(chat_id, projects)), turn_ended_at,
-                   now, prompt_on_screen=prompt[0])
+                   now, prompt_on_screen=prompt[0], commands=commands)
     if not ok:
         return ok, why
     agent = background_agent(chat_id, now.timestamp(), projects)
