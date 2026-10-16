@@ -181,6 +181,14 @@ def cmd_rover(a) -> int:
     return 0
 
 
+def cmd_merge(a) -> int:
+    from . import merge
+    code, said = merge.merge_when_green(a.number, a.repo, method=a.method, timeout_s=a.timeout * 60,
+                                        allow_no_checks=a.allow_no_checks)
+    print(said, file=sys.stdout if code == 0 else sys.stderr)
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="claude-ops", description="Tools for running many Claude Code chats on one machine.")
     p.add_argument("--version", action="version", version=f"claude-ops {__version__}")
@@ -209,6 +217,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--keep-text", action="store_true", help="store the text in the log (off by default, texts can carry secrets)")
     s.add_argument("--list", action="store_true", help="list the sessions that can be reached")
     s.set_defaults(func=cmd_inject)
+
+    s = sub.add_parser("merge", help="merge a pull request only when every check on its head passed")
+    s.add_argument("number", help="the pull request number")
+    s.add_argument("--repo", help="owner/name (default: the repository of the current folder)")
+    s.add_argument("--method", choices=("merge", "squash", "rebase"), default="merge")
+    s.add_argument("--timeout", type=float, default=30, help="minutes to wait for running checks")
+    s.add_argument("--allow-no-checks", action="store_true",
+                   help="merge a pull request that has no checks at all")
+    s.set_defaults(func=cmd_merge)
 
     s = sub.add_parser("chat", help="start, show, end or list chats that run in tmux")
     s.add_argument("action", choices=("new", "show", "end", "list"))

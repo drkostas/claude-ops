@@ -41,6 +41,18 @@ Before it sends, claude-ops checks that the target is running Claude Code. Text 
 
 Every send is written to `~/.local/state/claude-ops/inject.jsonl` before it happens, and its result after, with the same id on both lines. An attempt with no result line means the sender stopped in between. The log keeps the length and a SHA-256 hash of the text, not the text, unless you pass `--keep-text`.
 
+## Merge a pull request only when it is green
+
+```bash
+claude-ops merge 123                                   # the repository of the current folder
+claude-ops merge 123 --repo owner/name --method squash # waits up to 30 minutes for running checks
+```
+
+It waits for every check on the pull request's current head, refuses if any did not pass or if
+there are none, and merges that exact head (`--match-head-commit`), so a push in between is refused.
+Exit codes: 0 merged, 2 still running or no checks, 3 a check failed, 4 the merge was refused,
+5 not open.
+
 ## Start chats inside tmux
 
 ```bash
