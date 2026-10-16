@@ -328,6 +328,16 @@ move.move_files(chat_id, old_project_dir, new_project_dir, archive=archive_root,
   not bring the old one back.
 - Stop the chat before moving it, and resume it in the new folder with `chat.resume_command`.
 
+## Merge a pull request only when it is green
+
+When a chat merges a pull request, it runs `claude-ops merge <number>` (with `--repo owner/name`
+outside the repository's folder) instead of waiting for checks and then calling `gh pr merge`. Two
+separate steps can merge a pull request whose checks went red in between, or whose failure was cut
+from a shortened log. The command waits for every check on the current head, refuses any that did
+not pass and a pull request with no checks, and merges that exact head with `--match-head-commit`.
+Read its exit code: 0 merged, 2 still running or no checks, 3 a check failed (its names are
+printed), 4 the merge was refused, 5 not open.
+
 ## Traps
 
 - iTerm2 consent. The first time a new program (a launchd job, a fresh Python) scripts iTerm2,
