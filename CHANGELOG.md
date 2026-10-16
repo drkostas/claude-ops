@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The session index follows a conversation that moved to another folder: every record names the folder it ran in, and the newest one is the entry's `cwd`, on a full read and on an incremental one. It kept the folder of the first record, so a chat resumed elsewhere was listed under the folder it had left
 - `sessions.build_index` writes the cache through a temp file of its own: with one shared name, two processes indexing at once renamed each other's file away and the second failed
 - The test suite never reaches the tmux server of the person running it: a session-wide fixture unsets `$TMUX` and gives tmux a private `TMUX_TMPDIR` under /tmp. Inside a tmux pane, tmux follows `$TMUX` before `TMUX_TMPDIR`, so a test's `tmux kill-server` cleanup ended the real server and every session in it
 - `inject.send_tmux` loads the text into the tmux buffer through stdin (`load-buffer -`). It passed the whole text as one `set-buffer` argument, and tmux refuses a command longer than about 16 KB with "command too long", so a long message never arrived and the error text was all the sender got
