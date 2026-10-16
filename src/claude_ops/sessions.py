@@ -19,6 +19,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -140,9 +141,16 @@ def build_index(root: Path = ROOT, cache: Path = CACHE, force: bool = False) -> 
             changed = True
     if changed or old or not cache.exists():  # `old` now holds only the transcripts that are gone
         cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_suffix(".tmp")
-        tmp.write_text(json.dumps(idx))
-        os.replace(tmp, cache)  # a run killed mid-write must not leave half a cache
+        # a temp file of this writer's own: with one shared name, two processes indexing at once
+        # renamed each other's file away and the second failed with "No such file or directory"
+        fd, tmp = tempfile.mkstemp(dir=cache.parent, prefix=cache.stem + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(idx))
+            os.replace(tmp, cache)  # a run killed mid-write must not leave half a cache
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
     return sorted(idx, key=lambda e: e.get("active_at") or e["mtime"], reverse=True)
 
 

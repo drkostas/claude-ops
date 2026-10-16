@@ -136,3 +136,26 @@ def test_deep_search_finds_text_anywhere(chat_tree):
     hits = sessions.deep_search("ZEBRA", chat_tree)
     assert set(hits) == {"bbb"}
     assert sessions.deep_search("not in any chat", chat_tree) == {}
+
+
+def test_two_writers_at_once_both_finish(chat_tree, tmp_path):
+    """Two processes building the index at the same moment each write through a temp file of their
+    own: with one shared temp name, one renamed the other's file away and failed."""
+    import threading
+    cache = tmp_path / "cache" / "sessions.json"
+    errors: list[BaseException] = []
+
+    def run():
+        try:
+            for _ in range(20):
+                sessions.build_index(chat_tree, cache, force=True)
+        except BaseException as e:   # noqa: BLE001 - the test reports whatever a writer raised
+            errors.append(e)
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert len(json.loads(cache.read_text())) == 2
+    assert not list(cache.parent.glob("*.tmp"))
