@@ -23,6 +23,53 @@ def test_diagnose_names_the_prompt_and_the_fix():
     assert chat.diagnose("> ready", "claude-x") is None
 
 
+# the trust question as Claude Code draws it, and a chat at its prompt whose last answer quotes it
+TRUST_SCREEN = """
+ /home/user/projects/app
+
+ Quick safety check: Is this a project you created or one you trust? (Like your
+ own code, a well-known open source project, or work from your team).
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+"""
+
+AT_PROMPT_QUOTING_IT = """
+⏺ The resume left the chat on the question "Yes, I trust this folder", so I answered it.
+
+✻ Worked for 1m 16s
+
+───────────────────────────────────────────────────────────────────── build ─
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+"""
+
+
+def test_a_start_up_question_counts_only_at_the_bottom():
+    what, _fix = chat.diagnose(TRUST_SCREEN, "claude-x")
+    assert "trust this folder" in what
+    assert not chat.input_box(TRUST_SCREEN)
+    # the same words in the conversation above the input box are not a question waiting
+    assert chat.input_box(AT_PROMPT_QUOTING_IT)
+    assert chat.diagnose(AT_PROMPT_QUOTING_IT, "claude-x") is None
+    # and words far above the bottom are not either
+    assert chat.diagnose("Please Select login method\n" + "line\n" * 20, "claude-x") is None
+
+
+def test_at_prompt_is_not_fooled_by_a_conversation_about_the_question(monkeypatch):
+    monkeypatch.setattr(chat, "pane_text", lambda *_a, **_k: AT_PROMPT_QUOTING_IT)
+    assert chat.at_prompt("claude-x", wait=0.1)
+    monkeypatch.setattr(chat, "pane_text", lambda *_a, **_k: TRUST_SCREEN)
+    assert not chat.at_prompt("claude-x", wait=0.1)
+
+
 def test_project_dir_matches_claude_code_naming(tmp_path, monkeypatch):
     monkeypatch.setattr(chat, "PROJECTS", tmp_path)
     d = chat.project_dir(Path("/"))

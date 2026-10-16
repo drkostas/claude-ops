@@ -54,8 +54,27 @@ def pane_text(name: str, *, styled: bool = False, env: Mapping[str, str] | None 
     return r.stdout if r.returncode == 0 else ""
 
 
+#: how many lines up from the bottom a start-up question is looked for: Claude Code draws the
+#: question last, and words above it are the conversation, which may quote the question itself
+QUESTION_LINES = 12
+
+
+def input_box(text: str) -> bool:
+    """Claude Code's own input box is at the bottom of the screen: a line opening with ❯ between two
+    rules of ─. A screen that ends with it is waiting for a message, not on a start-up question."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()][-8:]
+    return any(lines[i].startswith("❯") and lines[i - 1].startswith("─") and lines[i + 1].startswith("─")
+               for i in range(1, len(lines) - 1))
+
+
 def diagnose(text: str, name: str) -> tuple[str, str] | None:
-    low = text.lower()
+    """What a start-up question on the screen is, and how to answer it; None when there is none.
+
+    Only the bottom of the screen counts, and never while the input box is there: a conversation
+    that mentions "trust this folder" read as a chat stuck on the trust prompt."""
+    if input_box(text):
+        return None
+    low = "\n".join([ln for ln in text.splitlines() if ln.strip()][-QUESTION_LINES:]).lower()
     for needle, what, fix in BLOCKED_ON:
         if needle in low:
             return what, fix.format(name=name)
@@ -316,7 +335,7 @@ def at_prompt(name: str, wait: float = 90.0, *, env: Mapping[str, str] | None = 
     end = time.time() + wait
     while time.time() < end:
         text = pane_text(name, env=env)
-        if "❯" in text and diagnose(text, name) is None and "trust this folder" not in text.lower():
+        if "❯" in text and diagnose(text, name) is None:
             return True
         time.sleep(2)
     return False
