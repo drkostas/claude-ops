@@ -159,3 +159,24 @@ def test_two_writers_at_once_both_finish(chat_tree, tmp_path):
     assert errors == []
     assert len(json.loads(cache.read_text())) == 2
     assert not list(cache.parent.glob("*.tmp"))
+
+
+def test_the_index_follows_a_conversation_that_moved(tmp_path):
+    """Every record names the folder it ran in. A conversation moved to another folder (the person
+    resumed it elsewhere) shows the newest folder, on a full read and on an incremental one."""
+    from claude_ops import sessions
+    root = tmp_path / "projects"
+    d = root / "-tmp-first"
+    d.mkdir(parents=True)
+    path = d / "0d0e0f10-1111-4222-8333-444455556666.jsonl"
+    recs = [{"type": "user", "cwd": "/tmp/first", "message": {"role": "user", "content": "hello"}, "sessionId": path.stem},
+            {"type": "assistant", "cwd": "/tmp/first", "message": {"role": "assistant", "content": "hi"}}]
+    path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    first = sessions.read_meta(path)
+    assert first["cwd"] == "/tmp/first"
+    with path.open("a") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/tmp/second", "message": {"role": "user", "content": "moved"}}) + "\n")
+    again = sessions.read_meta(path, first)
+    assert again["cwd"] == "/tmp/second", again
+    fresh = sessions.read_meta(path)
+    assert fresh["cwd"] == "/tmp/second"

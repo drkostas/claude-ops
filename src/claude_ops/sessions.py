@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import platform
 import shutil
@@ -68,6 +69,10 @@ def _seam(fh, end: int) -> str:
     return hashlib.blake2b(fh.read(end - start), digest_size=8).hexdigest()
 
 
+#: the folder a record was written in; a moved conversation carries the new one from then on
+_CWD = re.compile(rb'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
 def _record(raw: bytes) -> dict | None:
     try:
         d = json.loads(raw.decode("utf-8", errors="replace"))
@@ -109,6 +114,11 @@ def read_meta(path: Path, prev: dict | None = None) -> dict:
                             txt = _text_of((d.get("message") or {}).get("content"))
                             if txt and not txt.startswith("<"):
                                 out["first"] = txt[:300]
+                # a conversation moved to another folder: every record names the folder it ran in,
+                # so the newest one wins, read without parsing the whole record
+                m = _CWD.search(raw)
+                if m:
+                    out["cwd"] = m.group(1).decode("utf-8", "replace")
                 if raw.endswith(b"\n"):  # a line still being written is read again next time
                     read_to += len(raw)
                     i += 1
