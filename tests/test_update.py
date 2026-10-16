@@ -596,3 +596,45 @@ def test_tools_held_is_what_the_conversation_loaded_since_its_last_compaction(tm
     f.write_text("\n".join(json.dumps(r) for r in rows + [compacted]) + "\n")
     assert cu.tools_held(f) == {}, "a compaction after the last load leaves nothing held"
     assert cu.tools_held(None) == {} and cu.tools_held(tmp_path / "missing.jsonl") == {}
+
+
+WRAP = "/bin/zsh -c source /x/snapshot.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB && eval '{}' < /dev/null && pwd -P >| /tmp/claude-ab12-cwd"
+
+
+def test_a_wait_loop_that_only_reads_is_a_waiter():
+    assert cu.is_waiter(WRAP.format('until grep -q "ship exit" /tmp/x/ship.log; do sleep 60; done; tail -15 /tmp/x/ship.log'))
+    assert cu.is_waiter(WRAP.format("until [ -f /tmp/x/READY ]; do sleep 10; done; cat /tmp/x/PORT"))
+    assert cu.is_waiter(WRAP.format(
+        "until grep -q \"train exit\" /tmp/x/t.log 2>/dev/null; do sleep 60; done; "
+        "rtk proxy bash -c '\"'\"'grep -E \"RED|MERGED\" /tmp/x/t.log | head -12'\"'\"'"))
+    assert cu.is_waiter(WRAP.format("while pgrep -x make; do sleep 5; done"))
+
+
+def test_a_wait_that_then_acts_or_writes_is_not_a_waiter():
+    assert not cu.is_waiter(WRAP.format("until gh pr view 1 --json state | grep -q MERGED; do sleep 60; done && ./deploy.sh"))
+    assert not cu.is_waiter(WRAP.format("until [ -f x ]; do sleep 5; done; cat x > y"))
+    assert not cu.is_waiter(WRAP.format("until [ -f x ]; do make; sleep 5; done"))
+    assert not cu.is_waiter(WRAP.format("python3 long_job.py"))
+    assert not cu.is_waiter(WRAP.format("until [ -f x ]; do sleep 5; done; rtk proxy bash -c 'rm -rf x'"))
+
+
+def test_idle_looks_through_shells_that_only_wait():
+    procs = {**MCP_ONLY, 103: {"ppid": 100, "comm": "/bin/zsh"}, 104: {"ppid": 103, "comm": "sleep"}}
+    wait = {103: WRAP.format('until grep -q done /tmp/x.log; do sleep 60; done; tail -5 /tmp/x.log')}
+    assert cu.idle(100, procs, ago(120), ago(110), NOW, commands=wait)[0]
+    assert not cu.idle(100, procs, ago(120), ago(110), NOW)[0]            # no command lines: counted
+    printing = {**procs, 104: {"ppid": 103, "comm": "tail"}}
+    assert not cu.idle(100, printing, ago(120), ago(110), NOW, commands=wait)[0]   # past the loop
+    job = {103: WRAP.format("python3 long_job.py")}
+    assert not cu.idle(100, procs, ago(120), ago(110), NOW, commands=job)[0]
+
+
+def test_command_lines_reads_one_ps():
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "  103 /bin/zsh -c eval 'x'\n  104 sleep 60\n", "")
+    assert cu.command_lines([103, 104], run=run) == {103: "/bin/zsh -c eval 'x'", 104: "sleep 60"}
+    assert calls == [["/bin/ps", "-o", "pid=,command=", "-p", "103,104"]]
+    assert cu.command_lines([], run=run) == {}

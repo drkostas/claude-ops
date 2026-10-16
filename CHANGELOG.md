@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `update.idle` and `update.ready` look through background shells that only wait: a loop whose body is `sleep N` (`until <test>; do sleep 60; done`), followed by nothing or only commands that read and print, sitting in its `sleep` right now (`is_waiter`, `waiting_shells`, `command_lines`). Such a shell loses nothing when its chat restarts, because the next instance is told which background commands did not finish. A chat that kept a few of these running was never idle, so it was never restarted. `ready` reads the command lines itself; `idle` uses them when given
 - `chat.diagnose` looks for a start-up question only in the last lines of the screen, and never while Claude Code's input box is there (`chat.input_box`). It matched the words anywhere, so a chat at its prompt whose conversation quoted "Yes, I trust this folder" read as stuck on the trust question, and `chat.at_prompt` never saw it ready
 - The session index follows a conversation that moved to another folder: every record names the folder it ran in, and the newest one is the entry's `cwd`, on a full read and on an incremental one. It kept the folder of the first record, so a chat resumed elsewhere was listed under the folder it had left
 - `sessions.build_index` writes the cache through a temp file of its own: with one shared name, two processes indexing at once renamed each other's file away and the second failed
