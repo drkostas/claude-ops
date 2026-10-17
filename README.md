@@ -67,6 +67,27 @@ claude-ops layering /path/to/project --package app --marker psycopg --marker app
 A good use is a test in the private project that keeps a reviewed list of the modules that stay, each
 with its reason, and fails on every new candidate.
 
+## Tools for a repository many chats change
+
+```bash
+claude-ops union <worktree> --ordered order.txt --journal CHANGES.md   # in a stopped diff3 rebase
+claude-ops secret-shapes <worktree> origin/main --shapes shapes.json   # or --pre-push in a git hook
+claude-ops mutate <worktree> --run "pytest -q {copy}/tests" --function src/pkg/mod.py:name
+claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps lists them
+```
+
+- `union` settles a rebase conflict where both sides only added lines, by keeping both, the
+  upstream side first. JSON files merge by key, an `--ordered` file lists each entry once, and a
+  `--journal` keeps only what the commit appended. Anything else exits 1, so a script can abort the
+  rebase. Rebase with `-c merge.conflictStyle=diff3`.
+- `secret-shapes` refuses commits whose added lines match a shape a secret scanner flagged before,
+  from a JSON file the project keeps. It reads every commit, as a pull request scanner does.
+- `mutate` changes a function on purpose (negated tests, moved boundaries, removed calls, None
+  returns) in a copy of the worktree, runs the command there, and lists every change the tests let
+  through.
+- `plan-apply` applies a written plan's `(Write `path`)` and `(Edit on `path`)` steps exactly, and
+  stops at the first step that cannot be applied.
+
 ## Start chats inside tmux
 
 ```bash

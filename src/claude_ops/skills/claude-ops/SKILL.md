@@ -338,6 +338,25 @@ not pass and a pull request with no checks, and merges that exact head with `--m
 Read its exit code: 0 merged, 2 still running or no checks, 3 a check failed (its names are
 printed), 4 the merge was refused, 5 not open.
 
+## Repository tools: union, secret-shapes, mutate, plan-apply
+
+- **A rebase stopped on a conflict where both sides only added lines** (two branches adding an entry
+  at the same place): `claude-ops union <worktree>`, after rebasing with
+  `git -c merge.conflictStyle=diff3 rebase`. It stages what it settled; exit 1 means a real conflict,
+  so abort the rebase and resolve it by hand. Name files where each entry appears once with
+  `--ordered`, and append-only logs with `--journal`.
+- **Before pushing to a repository whose pull requests a secret scanner reads**:
+  `claude-ops secret-shapes <worktree> <base> --shapes <file>`, or `--pre-push` in a pre-push hook.
+  When the scanner flags a line that holds no secret, add its shape to the file with the fix that
+  cleared it, so the next push is refused before the scanner sees it. Rewrite the commit that added
+  the line; a later commit that removes it does not help.
+- **To prove a test can fail**: `claude-ops mutate <worktree> --run "<command with {copy}>"
+  --function <file>:<name>`. Every mutation the command lets pass is a gap in the tests. `--list`
+  shows the mutations without running anything; `--caught` names the exit codes that mean a test
+  failed when the runner uses more than 1.
+- **To execute a written plan's file steps**: `claude-ops plan-apply PLAN.md '<words from the step
+  header>'`. Name steps by words rather than line numbers when the plan may still change.
+
 ## Tell chats apart in a shared window by tab color
 
 ```bash
