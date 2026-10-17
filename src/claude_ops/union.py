@@ -8,7 +8,8 @@ without a person, and a real conflict still stops it:
 - a block whose common base is EMPTY (both sides only inserted lines) keeps both sides, the upstream
   side first. Run the tests after the rebase: a union that does not work fails there.
 - in a file named with `--ordered` (a list where order matters and each entry appears once) the
-  same, without repeats, the upstream entries first.
+  same, without repeats, the upstream entries first. A comment line (`#`) or a blank line is not an
+  entry, so two entries that carry the same note both keep it.
 - in a file named with `--journal` (an append-only log), a block where the commit only appended after
   its base keeps the upstream side and adds the new lines. That is the shape left when a branch is
   moved off another branch it was stacked on: the base holds the lower branch's entry, which the
@@ -78,7 +79,10 @@ def settle(path: str, text: str, *, ordered: tuple = (), journals: tuple = ()) -
             raise Refused("both sides changed lines that were already there")
         if path in ordered:               # an entry both sides list is listed once
             have = ours.splitlines()
-            return "".join(f"{ln}\n" for ln in have + [t for t in theirs.splitlines() if t not in have])
+            # a comment or a blank line is not an entry: two entries can carry the same note
+            return "".join(f"{ln}\n" for ln in have + [t for t in theirs.splitlines()
+                                                      if t not in have or not t.strip()
+                                                      or t.lstrip().startswith("#")])
         return ours + theirs
     out = BLOCK.sub(block, text)
     if MARKER_LINE.search(out):
