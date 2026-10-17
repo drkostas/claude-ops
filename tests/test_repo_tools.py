@@ -83,6 +83,13 @@ def test_union_ordered_file_lists_each_entry_once(tmp_path):
     assert (d / "order.txt").read_text() == "a\nb\nc\nd\ne\n"
 
 
+def test_union_ordered_file_keeps_a_note_both_sides_wrote(tmp_path):
+    d = rebasing(tmp_path, {"order.txt": "a\n"}, {"order.txt": "a\n# note\nb\n"},
+                 {"order.txt": "a\n# about c\n# note\nc\n"})
+    assert union.settle_tree(d, ordered=("order.txt",), env=ENV) == 0
+    assert (d / "order.txt").read_text() == "a\n# note\nb\n# about c\n# note\nc\n"
+
+
 def test_union_journal_drops_a_stacked_base_entry():
     text = ("<<<<<<< HEAD\nupstream entry\n||||||| base\nlower branch entry\n=======\n"
             "lower branch entry\nmy entry\n>>>>>>> topic\n")
