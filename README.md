@@ -53,6 +53,20 @@ there are none, and merges that exact head (`--match-head-commit`), so a push in
 Exit codes: 0 merged, 2 still running or no checks, 3 a check failed, 4 the merge was refused,
 5 not open.
 
+## Find general code in a private project
+
+A private project built over public packages tends to grow general code of its own, because that is
+where the work happened. `layering` lists the modules that reach none of the project's private
+markers (its database driver, the module that writes its records) through their imports, so each one
+is a candidate to move into a package:
+
+```bash
+claude-ops layering /path/to/project --package app --marker psycopg --marker app.core.record --skip app.tests
+```
+
+A good use is a test in the private project that keeps a reviewed list of the modules that stay, each
+with its reason, and fails on every new candidate.
+
 ## Start chats inside tmux
 
 ```bash
