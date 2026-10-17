@@ -3,7 +3,8 @@ name: claude-ops
 description: >
   Use when you work with other Claude Code chats on the same Mac. That covers finding an old chat
   in any project folder and resuming it, starting a named chat in tmux, sending a message into a
-  running chat, handing work to another chat, waiting for a chat to finish its turn, bringing back
+  running chat, handing work to another chat, waiting for a chat to finish its turn or noticing
+  that a background agent stalled, bringing back
   transcripts that disappeared, and sharing Playwright browser profiles between chats. It also
   covers bringing open chats up to date after Claude Code or a CLAUDE.md changed, giving a chat its
   own git worktree, and moving a conversation to another folder. Also use it when a send into
@@ -27,6 +28,7 @@ claude-ops inject --list [--transport tmux]
 claude-ops inject --target <id or name> --text "..."   # or --file, or stdin
 claude-ops slots [--first-free | --release-stale]
 claude-ops restore [--dry-run]
+claude-ops stall <transcript or folder> [--minutes 30] [--max-hours 12] [--done-file F]
 ```
 
 ## Find a chat and resume it from the right folder
@@ -152,7 +154,36 @@ More rules.
 
 ## Wait for a chat to finish its turn
 
-claude-ops has no command for this yet. Two manual ways work.
+To wait on one session's transcript (a background agent you started, or a chat you handed work
+to), run `claude-ops stall` on it as a background command next to the work. It checks once a
+minute and exits when something happened, so the background command's end is the signal.
+
+```bash
+claude-ops stall ~/.claude/projects/<folder>/<chat id>/subagents/agent-<id>.jsonl --minutes 30
+claude-ops stall ~/.claude/projects/<folder>/<chat id>/subagents          # every agent of a chat
+claude-ops stall /path/to/output --done-file /path/to/output/DONE        # a job that writes a file
+```
+
+| Result | Exit | Meaning |
+|---|---|---|
+| finished | 0 | the newest message is the assistant's with stop_reason end_turn (for a folder, every transcript in it) |
+| done | 0 | the `--done-file` exists and is not empty |
+| gone | 0 | the path no longer exists |
+| error | 1 | the newest message is Claude Code's record of an API error (a usage limit, for example), and the session waits |
+| stalled | 1 | nothing under the path changed for `--minutes`, and the line says what the last record was |
+| timeout | 2 | still changing after `--max-hours` |
+
+- The end of a turn is read from the newest message record, not the last line. Claude Code appends
+  bookkeeping records after a turn ends, so the last line is often not a message.
+- A stall line names what the session waits on ("a tool call with no result", "a tool result with
+  no answer"). A tool call with no result for a long time is often a command that hangs.
+- For a folder, "finished" needs every transcript in it to have ended. Agents that start in phases
+  can all be finished between two phases, so for a workflow wait on a file it writes at the end
+  with `--done-file`.
+- In Python it is `claude_ops.watch.stall(path, minutes=30, max_hours=12, done_file=None,
+  poll_s=60)`, and `stall_check(path, minutes, done_file, now)` looks once, for a scheduled job.
+
+For a chat's own end of turn, two more ways work.
 
 - A Stop hook that appends one line per finished turn. Claude Code passes the event as JSON on
   stdin, with `session_id` and `transcript_path`. Wait until the line count grows, with a time

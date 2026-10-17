@@ -189,6 +189,17 @@ def cmd_merge(a) -> int:
     return code
 
 
+def cmd_stall(a) -> int:
+    from . import watch
+    r = watch.stall(Path(a.path), minutes=a.minutes, max_hours=a.max_hours,
+                    done_file=Path(a.done_file) if a.done_file else None, poll_s=a.poll)
+    if a.json:
+        print(json.dumps(r))
+    else:
+        print(f"{datetime.now():%H:%M} {r['line']}")
+    return watch.STALL_EXIT[r["result"]]
+
+
 def cmd_layering(a) -> int:
     from . import layering
     return layering.main(a.root, a.package, a.marker or [], a.skip or [], a.json)
@@ -248,6 +259,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow-no-checks", action="store_true",
                    help="merge a pull request that has no checks at all")
     s.set_defaults(func=cmd_merge)
+
+    s = sub.add_parser("stall", help="wait on a session's transcript until it finishes, stops on an "
+                                      "error, or stalls (exit 0, 1 or 2)")
+    s.add_argument("path", help="a transcript (.jsonl), a folder of them, or any file or folder a job writes")
+    s.add_argument("--minutes", type=float, default=30, help="stalled after this long with no change")
+    s.add_argument("--max-hours", type=float, default=12, help="give up after this long (exit 2)")
+    s.add_argument("--done-file", help="a file the job writes when it is done, ends the wait once not empty")
+    s.add_argument("--poll", type=float, default=60, help="seconds between checks")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_stall)
 
     s = sub.add_parser("layering", help="list a project's modules that reach no private marker "
                                         "(candidates to move into a package)")
