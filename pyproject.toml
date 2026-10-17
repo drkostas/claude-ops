@@ -22,6 +22,7 @@ claude-ops = "claude_ops.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+iterm = ["iterm2>=2.7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

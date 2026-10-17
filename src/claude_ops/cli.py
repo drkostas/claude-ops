@@ -189,6 +189,20 @@ def cmd_merge(a) -> int:
     return code
 
 
+def cmd_tab_colors(a) -> int:
+    from claude_ops import iterm   # noqa: PLC0415
+    done = iterm.color_chat_tabs(prefix=a.prefix)
+    if done is None:
+        print("iTerm2's Python API did not answer (switch it on in iTerm2's settings, and install "
+              "the iterm extra)", file=sys.stderr)
+        return 2
+    for name, color in done.items():
+        print(f"{name}: {color}")
+    if not done:
+        print("every shared window's tabs already differ")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="claude-ops", description="Tools for running many Claude Code chats on one machine.")
     p.add_argument("--version", action="version", version=f"claude-ops {__version__}")
@@ -236,6 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-show", action="store_true", help="do not open an iTerm2 window")
     s.add_argument("--wait", type=int, default=30)
     s.set_defaults(func=cmd_chat)
+
+    s = sub.add_parser("tab-colors", help="give each chat tab in a shared iTerm2 window its own color")
+    s.add_argument("--prefix", default="claude-", help="tmux session names that are chats")
+    s.set_defaults(func=cmd_tab_colors)
 
     s = sub.add_parser("slots", help="Playwright MCP profile locks")
     s.add_argument("--root")
