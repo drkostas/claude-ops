@@ -88,6 +88,21 @@ claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps 
 - `plan-apply` applies a written plan's `(Write `path`)` and `(Edit on `path`)` steps exactly, and
   stops at the first step that cannot be applied.
 
+## One heavy job at a time
+
+```bash
+claude-ops heavy my-chat "android build" -- ./gradlew assembleDebug   # waits its turn, runs under a cap
+claude-ops heavy my-chat "render" --max-hold 30 --notify -- ./render.sh
+claude-ops heavy status                                              # the machine, the slot, the queue
+```
+
+Chats on one machine share one slot for builds, emulators, renders, crawls and big scans. A job
+waits until the machine has memory and disk to spare and it is its chat's turn (round robin across
+chats), then runs in its own process group under a memory cap (`HEAVY_MAX_GB`, 8), and gives the
+slot up after its turn (`HEAVY_TURN_MIN`, 60) while it keeps running. A CI runner can `hold` the slot
+for a job's worker and `release` it. `--notify` runs `HEAVY_NOTIFY` with the chat's name and a line
+saying how the job ended and what it took. Every caller must share `HEAVY_DIR`. macOS only.
+
 ## Start chats inside tmux
 
 ```bash
