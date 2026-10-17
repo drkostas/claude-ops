@@ -352,3 +352,40 @@ def repo_name(path: str, *, env: Mapping[str, str] | None = None) -> str:
         root = repo_root(Path(path), env=env)
         _REPO_NAMES[path] = (root or Path(path)).name
     return _REPO_NAMES[path]
+
+
+def parent_of(pid: int, *, env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
+    """(parent pid, command) of one process, read with ps; None when it cannot be read."""
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=3, env=env).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not out:
+        return None
+    ppid, _, comm = out.partition(" ")
+    return ppid, comm
+
+
+def claude_pid(start: int | None = None, parent=None, *, env: Mapping[str, str] | None = None,
+               depth: int = 8) -> int | None:
+    """The Claude Code process a hook (or any child of a chat) runs under: walk up from `start`
+    (default: this process's parent) to the first process whose command is `claude`. None when the
+    walk reaches the top, `depth` steps, or a process it cannot read. `parent` reads one step of the
+    tree and stands in for `ps` in a test."""
+    parent = parent or (lambda p: parent_of(p, env=env))
+    pid = os.getppid() if start is None else start
+    for _ in range(depth):
+        step = parent(pid)
+        if step is None:
+            return None
+        ppid, comm = step
+        if os.path.basename(comm.strip()) == "claude":
+            return pid
+        try:
+            pid = int(ppid)
+        except ValueError:
+            return None
+        if pid <= 1:
+            return None
+    return None
