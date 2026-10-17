@@ -815,6 +815,46 @@ def _local_command(d: dict) -> bool:
     return isinstance(c, str) and c.lstrip().startswith(("<command-name>", "<local-command-"))
 
 
+def _moves(d) -> bool:
+    """A record that means the conversation moved: a message, or one typed and queued."""
+    if not isinstance(d, dict) or d.get("type") not in ACTIVITY:
+        return False
+    # a compaction writes a user record ("This session is being continued ...") with no turn
+    # around it, so counting it made an idle chat look busy for ever
+    if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
+        return False
+    # a local slash command (/reload-plugins, /model ...) is recorded as user records and starts no
+    # turn, so nothing ends it: a refresh that ran one made every chat it refreshed look busy from
+    # then on. A command that does start a turn is still seen, through the assistant records that
+    # follow it.
+    return not (d.get("isMeta") or _local_command(d))
+
+
+def last_message(path: Path | None, scan: int | None = None) -> dict | None:
+    """The newest record in which the conversation moved (a message, or one typed and queued), or
+    None when there is none or the file cannot be read.
+
+    Read from the end, past the bookkeeping Claude Code appends after a turn ended, so a transcript
+    whose last line is not a message still answers. A subagent's own transcript is read the same
+    way: every record in it is marked `isSidechain`, and none is skipped for that. At most `scan`
+    lines are read from the end when it is given."""
+    if path is None:
+        return None
+    try:
+        for n, line in enumerate(_lines_from_end(Path(path))):
+            if scan is not None and n >= scan:
+                return None
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if _moves(d):
+                return d
+    except OSError:
+        return None
+    return None
+
+
 def last_activity(path: Path | None, first: int = 262144, cap: int = 64 << 20) -> dt.datetime | None:
     """When the conversation last moved: the newest message record in the transcript.
 
@@ -845,17 +885,7 @@ def last_activity(path: Path | None, first: int = 262144, cap: int = 64 << 20) -
                 d = json.loads(raw)
             except ValueError:
                 continue
-            # a compaction writes a user record ("This session is being continued ...") with no turn
-            # around it, so counting it made an idle chat look busy for ever
-            if d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
-                continue
-            # a local slash command (/reload-plugins, /model ...) is recorded as user records and
-            # starts no turn, so nothing ends it: keep_current's own refresh made every chat it
-            # refreshed look busy from then on. A command that does start a turn is still seen,
-            # through the assistant records that follow it.
-            if d.get("isMeta") or _local_command(d):
-                continue
-            if d.get("type") in ACTIVITY and d.get("timestamp"):
+            if _moves(d) and d.get("timestamp"):
                 try:
                     return dt.datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00"))
                 except ValueError:

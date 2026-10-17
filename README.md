@@ -157,6 +157,28 @@ with lock(Path("/tmp/repo-watch.lock")) as got:
 
 The `chat-watcher` skill explains the full pattern to Claude, including the launchd file.
 
+## Know when a session finished or stalled
+
+A background agent or a chat you handed work to can stop moving without saying so. A tool call that never returns and a usage limit both look like work in progress. `claude-ops stall` waits on the session's transcript and exits when something happened.
+
+```bash
+claude-ops stall ~/.claude/projects/<folder>/<chat id>/subagents/agent-<id>.jsonl
+claude-ops stall /path/to/folder --minutes 20 --max-hours 4 --done-file /path/to/folder/DONE
+```
+
+It checks once a minute and prints one line when it ends.
+
+| Result | Exit | When |
+|---|---|---|
+| finished | 0 | the newest message is the assistant's end of turn (for a folder, every transcript in it ended) |
+| done | 0 | the done file exists and is not empty |
+| gone | 0 | the path was removed |
+| error | 1 | the session stopped on an API error, such as a usage limit |
+| stalled | 1 | nothing under the path changed for `--minutes` (30 by default) |
+| timeout | 2 | it was still changing after `--max-hours` (12 by default) |
+
+Run it as a background command next to the work, and the end of that command tells the session that started it. A stall line says what the session was waiting on, for example a tool call with no result. In Python it is `claude_ops.watch.stall(...)`, which takes the clock and the sleep as arguments, and `stall_check(...)` looks once.
+
 ## Skills
 
 ```bash
