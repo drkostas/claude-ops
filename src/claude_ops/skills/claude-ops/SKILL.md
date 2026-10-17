@@ -338,6 +338,20 @@ not pass and a pull request with no checks, and merges that exact head with `--m
 Read its exit code: 0 merged, 2 still running or no checks, 3 a check failed (its names are
 printed), 4 the merge was refused, 5 not open.
 
+## Tell chats apart in a shared window by tab color
+
+```bash
+claude-ops tab-colors                # needs pip install 'claude-ops[iterm]' and iTerm2's Python API on
+```
+
+In every iTerm2 window that holds two or more chats, each tab gets a color no other tab there has.
+A color the user set is kept. A supervisor that runs it on a schedule can pass `remembered` to
+`iterm.assign` (or `iterm.color_chat_tabs`) so a chat keeps its color after a restart or a move.
+
+- A session object read through iTerm2's API belongs to that connection, and writing to it after
+  the connection closed fails. `set_tab_color` finds the session by its id in a connection of its own.
+- iTerm2 reports colors as floats (234.4, 116.1, 103.6). Compare them rounded.
+
 ## Traps
 
 - iTerm2 consent. The first time a new program (a launchd job, a fresh Python) scripts iTerm2,
