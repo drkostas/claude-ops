@@ -627,6 +627,15 @@ def test_a_report_loop_after_the_wait_still_only_reads():
         "until [ -f x ]; do sleep 5; done; if grep -q ok x; then echo ok; else echo no; fi"))
 
 
+def test_a_report_that_sets_a_variable_and_tests_it_only_reads():
+    assert cu.is_waiter(WRAP.format(
+        'until grep -qE "exit|^RED" /tmp/x/t.log 2>/dev/null || { L=$(ls -t /tmp/x/run-*.log 2>/dev/null | head -1); '
+        '[ -n "$L" ] && grep -qE "FAIL" "$L"; }; do sleep 30; done; tail -8 /tmp/x/t.log | cut -c1-220; '
+        'L=$(ls -t /tmp/x/run-*.log 2>/dev/null | head -1); [ -n "$L" ] && grep -E "FAIL" "$L"'))
+    assert not cu.is_waiter(WRAP.format('until [ -f x ]; do sleep 5; done; L=$(rm -rf x)'))
+    assert not cu.is_waiter(WRAP.format('until [ -f x ]; do sleep 5; done; { cat x; make; }'))
+
+
 def test_a_substitution_or_loop_that_acts_is_not_a_waiter():
     assert not cu.is_waiter(WRAP.format('until [ -f x ]; do sleep 5; done; echo "$(rm -rf x)"'))
     assert not cu.is_waiter(WRAP.format("until [ -f x ]; do sleep 5; done; echo `rm x`"))

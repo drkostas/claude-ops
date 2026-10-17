@@ -57,12 +57,14 @@ def shell_children(pid: int, procs: dict[int, dict]) -> list[int]:
 
 #: what may run after a wait loop for the shell to be only a wait: commands that read and print
 READ_ONLY = frozenset({"tail", "cat", "head", "grep", "echo", "printf", "ls", "wc", "date", "sort",
-                       "uniq", "cut", "sed", "awk", "jq"})
+                       "uniq", "cut", "sed", "awk", "jq", "[", "test", "true", "false"})
 #: `gh` subcommands that only read: a report after a wait often asks GitHub for a pull request's state
 GH_READS = frozenset({("pr", "view"), ("pr", "checks"), ("pr", "list"), ("pr", "status"),
                       ("run", "view"), ("run", "list"), ("issue", "view"), ("issue", "list")})
 #: shell words that open or close a loop or a branch; what follows them on the line is a command
-_KEYWORDS = frozenset({"if", "do", "done", "then", "else", "fi"})
+_KEYWORDS = frozenset({"if", "do", "done", "then", "else", "fi", "{", "}"})
+#: a shell variable set to a value, alone on its command: `L=$(ls -t x | head -1)`
+_ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
 _EVAL = re.compile(r"\beval '(?P<cmd>.*)' < /dev/null", re.S)
 _LOOP = re.compile(r"^\s*(?:until|while)\s+.+?;\s*do\s+sleep\s+[\d.]+\s*;\s*done\b(?P<after>.*)$", re.S)
 _PROXY = re.compile(r"^rtk\s+proxy\s+(?:bash|sh|zsh)\s+-c\s+(?P<inner>.*)$", re.S)
@@ -97,6 +99,9 @@ def _only_reads(text: str) -> bool:
     for inner in _substitutions(text):
         if inner is None or not _only_reads(inner):
             return False
+    for inner in _substitutions(text):
+        # checked above; a `|` or `;` inside one must not split the command around it
+        text = text.replace(f"$({inner})", "SUBSTITUTION", 1)
     try:
         lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>")
         lex.whitespace_split = True
@@ -112,8 +117,10 @@ def _only_reads(text: str) -> bool:
             cur.append(t)
     commands.append(cur)
     for cmd in commands:
-        while cmd and cmd[0] in _KEYWORDS:
-            cmd = cmd[1:]
+        while cmd and (cmd[0] in _KEYWORDS or _ASSIGN.match(cmd[0])):
+            cmd = cmd[1:]               # an assignment's value is a substitution, checked above
+        while cmd and cmd[-1] == "}":
+            cmd = cmd[:-1]
         if not cmd:
             continue
         if cmd[0] == "for":
