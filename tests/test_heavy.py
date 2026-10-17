@@ -8,7 +8,11 @@ import tempfile
 import time
 from pathlib import Path
 
+import claude_ops
+
 ROOMY = "20 2 50"          # free GB, swap GB, disk %: a machine with room
+#: the package under test, for the child processes: an installed claude-ops elsewhere must not answer
+SRC = str(Path(claude_ops.__file__).resolve().parents[1])
 
 
 def test_heavy_queue(monkeypatch):
@@ -23,7 +27,7 @@ def test_heavy_queue(monkeypatch):
 
     def env(**extra):
         e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
-             "HEAVY_DIR": str(STATE), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_POLL": "0.2"}
+             "HEAVY_DIR": str(STATE), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_POLL": "0.2", "PYTHONPATH": SRC}
         e.update(extra)
         return e
 
