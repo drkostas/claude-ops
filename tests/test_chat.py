@@ -118,3 +118,13 @@ def test_server_context_is_none_without_a_server(monkeypatch):
         stdout = ""
     monkeypatch.setattr(chat.subprocess, "run", lambda *a, **k: R())
     assert chat.server_context() == "none"
+
+
+def test_claude_pid_walks_up_to_the_claude_process():
+    from claude_ops import chat as ch
+    tree = {500: ("400", "/bin/zsh"), 400: ("300", "/usr/local/bin/claude"), 300: ("1", "tmux")}
+    assert ch.claude_pid(500, parent=lambda p: tree.get(p)) == 400
+    assert ch.claude_pid(300, parent=lambda p: tree.get(p)) is None        # reaches the top
+    assert ch.claude_pid(999, parent=lambda p: tree.get(p)) is None        # cannot read
+    loop = {10: ("11", "sh"), 11: ("10", "sh")}
+    assert ch.claude_pid(10, parent=lambda p: loop.get(p), depth=4) is None
