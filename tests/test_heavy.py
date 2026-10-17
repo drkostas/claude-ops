@@ -224,7 +224,8 @@ def test_heavy_queue(monkeypatch):
     time.sleep(2.5)                                   # the hold is now about three seconds old
     rc, st = heavy("status", HEAVY_TURN_MIN="0.02")
     check("past its turn of 0.02 min" in st, f"status marks a holder past its turn: {st.splitlines()[1][:140]!r}")
-    beside = start("b-chat", "next job", "--", "bash", "-c", "echo ran-beside; sleep 4", HEAVY_TURN_MIN="0.02")
+    beside = start("b-chat", "next job", "--", "bash", "-c", f"echo ran-beside; until [ -e {STATE}/stop-beside ]; do sleep 0.2; done",
+                       HEAVY_TURN_MIN="0.02")   # runs until the checks below are done, however slow the machine
     time.sleep(2)
     rc, st = heavy("status", HEAVY_TURN_MIN="0.02")
     check("slot: b-chat: next job" in st and "past its turn, still running: a-chat: emulator session" in st,
@@ -234,6 +235,7 @@ def test_heavy_queue(monkeypatch):
     rc, st = heavy("status", HEAVY_TURN_MIN="0.02")
     check("slot: b-chat: next job" in st and "a-chat" not in st,
           "its own release gives back nothing the new holder holds, and it leaves the list")
+    (STATE / "stop-beside").touch()
     out = beside.communicate(timeout=30)[0]
     check(beside.returncode == 0 and "ran-beside" in out and "past its turn" in out,
           f"the job that started beside it says why: {out.strip()[:150]!r}")
