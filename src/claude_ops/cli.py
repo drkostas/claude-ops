@@ -189,6 +189,11 @@ def cmd_merge(a) -> int:
     return code
 
 
+def cmd_layering(a) -> int:
+    from . import layering
+    return layering.main(a.root, a.package, a.marker or [], a.skip or [], a.json)
+
+
 def cmd_tab_colors(a) -> int:
     from claude_ops import iterm   # noqa: PLC0415
     done = iterm.color_chat_tabs(prefix=a.prefix)
@@ -240,6 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow-no-checks", action="store_true",
                    help="merge a pull request that has no checks at all")
     s.set_defaults(func=cmd_merge)
+
+    s = sub.add_parser("layering", help="list a project's modules that reach no private marker "
+                                        "(candidates to move into a package)")
+    s.add_argument("root", help="the folder that holds the package")
+    s.add_argument("--package", required=True, help="the top package to scan, e.g. app")
+    s.add_argument("--marker", action="append", help="an import that means the private side, e.g. psycopg")
+    s.add_argument("--skip", action="append", help="a module prefix to leave out, e.g. app.tests")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_layering)
 
     s = sub.add_parser("chat", help="start, show, end or list chats that run in tmux")
     s.add_argument("action", choices=("new", "show", "end", "list"))
