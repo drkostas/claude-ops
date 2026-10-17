@@ -237,6 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--list", action="store_true", help="list the sessions that can be reached")
     s.set_defaults(func=cmd_inject)
 
+    for name, (_, said) in TOOLS.items():   # parsed by their own modules (main), listed here for --help
+        sub.add_parser(name, help=said, add_help=False)
+
     s = sub.add_parser("merge", help="merge a pull request only when every check on its head passed")
     s.add_argument("number", help="the pull request number")
     s.add_argument("--repo", help="owner/name (default: the repository of the current folder)")
@@ -300,7 +303,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+#: commands whose module parses its own arguments: name -> (module, one line for --help)
+TOOLS = {"union": ("union", "settle a rebase conflict where both sides only added lines"),
+         "secret-shapes": ("secret_shapes", "refuse commits that add a line of a known secret shape"),
+         "mutate": ("mutate", "change code on purpose and check the tests catch it"),
+         "plan-apply": ("plan_apply", "apply a written plan's Write and Edit steps exactly")}
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in TOOLS:
+        import importlib   # noqa: PLC0415
+        mod = importlib.import_module(f"claude_ops.{TOOLS[argv[0]][0]}")
+        return mod.main(argv[1:])
     a = build_parser().parse_args(argv)
     return a.func(a)
 
