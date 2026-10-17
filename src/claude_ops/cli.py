@@ -307,7 +307,8 @@ def build_parser() -> argparse.ArgumentParser:
 TOOLS = {"union": ("union", "settle a rebase conflict where both sides only added lines"),
          "secret-shapes": ("secret_shapes", "refuse commits that add a line of a known secret shape"),
          "mutate": ("mutate", "change code on purpose and check the tests catch it"),
-         "plan-apply": ("plan_apply", "apply a written plan's Write and Edit steps exactly")}
+         "plan-apply": ("plan_apply", "apply a written plan's Write and Edit steps exactly"),
+         "heavy": ("heavy", "run heavy jobs one at a time across chats, under a memory cap")}
 
 
 def main(argv: list[str] | None = None) -> int:

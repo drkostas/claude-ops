@@ -357,6 +357,17 @@ printed), 4 the merge was refused, 5 not open.
 - **To execute a written plan's file steps**: `claude-ops plan-apply PLAN.md '<words from the step
   header>'`. Name steps by words rather than line numbers when the plan may still change.
 
+## Heavy jobs: one at a time, in turn, under a memory cap
+
+Run anything that takes a lot of memory, CPU or disk (an Android or Xcode build, an emulator, a
+render or mesh job, a local model, a crawl, a scan of a large tree) through
+`claude-ops heavy <chat> "<what>" -- <command...>`. It waits for room and for its chat's turn, ends a
+job whose process group passes `HEAVY_MAX_GB` (8 by default), and says the job's peak memory when it
+ends, so the next run can set the cap it needs. Set `HEAVY_MAX_GB` on the same line for a job that
+needs more. Give a job that should end by itself `--max-hold <minutes>`. With `--notify` and a
+`HEAVY_NOTIFY` command, the result reaches the chat instead of a polling loop. `claude-ops heavy
+status` says who holds the slot and who waits, and why.
+
 ## Tell chats apart in a shared window by tab color
 
 ```bash
