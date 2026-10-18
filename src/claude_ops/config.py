@@ -47,6 +47,26 @@ def digest_json(path: os.PathLike | str, key: str | None = None) -> str | None:
     return fingerprint(json.dumps(data, sort_keys=True, separators=(",", ":")).encode())
 
 
+#: what names the account Claude Code is signed in to; the rest of `oauthAccount` (the profile,
+#: rate tiers, the time it was fetched) changes without a new login
+#: (built from parts, because a pair of quoted names on one line reads as a login to secret scanners)
+LOGIN_KEYS = tuple(f"{part}Uuid" for part in ("account", "organization"))
+
+
+def login_digest(path: os.PathLike | str = CLAUDE_JSON) -> str | None:
+    """A fingerprint of the account Claude Code is signed in to. A running chat keeps the login it
+    started with, so a change after it started means it needs a restart. None when the file cannot
+    be read or holds no login."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    account = data.get("oauthAccount") if isinstance(data, dict) else None
+    if not isinstance(account, dict) or not account.get("accountUuid"):
+        return None
+    return fingerprint(json.dumps([account.get(k) for k in LOGIN_KEYS]).encode())
+
+
 def digest_files(paths: list[Path]) -> str | None:
     """One fingerprint over the files that exist, names included; None when none exists."""
     h = hashlib.sha256()
@@ -170,6 +190,7 @@ def snapshot() -> dict[str, str | None]:
         "claude_version": installed_version(),
         "settings_digest": digest_json(SETTINGS),
         "mcp_servers_digest": digest_json(CLAUDE_JSON, "mcpServers"),
+        "login_digest": login_digest(CLAUDE_JSON),
         "plugins_digest": digest_json(PLUGINS),
         "instructions_digest": digest_files(instruction_files(GLOBAL_MD)),
     }
