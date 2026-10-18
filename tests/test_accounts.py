@@ -118,3 +118,22 @@ def test_limit_hit(tmp_path):
     t.write_text(t.read_text() + json.dumps({"type": "user", "message": {"content": "go on"}}) + "\n")
     assert ac.limit_hit(t) is None
     assert ac.limit_hit(tmp_path / "missing.jsonl") is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the macOS keychain")
+def test_a_login_as_long_as_a_real_one_is_saved_whole_and_a_longer_one_is_refused():
+    service = "claude-ops-test-accounts-long"
+    data = {"claudeAiOauth": {"accessToken": "x" * 150, "refreshToken": "y" * 150, "scopes": ['a"b', "c\\d"]},
+            "mcpOAuth": {f"server{i}": {"accessToken": "t" * 40, "url": "https://e.example/p?q=1&r=2"}
+                         for i in range(18)}}
+    assert len(json.dumps(data)) > 2000
+    try:
+        assert ac.write_item(service, "tester", data)
+        assert ac.read_item(service, "tester") == data
+        too_long = {"blob": "z" * ac.STDIN_LIMIT}
+        with pytest.raises(ValueError):
+            ac.write_item(service, "tester", too_long)
+        assert ac.read_item(service, "tester") == data      # the refused write changed nothing
+    finally:
+        subprocess.run(["security", "delete-generic-password", "-s", service, "-a", "tester"],
+                       capture_output=True)
