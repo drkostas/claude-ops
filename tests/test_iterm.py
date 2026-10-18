@@ -41,3 +41,52 @@ def test_tmux_clients_are_read_by_terminal(monkeypatch):
         stdout = "/dev/ttys001 claude-a\n/dev/ttys002 other\n"
     monkeypatch.setattr(iterm.subprocess, "run", lambda *a, **k: R())
     assert iterm.tmux_by_tty() == {"/dev/ttys001": "claude-a", "/dev/ttys002": "other"}
+
+
+# ----------------------------------------------------------------------------- windows
+
+def test_windows_are_parsed_with_their_frames():
+    raw = "5\t2\t58,33,1728,1117\tbuild\nbad line\n6\t0\t0,0,10,10\t[tmux]\n"
+    got = iterm.parse_windows(raw)
+    assert got[0] == {"id": 5, "tabs": 2, "frame": {"x": 58, "y": 33, "w": 1670, "h": 1084}, "title": "build"}
+    assert [w["id"] for w in got] == [5, 6] and iterm.parse_windows(None) is None
+
+
+def test_dead_windows_are_the_unreadable_ones_and_unknown_is_none(monkeypatch):
+    assert iterm.dead_windows("12\n34\n") == {12, 34}
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: None)
+    assert iterm.dead_windows() is None
+
+
+def test_a_session_or_terminal_names_one_window_or_none():
+    raw = "5\t/dev/ttys001\n5\t/dev/ttys002\n6\t/dev/ttys003\nx\t/dev/ttys009\n"
+    assert iterm.parse_ttys(raw) == [(5, "/dev/ttys001"), (5, "/dev/ttys002"), (6, "/dev/ttys003")]
+    assert iterm.window_of_ttys({"/dev/ttys002"}, raw) == 5
+    assert iterm.window_of_ttys({"/dev/ttys001", "/dev/ttys003"}, raw) is None   # two windows: no guess
+    assert iterm.window_of_ttys(set(), raw) is None
+
+
+def test_session_uuid_and_unsafe_ids_are_refused(monkeypatch):
+    assert iterm.session_uuid("w0t1p0:ABC-1") == "ABC-1" and iterm.session_uuid("nope") is None
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked")))
+    assert iterm.window_of_session('w0t0p0:x" & quit') is None       # never put into a script
+    assert iterm.session_of_tmux_pane("%x") is None
+
+
+def test_an_empty_window_is_closed_and_one_with_a_session_kept(monkeypatch):
+    answers = iter(["0", "", None])
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: next(answers))
+    assert iterm.close_empty_window(9, wait=2) == "closed"
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: "1")
+    assert iterm.close_empty_window(9) == "kept"
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: None)
+    assert iterm.close_empty_window(9) == "not found"
+
+
+def test_set_bounds_returns_the_frame_read_back(monkeypatch):
+    target = {"x": 58, "y": 33, "w": 1670, "h": 1084}
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: "")
+    monkeypatch.setattr(iterm, "windows", lambda env=None: [{"id": 5, "frame": dict(target)}])
+    assert iterm.set_bounds(5, target) == target
+    monkeypatch.setattr(iterm, "windows", lambda env=None: [])
+    assert iterm.set_bounds(5, target) is None

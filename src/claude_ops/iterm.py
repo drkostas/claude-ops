@@ -8,6 +8,12 @@ gets a color no other tab in that window has. A color the user set is kept, a ch
 color it had before when that color is free in its window, and new colors come from PALETTE.
 `chat_tabs` reads the windows and `set_tab_color` writes one tab, through iTerm2's Python API (the
 `iterm2` package, installed with the `iterm` extra, and the API switched on in iTerm2's settings).
+
+The rest finds and tidies iTerm2's windows through AppleScript: which window shows a session, a
+terminal or a tmux pane, its frame, and the empty frames iTerm2 can leave behind. Every listing
+reads each window inside its own `try`, because a window iTerm2 closed can stay in its scripting
+model unreadable, and one such window failed every listing that did not. A listing that could not
+be taken is None, never "no windows".
 """
 from __future__ import annotations
 
@@ -134,3 +140,236 @@ def color_chat_tabs(*, prefix: str = "claude-", remembered: Mapping[str, Color] 
     change = assign([[(n, c) for n, c, _ in row] for row in windows], remembered)
     ids = {n: sid for row in windows for n, _c, sid in row}
     return {n: c for n, c in change.items() if set_tab_color(ids[n], c)}
+
+
+# ----------------------------------------------------------------------------- windows
+
+OSASCRIPT = "/usr/bin/osascript"
+SEP = "\t"
+
+
+def _osa(script: str, timeout: float = 5, *, env: Mapping[str, str] | None = None) -> str | None:
+    try:
+        r = subprocess.run([OSASCRIPT, "-e", script], capture_output=True, text=True, timeout=timeout,
+                           env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+_WINDOWS = '''set sep to (ASCII character 9)
+set out to ""
+tell application "iTerm2"
+repeat with w in (get windows)
+try
+set b to bounds of w
+set out to out & (id of w) & sep & (count of tabs of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & (name of w) & linefeed
+end try
+end repeat
+end tell
+return out'''
+
+
+def parse_windows(raw: str | None) -> list[dict] | None:
+    """Pure. iTerm2's window listing: {"id", "tabs", "frame" (yabai's coordinates), "title"}."""
+    if raw is None:
+        return None
+    out = []
+    for line in raw.splitlines():
+        parts = line.split(SEP, 3)
+        if len(parts) < 4 or not parts[0].isdigit():
+            continue
+        try:
+            left, top, right, bottom = (float(v) for v in parts[2].split(","))
+        except ValueError:
+            continue
+        out.append({"id": int(parts[0]), "tabs": int(parts[1]) if parts[1].isdigit() else None,
+                    "frame": {"x": left, "y": top, "w": right - left, "h": bottom - top},
+                    "title": parts[3]})
+    return out
+
+
+def windows(*, env: Mapping[str, str] | None = None) -> list[dict] | None:
+    """Every window iTerm2 has, as iTerm2 says; None when it does not answer (a launch agent that
+    was never allowed to script iTerm2 gets error -1712). iTerm2's window id is also yabai's."""
+    return parse_windows(_osa(_WINDOWS, 5, env=env))
+
+
+_DEAD = '''set out to ""
+tell application "iTerm2"
+repeat with w in (get windows)
+try
+set wid to (id of w) as text
+on error
+set wid to ""
+end try
+try
+set n to count of (get tabs of w)
+on error
+if wid is not "" then set out to out & wid & linefeed
+end try
+end repeat
+end tell
+return out'''
+
+
+def dead_windows(raw: str | None = None, *, env: Mapping[str, str] | None = None) -> set[int] | None:
+    """The ids of windows iTerm2 still lists but whose tabs cannot be read: frames iTerm2 closed
+    that stayed on screen, blank. Only the window's own close button removes one (through yabai,
+    claude_human.desktops.close_window). None when iTerm2 did not answer."""
+    out = _osa(_DEAD, 8, env=env) if raw is None else raw
+    if out is None:
+        return None
+    return {int(x) for x in out.split() if x.strip().isdigit()}
+
+
+def set_bounds(window_id: int, target: dict, *, wait: float = 2.0,
+               env: Mapping[str, str] | None = None) -> dict | None:
+    """Set an iTerm2 window's frame through iTerm2's own bounds and return the frame it then reads
+    back, or None when iTerm2 does not know the window. iTerm2 applies bounds a moment later, so it
+    is read again for up to `wait` seconds. Fits claude_human.desktops.frame_window(fallback=...),
+    for a window yabai has lost."""
+    import time   # noqa: PLC0415
+    x, y = int(target["x"]), int(target["y"])
+    bounds = f"{{{x}, {y}, {x + int(target['w'])}, {y + int(target['h'])}}}"
+    _osa(f'tell application "iTerm2" to set bounds of window id {int(window_id)} to {bounds}', 5, env=env)
+    end = time.time() + wait
+    while True:
+        w = next((v for v in (windows(env=env) or []) if v["id"] == int(window_id)), None)
+        if w is None:
+            return None
+        fr = w["frame"]
+        if all(abs(fr[k] - target[k]) <= 2 for k in ("x", "y", "w", "h")) or time.time() >= end:
+            return fr
+        time.sleep(0.5)
+
+
+def close_empty_window(window_id: int, *, wait: float = 6.0,
+                       env: Mapping[str, str] | None = None) -> str:
+    """Close an iTerm2 window that holds no session, and nothing else: "closed" (seen gone),
+    "asked" (closed, still there after `wait` seconds), "kept" (it holds a session) or "not found".
+
+    A tmux control-mode window can stay on screen empty after tmux attaches; yabai cannot close it
+    but iTerm2's `close window id N` does, and the tmux client stays attached. The close lands a few
+    seconds later, so it is read back. A window still holding a session is never closed: that
+    would detach whatever runs there."""
+    import time   # noqa: PLC0415
+    ask = f'tell application "iTerm2" to count of tabs of window id {int(window_id)}'
+    out = _osa(ask, 5, env=env)
+    if out is None:
+        return "not found"
+    if out.strip() != "0":
+        return "kept"
+    if _osa(f'tell application "iTerm2" to close window id {int(window_id)}', 5, env=env) is None:
+        return "kept"
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        time.sleep(0.5)
+        if _osa(ask, 5, env=env) is None:
+            return "closed"
+    return "asked"
+
+
+def session_uuid(session: str | None) -> str | None:
+    """Pure. The UUID part of an ITERM_SESSION_ID-shaped value ("w0t1p0:<UUID>" or "tmux:<UUID>")."""
+    if not session or ":" not in session:
+        return None
+    return session.split(":", 1)[1] or None
+
+
+def _safe(u: str | None) -> bool:
+    return bool(u) and all(ch.isalnum() or ch == "-" for ch in u)
+
+
+def window_of_session(session: str, *, env: Mapping[str, str] | None = None) -> int | None:
+    """The iTerm2 window holding this session, or None. Three seconds at most: iTerm2 sometimes
+    stops answering scripts altogether, and a caller should ask again later rather than wait."""
+    u = session_uuid(session)
+    if not _safe(u):
+        return None
+    out = _osa(f'''tell application "iTerm2" to repeat with w in (get windows)
+try
+repeat with t in (get tabs of w)
+repeat with s in (get sessions of t)
+if unique id of s is "{u}" then return (id of w as text)
+end repeat
+end repeat
+end try
+end repeat''', 3, env=env)
+    return int(out.strip()) if out and out.strip().isdigit() else None
+
+
+def session_of_tmux_pane(pane: str, *, env: Mapping[str, str] | None = None) -> str | None:
+    """The iTerm2 session showing this tmux pane (tmux -CC), as "tmux:<UUID>", or None when no
+    window shows it. A process started inside tmux has no ITERM_SESSION_ID of its own, but iTerm2
+    records which pane each tmux-mode session shows (its `tmuxWindowPane` variable)."""
+    num = (pane or "").lstrip("%")
+    if not num.isdigit():
+        return None
+    out = _osa(f'''tell application "iTerm2" to repeat with w in (get windows)
+try
+repeat with t in (get tabs of w)
+repeat with s in (get sessions of t)
+try
+if ((variable named "tmuxWindowPane") of s) is "{num}" then return (unique id of s)
+end try
+end repeat
+end repeat
+end try
+end repeat''', 3, env=env)
+    u = (out or "").strip()
+    return f"tmux:{u}" if _safe(u) else None
+
+
+_TTYS = '''set sep to (ASCII character 9)
+set out to ""
+tell application "iTerm2"
+repeat with w in (get windows)
+try
+repeat with t in (get tabs of w)
+repeat with s in (get sessions of t)
+try
+set out to out & (id of w) & sep & (tty of s) & linefeed
+end try
+end repeat
+end repeat
+end try
+end repeat
+end tell
+return out'''
+
+
+def parse_ttys(raw: str | None) -> list[tuple[int, str]]:
+    """Pure. (window id, session terminal) pairs from the terminals listing."""
+    out = []
+    for line in (raw or "").splitlines():
+        w, _, tty = line.partition(SEP)
+        if w.strip().isdigit() and tty.strip().startswith("/dev/"):
+            out.append((int(w.strip()), tty.strip()))
+    return out
+
+
+def window_of_ttys(ttys: set[str], raw: str | None = None, *,
+                   env: Mapping[str, str] | None = None) -> int | None:
+    """The one iTerm2 window holding a session on one of these terminals, or None (none, or several:
+    never a guess). A terminal is an identity; a window's title names only its front tab."""
+    if not ttys:
+        return None
+    pairs = parse_ttys(_osa(_TTYS, 8, env=env) if raw is None else raw)
+    hits = {w for w, tty in pairs if tty in ttys}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def tmux_client_ttys(session: str, *, tmux: str = "tmux", env: Mapping[str, str] | None = None) -> set[str]:
+    """The terminals of the plain clients attached to a tmux session (a control-mode client has
+    none of its own that iTerm2 shows)."""
+    try:
+        r = subprocess.run([tmux, "list-clients", "-t", session, "-F",
+                            "#{client_tty} #{client_control_mode}"],
+                           capture_output=True, text=True, timeout=5, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if r.returncode != 0:
+        return set()
+    return {p[0] for p in (line.split() for line in r.stdout.splitlines())
+            if len(p) == 2 and p[1] == "0" and p[0].startswith("/dev/")}
