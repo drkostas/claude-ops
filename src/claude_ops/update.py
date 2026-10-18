@@ -795,6 +795,29 @@ def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
     return None
 
 
+def continue_after_error(err: dict | None, answered: str | None, told: int, *,
+                         recent: float = 3600, forgotten: float = 86400,
+                         max_per_hour: int = 3) -> tuple[str, str]:
+    """Pure. Whether to tell a session stopped on a transient API error to continue:
+    ("tell", why), ("stuck", why) when telling it again would not help and a person should look, or
+    ("nothing", why). `err` is stopped_on_api_error's answer with an `age` in seconds added;
+    `answered` is the error uuid it was last told to continue after; `told` how many times it was
+    told in the last hour. An error older than `recent` is stuck (the work may have moved on), one
+    older than `forgotten` is nothing (left that way on purpose), and each error is answered once."""
+    if not err:
+        return "nothing", "its last turn did not stop on a transient API error"
+    age = float(err["age"])
+    if age > forgotten:
+        return "nothing", "it stopped on an API error over a day ago and was left that way"
+    if age > recent:
+        return "stuck", f"it stopped on an API error {int(age // 60)} minutes ago"
+    if answered == err.get("uuid"):
+        return "nothing", "it was already told to continue after this error"
+    if told >= max_per_hour:
+        return "stuck", f"it was told to continue {told} times in the last hour and stopped again"
+    return "tell", f"it stopped on: {err.get('text')}"
+
+
 def transcript_of(chat_id: str, projects: Path = PROJECTS) -> Path | None:
     """The transcript of a conversation, in whichever project folder holds it (newest if several)."""
     hits = list(projects.glob(f"*/{chat_id}.jsonl"))
