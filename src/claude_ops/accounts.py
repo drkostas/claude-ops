@@ -10,7 +10,6 @@ old one is signed out. Renew only a saved copy nobody else is using.
 """
 from __future__ import annotations
 
-import binascii
 import datetime as dt
 import json
 import re
@@ -43,12 +42,24 @@ def read_item(service: str, account: str, *, run=subprocess.run,
         return None
 
 
+#: the longest line `security -i` reads whole; a longer one is cut, and the item is saved cut
+STDIN_LIMIT = 4032
+
+
 def write_item(service: str, account: str, data: dict, *, run=subprocess.run,
                env: Mapping[str, str] | None = None) -> bool:
     """Create or replace a keychain item, and read it back. The secret goes to `security -i` on
-    stdin, as hex, so it is never on a command line another process can read."""
-    hexed = binascii.hexlify(json.dumps(data, separators=(",", ":")).encode()).decode()
-    line = f'add-generic-password -U -s "{service}" -a "{account}" -X {hexed}\n'
+    stdin, so it is never on a command line another process can read.
+
+    It is sent as quoted text, not hex: a Claude login is about 2,000 characters of JSON, twice that
+    in hex, and `security -i` cuts a line longer than STDIN_LIMIT, which saved a cut login. A login
+    too long even as text is refused (ValueError), never sent on a command line instead."""
+    text = json.dumps(data, separators=(",", ":"))
+    quoted = text.replace("\\", "\\\\").replace('"', '\\"')
+    line = f'add-generic-password -U -s "{service}" -a "{account}" -w "{quoted}"\n'
+    if len(line) > STDIN_LIMIT:
+        raise ValueError(f"the item is {len(text)} characters, too long for security -i; "
+                         "it is never written on a command line")
     r = run(["security", "-i"], input=line, capture_output=True, text=True, env=env)
     return r.returncode == 0 and read_item(service, account, run=run, env=env) == data
 
