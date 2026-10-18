@@ -1,4 +1,5 @@
 """Versions, processes and fingerprints of what Claude Code loads."""
+import json
 import subprocess
 
 from claude_ops import config as cc
@@ -67,3 +68,17 @@ def test_descendants_are_every_process_under_one():
     assert cc.descendants(13, procs) == set()
     looped = {5: {"ppid": 6, "comm": "a"}, 6: {"ppid": 5, "comm": "b"}}
     assert cc.descendants(5, looped) == {5, 6}          # a parent loop ends instead of hanging
+
+
+def test_login_digest_follows_the_account_and_nothing_else(tmp_path):
+    f = tmp_path / "claude.json"
+    def write(**account):
+        f.write_text(json.dumps({"mcpServers": {}, "oauthAccount": account}))
+        return cc.login_digest(f)
+    one = write(accountUuid="a-1", organizationUuid="o-1", profileFetchedAt="2026-01-01")
+    same = write(accountUuid="a-1", organizationUuid="o-1", profileFetchedAt="2026-02-02", seatTier="x")
+    other = write(accountUuid="a-2", organizationUuid="o-2")
+    assert one and one == same and other != one
+    f.write_text(json.dumps({"mcpServers": {}}))
+    assert cc.login_digest(f) is None
+    assert cc.login_digest(tmp_path / "missing.json") is None
