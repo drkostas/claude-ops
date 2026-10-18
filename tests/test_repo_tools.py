@@ -76,6 +76,40 @@ def test_union_refuses_a_name_defined_twice(tmp_path, capsys):
     assert union.defined_twice("H = 1\nH = 2\nX = 3\n", "H = 1\nH = 2\n", "H = 1\nH = 2\nX = 3\n") == []
 
 
+DEBT = "DEBT = [\n    (\"a.py\", \"f\"),\n    (\"b.py\", \"g\"),\n    (\"c.py\", \"h\"),\n]\n"
+
+
+def test_union_set_keeps_both_adds_and_both_removals_side_by_side(tmp_path):
+    # upstream retires b and adds d after it; the branch adds e right beside b
+    up = DEBT.replace('    ("b.py", "g"),\n', '    ("d.py", "k"),\n')
+    br = DEBT.replace('    ("b.py", "g"),\n', '    ("b.py", "g"),\n    ("e.py", "m"),\n')
+    d = rebasing(tmp_path, {"debt.py": DEBT}, {"debt.py": up}, {"debt.py": br})
+    assert "<<<<<<<" in (d / "debt.py").read_text()
+    assert union.settle_tree(d, env=ENV) == 1                    # not named a set: refused
+    assert union.settle_tree(d, sets=("debt.py",), env=ENV) == 0
+    text = (d / "debt.py").read_text()
+    assert '"b.py"' not in text and '"d.py"' in text and '"e.py"' in text and '"a.py"' in text
+    assert git(d, "rebase", "--continue", ok=False).returncode == 0
+
+
+def test_union_set_lists_an_entry_both_sides_added_once():
+    base = "X = [\n    1,\n]\n"
+    both = "X = [\n    1,\n    2,\n]\n"
+    assert union.settle_set(base, both, both) == both
+    assert union.settle_set(base, "X = [\n    1,\n    2,\n]\n", "X = [\n    1,\n    3,\n]\n") \
+        == "X = [\n    1,\n    2,\n    3,\n]\n"
+    with pytest.raises(union.Refused):
+        union.settle_set(None, both, both)
+
+
+def test_union_set_refuses_a_python_ledger_that_no_longer_parses(tmp_path):
+    up = DEBT.replace("]\n", "\n")                             # upstream dropped the bracket
+    br = DEBT.replace('    ("c.py", "h"),\n', '    ("c.py", "h"),\n    ("f.py", "n"),\n')
+    d = rebasing(tmp_path, {"debt.py": DEBT}, {"debt.py": up}, {"debt.py": br})
+    if "<<<<<<<" in (d / "debt.py").read_text():
+        assert union.settle_tree(d, sets=("debt.py",), env=ENV) == 1
+
+
 def test_union_ordered_file_lists_each_entry_once(tmp_path):
     d = rebasing(tmp_path, {"order.txt": "a\nb\n"}, {"order.txt": "a\nb\nc\nd\n"},
                  {"order.txt": "a\nb\nd\ne\n"})

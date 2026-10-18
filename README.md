@@ -78,7 +78,10 @@ claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps 
 
 - `union` settles a rebase conflict where both sides only added lines, by keeping both, the
   upstream side first. JSON files merge by key, an `--ordered` file lists each entry once, and a
-  `--journal` keeps only what the commit appended. Anything else exits 1, so a script can abort the
+  `--journal` keeps only what the commit appended. A `--set` file is a ledger whose entry lines are
+  an unordered set: every line either side added is kept and every line either side removed is
+  dropped, so an entry added beside one the other branch removed still merges (a Python ledger must
+  still parse). Anything else exits 1, so a script can abort the
   rebase. Rebase with `-c merge.conflictStyle=diff3`.
 - `secret-shapes` refuses commits whose added lines match a shape a secret scanner flagged before,
   from a JSON file the project keeps. It reads every commit, as a pull request scanner does.
