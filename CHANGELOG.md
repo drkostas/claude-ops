@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `owners.most_specific(subject, owners, kind="like"|"glob")`: the owner whose pattern matches a subject with the most literal characters, so an exact address beats a wide one; SQL LIKE patterns or shell globs, a tie going alphabetically
 - `accounts.write_item` sends the login as quoted text instead of hex: `security -i` cuts a line longer than 4,032 characters, and a real Claude login in hex is longer, so it was saved cut. A login too long even as text raises ValueError and is never written on a command line
 - `accounts`: read and write a keychain login item (the secret on stdin, never a command line), an account's usage and profile, renewing a saved login, the usage-limit stop in a transcript (`limit_hit`), and `choose`, which picks the account to switch to: one usable now, only when the one in use is spent
 - `remote`: which Remote Control session a transcript belongs to (`remote_id`, its newest `bridgeSessionId`, as the claude.ai Code list names it) and the page script that renames that row and reads the title back (`rename_js`), since a resume keeps the session's old title and `/rename` does not change it. `update.continue_after_error`: the pure rule for telling a session stopped on a transient API error to continue, once per error, only while recent, at most a few times an hour
