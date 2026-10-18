@@ -413,6 +413,29 @@ A color the user set is kept. A supervisor that runs it on a schedule can pass `
   the connection closed fails. `set_tab_color` finds the session by its id in a connection of its own.
 - iTerm2 reports colors as floats (234.4, 116.1, 103.6). Compare them rounded.
 
+## Find a chat's iTerm2 window, and tidy the empty ones
+
+```python
+from claude_ops import iterm
+iterm.window_of_session(os.environ["ITERM_SESSION_ID"])     # the window a session is in, or None
+iterm.window_of_ttys(iterm.tmux_client_ttys("claude-build")) # a tmux chat's window, by terminal
+iterm.session_of_tmux_pane(os.environ["TMUX_PANE"])          # "tmux:<UUID>" for a tmux -CC pane
+iterm.windows()                                              # id, tab count, frame, title
+iterm.dead_windows()                                         # frames iTerm2 closed but left on screen
+iterm.close_empty_window(window_id)                          # "closed", "asked", "kept", "not found"
+```
+
+- A process inside tmux has no ITERM_SESSION_ID of its own. Find its window by its tmux client's
+  terminal, or by the pane through `session_of_tmux_pane`. Never by the window title: it names only
+  the front tab.
+- Each window is read inside its own `try`. A window iTerm2 closed can stay in its list,
+  unreadable, and a listing without the `try` failed on every call while it was there.
+- `close_empty_window` closes a window only when it holds no session (a leftover tmux control
+  window). A window with a session is never closed, because that would detach the chat in it.
+- `set_bounds(window_id, frame)` sizes a window through iTerm2 itself, for a window yabai has
+  lost. It fits `claude_human.desktops.frame_window(..., fallback=...)`.
+- An answer that could not be read is `None`, never "no windows".
+
 ## Traps
 
 - iTerm2 consent. The first time a new program (a launchd job, a fresh Python) scripts iTerm2,
