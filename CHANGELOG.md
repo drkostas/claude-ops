@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `environ.child_env(path=..., keep=..., add=...)`: the environment to start a child process with, built from nothing. Only a short list of variables a command needs (`BASE`, each with its reason), the ones named at the call site, and the PATH the caller gives. `REDIRECTS` names the variables that redirect a command rather than inform it (`PYTHONPATH`, `GIT_DIR`, `LD_PRELOAD`, `TMUX` and others); asking to keep or set one raises ValueError
+- `ssh.run`, `ssh.copy` and `ssh.peer_online`: one way to run a command on another machine and copy files there. A host that could not be reached always comes back as a CompletedProcess with `UNREACHABLE` (255) and the reason in stderr, never an exception; a password goes on stdin, never on the command line; `peer_online` asks Tailscale whether the host is online in its own view. Each takes `env`
 - `union --set FILE` (`settle_tree(sets=...)`, `settle_set`): a ledger whose entry lines are an unordered set merges three ways, keeping every line either side added and dropping every line either side removed, wherever they sit, so an entry added beside one the other branch removed no longer stops a rebase; a Python ledger must still parse
 - `owners.most_specific(subject, owners, kind="like"|"glob")`: the owner whose pattern matches a subject with the most literal characters, so an exact address beats a wide one; SQL LIKE patterns or shell globs, a tie going alphabetically
 - `accounts.write_item` sends the login as quoted text instead of hex: `security -i` cuts a line longer than 4,032 characters, and a real Claude login in hex is longer, so it was saved cut. A login too long even as text raises ValueError and is never written on a command line
