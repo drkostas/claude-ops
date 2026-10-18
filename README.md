@@ -179,6 +179,23 @@ It checks once a minute and prints one line when it ends.
 
 Run it as a background command next to the work, and the end of that command tells the session that started it. A stall line says what the session was waiting on, for example a tool call with no result. In Python it is `claude_ops.watch.stall(...)`, which takes the clock and the sleep as arguments, and `stall_check(...)` looks once.
 
+## Two Claude accounts on one Mac
+
+Every Claude Code chat on a Mac reads one login, a keychain item. With two accounts, `claude_ops.accounts` lets a program keep a copy of each account's login and move the chats from one to the other when the one in use runs out, without a browser.
+
+```python
+from claude_ops import accounts
+login = accounts.read_item(accounts.LIVE_SERVICE, "<mac user>")    # the login in use
+accounts.write_item("my-saved-login-a", "<mac user>", login)       # a copy of it
+accounts.usage(login["claudeAiOauth"]["accessToken"])              # 5-hour and weekly percent, and resets
+accounts.choose("a", {"a": usage_a, "b": usage_b}, now)            # "b", or None
+```
+
+- `write_item` passes the login to `security -i` on stdin, so it is never on a command line.
+- `choose` switches only to an account usable now (both limits under 98%), and only when the account in use is at 98% of either limit, or a chat hit its limit (`limit_hit(transcript)`). An account whose usage cannot be read is never chosen.
+- `renew` renews a saved copy with its refresh token. Never renew the login in use: renewing replaces the refresh token, and the chats holding the old one are signed out.
+- Running chats move to the new login by themselves. Their Remote Control sessions do not; send each chat `/remote-control` again.
+
 ## Skills
 
 ```bash
