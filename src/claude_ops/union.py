@@ -10,6 +10,9 @@ without a person, and a real conflict still stops it:
 - in a file named with `--ordered` (a list where order matters and each entry appears once) the
   same, without repeats, the upstream entries first. A comment line (`#`) or a blank line is not an
   entry, so two entries that carry the same note both keep it.
+- in a file named with `--set` (a ledger whose entry lines are an unordered set), the result keeps
+  every line either side added and drops every line either side removed, wherever they are, so
+  an entry added beside one another branch removed still merges. A Python file must still parse.
 - in a file named with `--journal` (an append-only log), a block where the commit only appended after
   its base keeps the upstream side and adds the new lines. That is the shape left when a branch is
   moved off another branch it was stacked on: the base holds the lower branch's entry, which the
@@ -30,7 +33,7 @@ without a person, and a real conflict still stops it:
 It needs three-way markers (`git -c merge.conflictStyle=diff3 rebase`): without the base section a
 block cannot be told apart from one that changed existing lines, so such a block is refused.
 
-    claude-ops union <worktree> [--ordered FILE] [--journal FILE]   # in a stopped rebase; stages what it settles
+    claude-ops union <worktree> [--ordered FILE] [--journal FILE] [--set FILE]   # in a stopped rebase; stages what it settles
 """
 from __future__ import annotations
 
@@ -156,6 +159,35 @@ def settle_json(base: str | None, ours: str, theirs: str) -> str:
     return json.dumps(merge_json(b, o, t), indent=2, ensure_ascii=False) + tail
 
 
+def settle_set(base: str | None, ours: str, theirs: str) -> str:
+    """A three-way merge of a file whose lines are a set (`--set`): `ours` with every line `theirs`
+    removed from `base` taken out, and every line `theirs` added put in after the line that comes
+    before it in `theirs`, after the lines `ours` added there (upstream first, as everywhere in union).
+    Lines both sides added appear once. Refused when there is no base."""
+    if base is None:
+        raise Refused("no common version to compare with")
+    b, o, t = (x.splitlines(keepends=True) for x in (base, ours, theirs))
+    removed = Counter(b) - Counter(t)
+    added_by_us = Counter(o) - Counter(b)
+    added = Counter(t) - Counter(b) - added_by_us
+    out = list(o)
+    ours_new = set(added_by_us)
+    for line, n in removed.items():
+        for _ in range(n):
+            if line in out:
+                out.remove(line)
+    for i, line in enumerate(t):
+        if added[line] <= 0:
+            continue
+        added[line] -= 1
+        before = next((t[j] for j in range(i - 1, -1, -1) if t[j] in out), None)
+        at = out.index(before) + 1 if before is not None else 0
+        while at < len(out) and out[at] in ours_new:      # upstream's own new lines stay first
+            at += 1
+        out.insert(at, line)
+    return "".join(out)
+
+
 def _stage(wt: Path, n: int, f: str, env=None) -> str | None:
     """Git's stage n of a conflicted file (1 the base, 2 ours, 3 theirs), or None when it has none."""
     r = subprocess.run(["git", "-C", str(wt), "show", f":{n}:{f}"], capture_output=True, text=True,
@@ -163,7 +195,8 @@ def _stage(wt: Path, n: int, f: str, env=None) -> str | None:
     return r.stdout if r.returncode == 0 else None
 
 
-def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), env=None) -> int:
+def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tuple = (),
+                env=None) -> int:
     """Settle every conflicted file in a stopped rebase in `wt` and stage it. 0 when every one
     settled, 1 (nothing written) when any is refused. `env` is passed to every git command."""
     files = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"],
@@ -171,7 +204,17 @@ def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), env=None
     settled = {}
     for f in files:
         try:
-            if f.endswith(".json"):
+            if f in sets:
+                ours, theirs = _stage(wt, 2, f, env), _stage(wt, 3, f, env)
+                if ours is None or theirs is None:
+                    raise Refused("one side deleted it")
+                settled[f] = settle_set(_stage(wt, 1, f, env), ours, theirs)
+                if f.endswith(".py"):
+                    try:
+                        ast.parse(settled[f])
+                    except SyntaxError as e:
+                        raise Refused(f"the merged set does not parse ({e.msg}, line {e.lineno})") from None
+            elif f.endswith(".json"):
                 ours, theirs = _stage(wt, 2, f, env), _stage(wt, 3, f, env)
                 if ours is None or theirs is None:
                     raise Refused("one side deleted it")
@@ -202,8 +245,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="a file that lists each entry once (repeatable)")
     ap.add_argument("--journal", action="append", default=[], metavar="FILE",
                     help="an append-only file (repeatable)")
+    ap.add_argument("--set", action="append", default=[], metavar="FILE", dest="sets",
+                    help="a ledger whose entry lines are an unordered set (repeatable)")
     a = ap.parse_args(argv)
-    return settle_tree(a.worktree, ordered=tuple(a.ordered), journals=tuple(a.journal))
+    return settle_tree(a.worktree, ordered=tuple(a.ordered), journals=tuple(a.journal), sets=tuple(a.sets))
 
 
 if __name__ == "__main__":
