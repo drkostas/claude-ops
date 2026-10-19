@@ -91,6 +91,17 @@ claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps 
 - `plan-apply` applies a written plan's `(Write `path`)` and `(Edit on `path`)` steps exactly, and
   stops at the first step that cannot be applied.
 
+## A job that outlives the chat
+
+```bash
+claude-ops detach --log /tmp/release.log -- ./release.sh v1.2   # prints the pid
+kill -TERM -<pid>                                               # stop it and everything it started
+```
+
+A command a chat starts in the background shares the chat's process group, so it ends when the chat
+does. `detach` starts it as the leader of a new session (macOS has no `setsid` command), with no
+input and its output appended to the log, and prints its pid, which is also its group id.
+
 ## One heavy job at a time
 
 ```bash

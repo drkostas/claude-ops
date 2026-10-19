@@ -329,7 +329,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "secret-shapes": ("secret_shapes", "refuse commits that add a line of a known secret shape"),
          "mutate": ("mutate", "change code on purpose and check the tests catch it"),
          "plan-apply": ("plan_apply", "apply a written plan's Write and Edit steps exactly"),
-         "heavy": ("heavy", "run heavy jobs one at a time across chats, under a memory cap")}
+         "heavy": ("heavy", "run heavy jobs one at a time across chats, under a memory cap"),
+         "detach": ("detach", "start a command in its own session, so it outlives the chat")}
 
 
 def main(argv: list[str] | None = None) -> int:
