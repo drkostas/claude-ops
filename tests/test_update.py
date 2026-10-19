@@ -711,3 +711,37 @@ def test_anything_after_the_error_means_the_chat_moved_on(tmp_path):
     assert cu.stopped_on_api_error(side) is not None
     assert cu.stopped_on_api_error(None) is None
     assert cu.stopped_on_api_error(tmp_path / "missing.jsonl") is None
+
+
+# a background grep a chat started and forgot, as Claude Code's shell wraps it
+GREP = ("/bin/zsh -c source /tmp/snapshot.sh 2>/dev/null || true && eval 'rtk proxy bash -c '\"'\"'grep -rl x "
+        "~/Projects/*/ | head -20'\"'\"'' < /dev/null && pwd -P >| /tmp/claude-cwd")
+PROMPT = "done 7:24 PM\n❯ \n───\n  ⏵⏵ bypass permissions on · 1 shell"
+
+
+def test_shown_command_is_the_command_the_chat_ran():
+    assert cu.shown_command(GREP) == "rtk proxy bash -c 'grep -rl x ~/Projects/*/ | head -20'"
+    assert cu.shown_command("python3   long_job.py") == "python3 long_job.py"
+    assert cu.shown_command("x" * 200, limit=10) == "x" * 9 + "…"
+
+
+def test_forgotten_shells_names_an_old_shell_under_an_idle_prompt():
+    procs = {**MCP_ONLY, 103: {"ppid": 100, "comm": "/bin/zsh", "started": ago(5 * 3600)},
+             104: {"ppid": 103, "comm": "grep", "started": ago(5 * 3600)}}
+    got = cu.forgotten_shells(100, procs, PROMPT, NOW, commands={103: GREP})
+    assert got == [{"pid": 103, "age_s": 5 * 3600, "command": cu.shown_command(GREP)}]
+    # still working on its turn: the shell is the turn's own command, not forgotten
+    assert cu.forgotten_shells(100, procs, "⏺ Running…\n✻ Churning", NOW, commands={103: GREP}) == []
+    # younger than the limit
+    assert cu.forgotten_shells(100, procs, PROMPT, NOW, older_than_s=6 * 3600, commands={103: GREP}) == []
+    # a shell that only waits is not forgotten: it ends by itself
+    waiting = {**procs, 104: {"ppid": 103, "comm": "sleep", "started": ago(30)}}
+    wait = {103: WRAP.format("until [ -f /tmp/x ]; do sleep 30; done")}
+    assert cu.forgotten_shells(100, waiting, PROMPT, NOW, commands=wait) == []
+
+
+def test_idle_names_the_shell_it_waits_for():
+    procs = {**MCP_ONLY, 103: {"ppid": 100, "comm": "/bin/zsh", "started": ago(4 * 3600 + 47 * 60)}}
+    ok, why = cu.idle(100, procs, ago(120), ago(110), NOW)
+    assert not ok and why == "it is running a command (pid 103, for 4h47m)"
+    assert cu.idle(100, WITH_CMD, ago(120), ago(110), NOW)[1] == "it is running a command"
