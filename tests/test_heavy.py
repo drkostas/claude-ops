@@ -119,6 +119,8 @@ def test_heavy_queue(monkeypatch):
     rc, st = heavy("status")
     check("failing the same way: r-chat: flaky" not in st, "and a success takes it off the list")
     recs = [j for j in h.done_jobs() if j["what"] == "flaky"]
+    check(h.failing(folder=STATE / "done", within_hours=1, at_least=1)
+          and h.failing(folder=STATE / "nowhere") == [], "a reader may name the done folder")
     check(len(recs) == 4 and all("end" in j and "how" in j for j in recs)
           and sum(j["how"] == "exit 7" for j in recs) == 3, "each record keeps when it ended and how it failed")
 

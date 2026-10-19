@@ -423,11 +423,12 @@ def failed_how(rec: dict) -> str | None:
     return None if rc == 0 else f"exit {rc}"
 
 
-def done_jobs() -> list[dict]:
-    """The finished jobs DONE keeps, each with `end` (seconds since the epoch; a record written
-    before `end` was kept has its file's time)."""
+def done_jobs(folder: Path | None = None) -> list[dict]:
+    """The finished jobs DONE (or `folder`) keeps, each with `end` (seconds since the epoch; a
+    record written before `end` was kept has its file's time)."""
+    folder = DONE if folder is None else Path(folder)
     out = []
-    for f in DONE.glob("*.json") if DONE.is_dir() else []:
+    for f in folder.glob("*.json") if folder.is_dir() else []:
         try:
             j = json.loads(f.read_text())
             j.setdefault("end", f.stat().st_mtime)
@@ -462,12 +463,14 @@ def streaks(records: list[dict], at_least: int = REPEAT_FAILS) -> list[dict]:
     return sorted(out, key=lambda s: -s["last"])
 
 
-def failing(within_hours: float | None = None, at_least: int | None = None) -> list[dict]:
+def failing(within_hours: float | None = None, at_least: int | None = None,
+            folder: Path | None = None) -> list[dict]:
     """The jobs failing the same way again and again (streaks) whose last failure is within
-    `within_hours` (HEAVY_REPEAT_HOURS, 24)."""
+    `within_hours` (HEAVY_REPEAT_HOURS, 24). `folder` is a done folder other than DONE, for a
+    reader whose HEAVY_DIR is not set."""
     hours = REPEAT_HOURS if within_hours is None else within_hours
     since = time.time() - hours * 3600
-    return [s for s in streaks(done_jobs(), REPEAT_FAILS if at_least is None else at_least)
+    return [s for s in streaks(done_jobs(folder), REPEAT_FAILS if at_least is None else at_least)
             if s["last"] >= since]
 
 
