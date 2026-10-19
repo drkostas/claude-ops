@@ -88,6 +88,8 @@ claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps 
 - `mutate` changes a function on purpose (negated tests, moved boundaries, removed calls, None
   returns) in a copy of the worktree, runs the command there, and lists every change the tests let
   through.
+- `restack <base> <worktree>...` rebuilds a stack of one-commit branches on a new base, bottom first,
+  settling add-only conflicts with `union`, and stops at the first one that needs a person.
 - `plan-apply` applies a written plan's `(Write `path`)` and `(Edit on `path`)` steps exactly, and
   stops at the first step that cannot be applied.
 
