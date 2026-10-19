@@ -117,7 +117,9 @@ waits until the machine has memory and disk to spare and it is its chat's turn (
 chats), then runs in its own process group under a memory cap (`HEAVY_MAX_GB`, 8), and gives the
 slot up after its turn (`HEAVY_TURN_MIN`, 60) while it keeps running. A CI runner can `hold` the slot
 for a job's worker and `release` it. `--notify` runs `HEAVY_NOTIFY` with the chat's name and a line
-saying how the job ended and what it took. Every caller must share `HEAVY_DIR`. macOS only.
+saying how the job ended and what it took. A job that fails the same way three times in a row
+(over the cap, at its `--max-hold`, or with one exit code) says so, and `status` lists it, so a
+caller that retries a failing job is noticed. Every caller must share `HEAVY_DIR`. macOS only.
 
 ## Start chats inside tmux
 

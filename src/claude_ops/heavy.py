@@ -44,6 +44,14 @@ resident size, so a job shorter than one check still has one. `--notify` runs th
 command with the chat's name and one line (exit code, peak memory, minutes, the job's last line)
 when the job ends; with it, the job's output and errors arrive as one stream.
 
+THE SAME FAILURE AGAIN. A caller that retries a job the cap ends every time (a daemon that rebuilds
+on each pass) burns the slot for hours while every run fails the same way, and each run on its own
+looks like one ordinary failure. So a job that ends the same way HEAVY_REPEAT_FAILS times (3) in a row
+(over the cap, at its --max-hold, or with the same exit code) says so: the line names how it failed,
+how many times and since when, and with `--notify` it reaches the chat too, at the third failure and
+again at the 6th, 12th, 24th and so on. `status` lists every job failing that way in the last
+HEAVY_REPEAT_HOURS (24), and `failing()` gives the same to a reader of HEAVY_DIR.
+
 A call made inside a heavy job runs at once, inside the outer job's slot and memory cap: the job is
 given HEAVY_HELD, and a caller whose ancestor holds the slot (a step of a CI job) counts too. A CI
 runner can hold the slot for a job from its job-started hook (`hold ... --pid <worker>`) to its
@@ -91,6 +99,10 @@ CHECK = _num("HEAVY_CHECK", 10)
 TURN_MIN = _num("HEAVY_TURN_MIN", 60)
 #: how long a waiter's own limits may hold it before it is told the most memory it saw free
 OWN_LIMIT_NOTE_MIN = _num("HEAVY_OWN_LIMIT_NOTE_MIN", 60)
+#: how many runs in a row of one job that fail the same way are worth saying
+REPEAT_FAILS = int(_num("HEAVY_REPEAT_FAILS", 3))
+#: how far back `status` and failing() look for such a run of failures
+REPEAT_HOURS = _num("HEAVY_REPEAT_HOURS", 24)
 #: what the system tools need, and nothing from the caller's environment
 TOOLS_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin"}
 
@@ -391,9 +403,94 @@ def remember(chat: str, what: str, rc: int, peak: float, minutes: float, ended: 
     for old in sorted(DONE.glob("*.json"), key=lambda x: x.stat().st_mtime)[:-DONE_KEEP]:
         old.unlink(missing_ok=True)
     took = {"chat": chat, "what": what, "rc": rc, "peak_gb": peak, "minutes": round(minutes, 1),
-            "ended": ended, "at": time.strftime("%Y-%m-%d %H:%M")}
+            "ended": ended, "at": time.strftime("%Y-%m-%d %H:%M"), "end": round(time.time(), 2)}
+    took["how"] = failed_how(took)
     (DONE / f"{os.getpid()}.json").write_text(json.dumps(took))
     return DONE / f"{os.getpid()}.json"
+
+
+def failed_how(rec: dict) -> str | None:
+    """Pure. How a finished job failed, in words that are the same each time it fails the same way:
+    over the memory cap (whatever it reached past it), at its --max-hold, or its exit code. None
+    when it succeeded."""
+    ended = rec.get("ended") or ""
+    cap = re.search(r"over the ([0-9.]+) GB cap", ended)
+    if cap:
+        return f"over the {cap.group(1)} GB memory cap"
+    if "--max-hold" in ended:
+        return "ended at its --max-hold"
+    rc = int(rec.get("rc", 0))
+    return None if rc == 0 else f"exit {rc}"
+
+
+def done_jobs(folder: Path | None = None) -> list[dict]:
+    """The finished jobs DONE (or `folder`) keeps, each with `end` (seconds since the epoch; a
+    record written before `end` was kept has its file's time)."""
+    folder = DONE if folder is None else Path(folder)
+    out = []
+    for f in folder.glob("*.json") if folder.is_dir() else []:
+        try:
+            j = json.loads(f.read_text())
+            j.setdefault("end", f.stat().st_mtime)
+            str(j["chat"]), str(j["what"]), float(j["end"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        out.append(j)
+    return out
+
+
+def streaks(records: list[dict], at_least: int = REPEAT_FAILS) -> list[dict]:
+    """Pure. The jobs (one chat, one `what`) whose latest runs all failed the same way, at least
+    `at_least` times in a row, newest first: {chat, what, how, count, first, last}, with `first` and
+    `last` the end times of the first and last of those runs. A success, or a failure of another
+    kind, ends a run of failures."""
+    by: dict[tuple[str, str], list[dict]] = {}
+    for r in sorted(records, key=lambda r: float(r["end"])):
+        by.setdefault((str(r["chat"]), str(r["what"])), []).append(r)
+    out = []
+    for (chat, what), rs in by.items():
+        how = failed_how(rs[-1])
+        if how is None:
+            continue
+        n = 0
+        for r in reversed(rs):
+            if failed_how(r) != how:
+                break
+            n += 1
+        if n >= at_least:
+            out.append({"chat": chat, "what": what, "how": how, "count": n,
+                        "first": float(rs[-n]["end"]), "last": float(rs[-1]["end"])})
+    return sorted(out, key=lambda s: -s["last"])
+
+
+def failing(within_hours: float | None = None, at_least: int | None = None,
+            folder: Path | None = None) -> list[dict]:
+    """The jobs failing the same way again and again (streaks) whose last failure is within
+    `within_hours` (HEAVY_REPEAT_HOURS, 24). `folder` is a done folder other than DONE, for a
+    reader whose HEAVY_DIR is not set."""
+    hours = REPEAT_HOURS if within_hours is None else within_hours
+    since = time.time() - hours * 3600
+    return [s for s in streaks(done_jobs(folder), REPEAT_FAILS if at_least is None else at_least)
+            if s["last"] >= since]
+
+
+def worth_saying(count: int, at_least: int = REPEAT_FAILS) -> bool:
+    """Pure. A run of failures is said at its `at_least`-th failure and again each time it doubles,
+    so a loop that retries all night is said a few times, not every run."""
+    if at_least < 1 or count < at_least:
+        return False
+    n = at_least
+    while n < count:
+        n *= 2
+    return n == count
+
+
+def repeat_line(s: dict) -> str:
+    """Pure. What a job failing the same way again and again says."""
+    hint = (" Run it with HEAVY_MAX_GB set to what it needs, or make it use less." if "memory cap" in s["how"]
+            else " Running it again unchanged will fail the same way.")
+    return (f"{s['what']} has failed the same way {s['count']} times in a row ({s['how']}), for "
+            f"{_ago((s['last'] - s['first']) / 60)}.{hint}")
 
 
 def result_line(what: str, rc: int, peak: float, minutes: float, ended: str | None, last: str) -> str:
@@ -518,8 +615,15 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
     if why is None:
         say(f"{what} is done: exit {rc}, peak memory {peak:g} GB, {minutes:.1f} min")
     remember(chat, what, rc, peak, minutes, why)
+    again = next((s for s in streaks(done_jobs()) if (s["chat"], s["what"]) == (chat, what)), None)
+    if again is not None and not worth_saying(again["count"]):
+        again = None
+    if again is not None:
+        say(f"AGAIN: {repeat_line(again)}")
     if notify_chat:
         notify(chat, result_line(what, rc, peak, minutes, why, last[0]))
+        if again is not None:
+            notify(chat, f"From the heavy-job queue: {repeat_line(again)}")
     return rc
 
 
@@ -549,6 +653,9 @@ def status() -> int:
                 held += (f", for {_ago((time.time() - float(gate['at'])) / 60)}, the most memory free in "
                          f"that time {float(gate.get('most_free_gb', 0)):g} GB")
             print(f"  {i}. {w['chat']}: {w['what']} (pid {w['pid']}, waiting since {w['since']}{held})")
+    for s in failing():
+        print(f"failing the same way: {s['chat']}: {s['what']} ({s['how']}, {s['count']} times in a row, "
+              f"the last at {time.strftime('%H:%M', time.localtime(s['last']))})")
     why = short((free, swap, disk, level))
     if why:
         print(f"short: {why}")

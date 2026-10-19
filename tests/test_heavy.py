@@ -78,6 +78,52 @@ def test_heavy_queue(monkeypatch):
     rc, out = heavy("n-chat", "x", "--loud", "--", "true")
     check(rc == 2 and "usage" in out, "an option it does not know is refused")
 
+    # --- ⭐ the same failure again and again is said ------------------------------------------------
+    h = module(HEAVY_REPEAT_FAILS="3")
+    def rec(what, end, rc=0, ended=None, chat="r-chat"):
+        return {"chat": chat, "what": what, "rc": rc, "ended": ended, "end": end}
+    cap = [rec("sheets", t, 137, f"{gb} GB, over the 8 GB cap") for t, gb in ((1, 9.4), (2, 8.8), (3, 9.9))]
+    got = h.streaks(cap)
+    check(len(got) == 1 and got[0]["count"] == 3 and got[0]["how"] == "over the 8 GB memory cap"
+          and got[0]["first"] == 1 and got[0]["last"] == 3,
+          f"⭐ three runs ended over the cap, at different peaks, are one failure three times: {got}")
+    check(h.streaks(cap[:2]) == [], "two are not yet a run of failures")
+    check(h.streaks([*cap, rec("sheets", 4)]) == [], "a success after them ends the run")
+    check(h.streaks([rec("sheets", 0, 3), *cap]) and h.streaks([rec("sheets", 0, 3), *cap])[0]["count"] == 3,
+          "a failure of another kind before them does not count")
+    mixed = [rec("x", 1, 1), rec("x", 2, 2), rec("x", 3, 1)]
+    check(h.streaks(mixed) == [], "exit codes that differ are not the same failure")
+    check(h.streaks([rec("x", t, 1, chat=c) for t, c in ((1, "a"), (2, "b"), (3, "a"))]) == [],
+          "the same job name from two chats is two jobs")
+    check(h.streaks(list(reversed(cap)))[0]["count"] == 3, "the records may come in any order")
+    check(h.failed_how(rec("m", 1, 124, "its --max-hold of 5 min")) == "ended at its --max-hold"
+          and h.failed_how(rec("m", 1, 0)) is None, "a --max-hold end is its own kind, a success is none")
+    check([n for n in range(1, 30) if h.worth_saying(n)] == [3, 6, 12, 24],
+          "it is said at the third failure and each time the count doubles")
+    told2 = STATE / "told-again.txt"
+    fake2 = STATE / "later-again.sh"
+    fake2.write_text(f'printf "%s|" "$@" >> {told2}; echo >> {told2}\n')
+    outs = [heavy("r-chat", "flaky", "--notify", "--", "bash", "-c", "exit 7", HEAVY_NOTIFY=f"bash {fake2}")[1]
+            for _ in range(3)]
+    said = told2.read_text() if told2.exists() else ""
+    check("AGAIN" not in outs[0] + outs[1] and "AGAIN: flaky has failed the same way 3 times in a row (exit 7)" in outs[2],
+          f"⭐ the third run that fails the same way says so, the first two do not: {outs[2].strip()[-160:]!r}")
+    check("r-chat|From the heavy-job queue: flaky has failed the same way 3 times in a row" in said,
+          f"and with --notify its chat is told: {said[-200:]!r}")
+    rc, st = heavy("status")
+    check("failing the same way: r-chat: flaky (exit 7, 3 times in a row" in st,
+          f"status lists it: {st.strip()[-160:]!r}")
+    rc, st = heavy("status", HEAVY_REPEAT_HOURS="0")
+    check("failing the same way" not in st, "only within HEAVY_REPEAT_HOURS")
+    heavy("r-chat", "flaky", "--", "true")
+    rc, st = heavy("status")
+    check("failing the same way: r-chat: flaky" not in st, "and a success takes it off the list")
+    recs = [j for j in h.done_jobs() if j["what"] == "flaky"]
+    check(h.failing(folder=STATE / "done", within_hours=1, at_least=1)
+          and h.failing(folder=STATE / "nowhere") == [], "a reader may name the done folder")
+    check(len(recs) == 4 and all("end" in j and "how" in j for j in recs)
+          and sum(j["how"] == "exit 7" for j in recs) == 3, "each record keeps when it ended and how it failed")
+
     # --- the gate ---------------------------------------------------------------------------------
     h = module(HEAVY_MIN_FREE_GB="6", HEAVY_MAX_SWAP_GB="14", HEAVY_MIN_DISK_PCT="10")
     check(h.short((20, 2, 50)) == "", "a machine with room is not short")
