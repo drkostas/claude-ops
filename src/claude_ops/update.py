@@ -188,6 +188,52 @@ def command_lines(pids: list[int], *, run=subprocess.run) -> dict[int, str]:
     return out
 
 
+def shown_command(line: str, limit: int = 120) -> str:
+    """What a chat's shell runs, from its full command line, shortened to `limit` characters.
+    Claude Code wraps each command as `zsh -c source <snapshot> ... && eval '<command>' < /dev/null
+    && pwd -P >| <file>`, so the command is the quoted text after `eval`."""
+    at = line.find("eval '")
+    if at >= 0:
+        rest = line[at + 6:]
+        end = rest.rfind("' < /dev/null")
+        line = (rest[:end] if end >= 0 else rest).replace("'\"'\"'", "'")
+    line = " ".join(line.split())
+    return line if len(line) <= limit else line[:limit - 1] + "…"
+
+
+def forgotten_shells(pid: int, procs: dict[int, dict], screen: str | None, now: dt.datetime, *,
+                     older_than_s: float = 3600,
+                     commands: Mapping[int, str] | None = None) -> list[dict]:
+    """The commands a chat left running in the background and is not waiting for: Claude's empty
+    prompt is on its screen, and a shell under it (not one that only waits, `waiting_shells`) has
+    run for `older_than_s` or more. Each is {"pid", "age_s", "command"}, oldest first.
+
+    Such a shell keeps `idle` saying "it is running a command" for as long as it runs, and a
+    general request to finish background work did not get one stopped: the chat cannot tell which
+    of its tasks is meant. Naming the process and its command lets it stop that one."""
+    if not empty_prompt(screen)[0]:
+        return []
+    shells = shell_children(pid, procs)
+    if commands is None:
+        commands = command_lines(shells)
+    out = []
+    for s in shells:
+        if s in waiting_shells(shells, procs, commands):
+            continue
+        started = procs[s].get("started")
+        if started is None:
+            continue
+        age = (now - started).total_seconds()
+        if age >= older_than_s:
+            out.append({"pid": s, "age_s": int(age), "command": shown_command(commands.get(s, ""))})
+    return sorted(out, key=lambda f: -f["age_s"])
+
+
+def _took(d: dt.timedelta) -> str:
+    m = max(0, int(d.total_seconds() // 60))
+    return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m"
+
+
 def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
          turn_ended_at: dt.datetime | None, now: dt.datetime,
          prompt_on_screen: bool | None = None, *, quiet_s: float = QUIET_S,
@@ -205,7 +251,11 @@ def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
     if commands is not None:
         shells = [s for s in shells if s not in waiting_shells(shells, procs, commands)]
     if shells:
-        return False, "it is running a command"
+        oldest = min(shells, key=lambda p: procs[p].get("started") or now)
+        started = procs[oldest].get("started")
+        if started is None:
+            return False, "it is running a command"
+        return False, f"it is running a command (pid {oldest}, for {_took(now - started)})"
     if transcript_at is None:
         return False, "its transcript was not found, so whether it is working is unknown"
     quiet = (now - transcript_at).total_seconds()
