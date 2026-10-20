@@ -227,6 +227,15 @@ accounts.choose("a", {"a": usage_a, "b": usage_b}, now)            # "b", or Non
 - `renew` renews a saved copy with its refresh token. Never renew the login in use: renewing replaces the refresh token, and the chats holding the old one are signed out.
 - Running chats move to the new login by themselves. Their Remote Control sessions do not; send each chat `/remote-control` again.
 
+A Remote Control session keeps the title it was first made with. `claude_ops.remote.set_title` gives it a new one through the sessions API, with the login of the account that owns the session, and reads it back, so no browser has to be signed in to that account:
+
+```python
+from claude_ops import accounts, remote
+s = remote.remote_session(transcript)                              # {"row", "account"}
+login = accounts.login_for(s["account"], [(accounts.LIVE_SERVICE, "<mac user>"), ("my-saved-login-b", "<mac user>")])
+remote.set_title(s["row"], "build", login["claudeAiOauth"]["accessToken"])   # {"ok", "title", "changed"}
+```
+
 ## Skills
 
 ```bash

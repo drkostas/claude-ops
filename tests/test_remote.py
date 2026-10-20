@@ -79,3 +79,70 @@ def test_continue_after_an_error_once_and_only_while_recent():
     assert update.continue_after_error({**err, "age": 7200}, None, 0)[0] == "stuck"
     assert update.continue_after_error({**err, "age": 200000}, None, 0)[0] == "nothing"
     assert update.continue_after_error(None, None, 0)[0] == "nothing"
+
+
+class _Session:
+    """A fake sessions API: GET answers the title, PUT sets it, any other session is 404."""
+
+    def __init__(self, title, *, put_status=200, ignore_put=False):
+        self.title, self.put_status, self.ignore_put = title, put_status, ignore_put
+        self.calls = []
+
+    def __call__(self, req, timeout=15):
+        import io
+        import urllib.error
+        self.calls.append((req.get_method(), req.full_url, req.get_header("Authorization")))
+        if not req.full_url.endswith("/v1/code/sessions/cse_A"):
+            raise urllib.error.HTTPError(req.full_url, 404, "not found", {}, io.BytesIO(b""))
+        if req.get_method() == "PUT":
+            if self.put_status != 200:
+                raise urllib.error.HTTPError(req.full_url, self.put_status, "no", {}, io.BytesIO(b""))
+            if not self.ignore_put:
+                self.title = json.loads(req.data)["title"]
+            body = b"{}"
+        else:
+            body = json.dumps({"response_shape": {"id": "cse_A", "title": self.title}}).encode()
+
+        class Answer:
+            status = 200
+
+            def read(self):
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return Answer()
+
+
+def test_the_api_id_of_a_row():
+    assert remote.api_id("session_A") == "cse_A" and remote.api_id("cse_A") == "cse_A"
+
+
+def test_set_title_puts_the_name_and_reads_it_back():
+    api = _Session("laptop.local")
+    assert remote.set_title("session_A", "build", "tok", fetch=api) == {
+        "ok": True, "title": "build", "changed": True}
+    assert [c[0] for c in api.calls] == ["GET", "PUT", "GET"]
+    assert all(c[2] == "Bearer tok" for c in api.calls)
+
+
+def test_a_session_already_named_is_left_alone():
+    api = _Session("build")
+    assert remote.set_title("session_A", "build", "tok", fetch=api) == {
+        "ok": True, "title": "build", "changed": False}
+    assert [c[0] for c in api.calls] == ["GET"]
+
+
+def test_a_session_the_login_cannot_see_says_so():
+    got = remote.set_title("session_OTHER", "build", "tok", fetch=_Session("x"))
+    assert got == {"ok": False, "why": remote.NOT_FOUND}
+
+
+def test_a_refused_login_and_a_title_that_did_not_take_are_failures():
+    assert remote.set_title("session_A", "build", "tok", fetch=_Session("x", put_status=401)) == {
+        "ok": False, "why": remote.REFUSED}
+    got = remote.set_title("session_A", "build", "tok", fetch=_Session("x", ignore_put=True))
+    assert got == {"ok": False, "title": "x", "changed": True}

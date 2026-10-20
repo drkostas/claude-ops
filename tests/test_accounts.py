@@ -137,3 +137,40 @@ def test_a_login_as_long_as_a_real_one_is_saved_whole_and_a_longer_one_is_refuse
     finally:
         subprocess.run(["security", "delete-generic-password", "-s", service, "-a", "tester"],
                        capture_output=True)
+
+
+def test_login_for_finds_the_saved_login_of_an_account():
+    import subprocess
+    logins = {"live": {"claudeAiOauth": {"accessToken": "t-live"}},
+              "saved-b": {"claudeAiOauth": {"accessToken": "t-b"}},
+              "stale": {"claudeAiOauth": {"accessToken": "t-old"}}}
+
+    def run(argv, **kw):
+        login = logins.get(argv[argv.index("-s") + 1])
+        return subprocess.CompletedProcess(argv, 0 if login else 44, json.dumps(login) if login else "", "")
+
+    uuids = {"t-live": "uuid-a", "t-b": "uuid-b"}
+
+    class Answer:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return json.dumps(self.body).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fetch(req, timeout=15):
+        token = req.get_header("Authorization").split()[-1]
+        if token not in uuids:
+            raise OSError("401")
+        return Answer({"account": {"email": "x@example.org", "uuid": uuids[token]}, "organization": {}})
+
+    items = [("missing", "u"), ("stale", "u"), ("live", "u"), ("saved-b", "u")]
+    assert ac.login_for("uuid-b", items, run=run, fetch=fetch) == logins["saved-b"]
+    assert ac.login_for("uuid-a", items, run=run, fetch=fetch) == logins["live"]
+    assert ac.login_for("uuid-z", items, run=run, fetch=fetch) is None
