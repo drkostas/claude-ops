@@ -104,6 +104,19 @@ A command a chat starts in the background shares the chat's process group, so it
 does. `detach` starts it as the leader of a new session (macOS has no `setsid` command), with no
 input and its output appended to the log, and prints its pid, which is also its group id.
 
+## An Android device back on adb after a restart
+
+```bash
+claude-ops adb-reach 192.0.2.7            # the device's VPN address; exit 0 when adb answers
+claude-ops adb-reach 192.0.2.7 --json --keep-wireless
+```
+
+`adb tcpip 5555` lets a device listen on a fixed port on any network until it restarts. Wireless
+debugging survives a restart on a Wi-Fi network the device trusts, but listens on a random port that
+only mDNS announces, so a machine on another network cannot find it. `adb-reach` tries the fixed
+port, and when that refuses it scans the address for the wireless-debugging port, connects there and
+runs `tcpip`, so the fixed port listens again. It needs a key the device already accepts.
+
 ## One heavy job at a time
 
 ```bash
