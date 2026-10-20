@@ -128,3 +128,11 @@ def test_a_missing_adb_binary_is_an_answer_not_an_exception():
 
 def test_the_cli_lists_it():
     assert "adb-reach" in cli.TOOLS
+
+
+def test_env_reaches_every_adb_command(monkeypatch):
+    seen = []
+    monkeypatch.setattr(adb, "default_run",
+                        lambda argv, timeout=15, env=None: seen.append(env) or subprocess.CompletedProcess(argv, 1, "", ""))
+    adb.reach(HOST, scan=lambda h, p: [], env={"PATH": "/x"}, sleep=lambda s: None)
+    assert seen and all(e == {"PATH": "/x"} for e in seen)
