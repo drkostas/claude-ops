@@ -84,6 +84,24 @@ def usage(token: str, *, fetch=urllib.request.urlopen) -> dict:
     return out
 
 
+def login_for(account: str, items: list[tuple[str, str]], *, run=subprocess.run,
+              fetch=urllib.request.urlopen, env: Mapping[str, str] | None = None) -> dict | None:
+    """The first saved login among `items` ((service, account name) keychain pairs, in order) whose
+    profile is the account with uuid `account`, or None. A missing item, or a token the profile
+    refuses (expired), is passed over; nothing is renewed here."""
+    for service, name in items:
+        login = read_item(service, name, run=run, env=env)
+        token = ((login or {}).get("claudeAiOauth") or {}).get("accessToken")
+        if not token:
+            continue
+        try:
+            if profile(token, fetch=fetch)["uuid"] == account:
+                return login
+        except Exception:  # noqa: BLE001 - a refused token says nothing about whose it is
+            continue
+    return None
+
+
 def profile(token: str, *, fetch=urllib.request.urlopen) -> dict:
     """{"email", "uuid", "org"} of the token's account."""
     d = _get(PROFILE_URL, token, fetch)

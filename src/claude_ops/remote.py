@@ -16,14 +16,23 @@ The Code list shows only the sessions of the account the page is signed in to. W
 move to another Claude account, their new sessions are never in that list, and a rename that only
 waits for the row reports it missing for ever. Give `rename_js` the session's account and it checks
 the page's account first, answering `OTHER_ACCOUNT` instead.
+
+No page is needed at all with the account's own login. `set_title(row, name, token)` puts the title
+through the sessions API that Claude Code itself uses (`PUT /v1/code/sessions/<id>`), with the OAuth
+access token of the account that owns the session, and reads it back with `title`. It works for any
+account whose login is at hand, whichever account a browser is signed in to, and opens no window.
 """
 from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 CODE_URL = "https://claude.ai/code"
+API_URL = "https://api.anthropic.com"
+BETA = "oauth-2025-04-20"
 TAIL = 512 * 1024
 _BRIDGE = re.compile(r'"bridgeSessionId"\s*:\s*"cse_([A-Za-z0-9]+)"')
 _OWNER = re.compile(r'"ownerAccountUuid"\s*:\s*"([0-9A-Za-z-]+)"')
@@ -31,6 +40,10 @@ _OWNER = re.compile(r'"ownerAccountUuid"\s*:\s*"([0-9A-Za-z-]+)"')
 NOT_LISTED = "its row is not in the list"
 #: what rename_js answers when the page is signed in to another account than the session's
 OTHER_ACCOUNT = "the page is signed in to another account"
+#: what set_title answers when the login cannot see the session (another account's, or gone)
+NOT_FOUND = "the login does not see this session"
+#: what set_title answers when the login was refused (expired or revoked)
+REFUSED = "the login was refused"
 
 
 def remote_session(transcript: Path | str | None, tail: int = TAIL) -> dict | None:
@@ -113,3 +126,58 @@ def rename_js(row_id: str, name: str, account: str | None = None) -> str:
   return {ok: named(now), label: now, changed: true};
 })()""" % (json.dumps(row_id), json.dumps(name), json.dumps(account), json.dumps(OTHER_ACCOUNT),
              json.dumps(NOT_LISTED))
+
+
+# ------------------------------------------------------------------------------------ the API
+
+def api_id(row: str) -> str:
+    """The sessions API's id for a row: "session_<X>" becomes "cse_<X>"; any other id is kept."""
+    return "cse_" + row[len("session_"):] if row.startswith("session_") else row
+
+
+def _call(method: str, row: str, token: str, body: dict | None, fetch, timeout: float) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"{API_URL}/v1/code/sessions/{api_id(row)}", method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "anthropic-version": "2023-06-01", "anthropic-beta": BETA})
+    try:
+        with fetch(req, timeout=timeout) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+
+
+def _why(status: int) -> str:
+    if status == 404:
+        return NOT_FOUND
+    if status in (401, 403):
+        return REFUSED
+    return f"the sessions API answered {status}"
+
+
+def title(row: str, token: str, *, fetch=urllib.request.urlopen, timeout: float = 15) -> dict:
+    """The session's title through the sessions API: {"ok": True, "title"} or {"ok": False, "why"}.
+    `token` is the OAuth access token of the account that owns the session; it is sent only in the
+    Authorization header and never kept."""
+    status, body = _call("GET", row, token, None, fetch, timeout)
+    if status != 200:
+        return {"ok": False, "why": _why(status)}
+    return {"ok": True, "title": (body.get("response_shape") or body).get("title")}
+
+
+def set_title(row: str, name: str, token: str, *, fetch=urllib.request.urlopen,
+              timeout: float = 15) -> dict:
+    """Give the session the title `name` and read it back: {"ok", "title", "changed"} or
+    {"ok": False, "why"}. A session already titled `name` is left alone (changed False)."""
+    now = title(row, token, fetch=fetch, timeout=timeout)
+    if not now["ok"] or now["title"] == name:
+        return {**now, "changed": False} if now["ok"] else now
+    status, _ = _call("PUT", row, token, {"title": name}, fetch, timeout)
+    if status != 200:
+        return {"ok": False, "why": _why(status)}
+    after = title(row, token, fetch=fetch, timeout=timeout)
+    if not after["ok"]:
+        return after
+    return {"ok": after["title"] == name, "title": after["title"], "changed": True}
