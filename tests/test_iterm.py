@@ -90,3 +90,57 @@ def test_set_bounds_returns_the_frame_read_back(monkeypatch):
     assert iterm.set_bounds(5, target) == target
     monkeypatch.setattr(iterm, "windows", lambda env=None: [])
     assert iterm.set_bounds(5, target) is None
+
+
+class FakeProcs:
+    def __init__(self, apps=(100,), servers=(877,), held=21, own=0, dies=True, opens=True, answers_after=1):
+        self.apps, self.servers, self.held, self.own = list(apps), list(servers), held, own
+        self.dies, self.opens, self.answers_after = dies, opens, answers_after
+        self.killed, self.opened, self.asked = [], 0, 0
+
+    def app(self):
+        return self.apps
+
+    def server(self):
+        return self.servers
+
+    def children(self, pid):
+        return self.held if pid in self.servers else self.own
+
+    def kill(self, pid):
+        self.killed.append(pid)
+
+    def alive(self, pid):
+        return not self.dies
+
+    def open(self):
+        self.opened += 1
+        return self.opens
+
+    def answers(self):
+        self.asked += 1
+        return self.asked >= self.answers_after
+
+    def sleep(self, s):
+        pass
+
+
+def test_restart_stops_only_the_app_and_waits_for_it_to_answer():
+    p = FakeProcs(answers_after=3)
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "success" and p.killed == [100] and p.opened == 1 and p.asked == 3
+    assert detail["terminals_before"] == 21 and detail["terminals_after"] == 21
+
+
+def test_restart_refuses_when_the_terminals_would_end():
+    for p in (FakeProcs(servers=()), FakeProcs(held=0), FakeProcs(own=2), FakeProcs(apps=(1, 2))):
+        outcome, detail = iterm.restart_app(procs=p)
+        assert outcome == "failure" and p.killed == [] and "nothing was stopped" in detail["message"]
+
+
+def test_restart_that_never_answers_is_a_failure():
+    p = FakeProcs(answers_after=10**6)
+    outcome, detail = iterm.restart_app(procs=p, answer_wait=9)
+    assert outcome == "failure" and "did not answer" in detail["message"]
+    p = FakeProcs(dies=False)
+    assert iterm.restart_app(procs=p)[0] == "failure" and p.opened == 0
