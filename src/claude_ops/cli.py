@@ -331,7 +331,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "plan-apply": ("plan_apply", "apply a written plan's Write and Edit steps exactly"),
          "heavy": ("heavy", "run heavy jobs one at a time across chats, under a memory cap"),
          "restack": ("restack", "rebuild a stack of one-commit branches on a new base, settling add-only conflicts"),
-         "detach": ("detach", "start a command in its own session, so it outlives the chat")}
+         "detach": ("detach", "start a command in its own session, so it outlives the chat"),
+         "adb-reach": ("adb", "reach an Android device over adb again after a restart undid tcpip")}
 
 
 def main(argv: list[str] | None = None) -> int:
