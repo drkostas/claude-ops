@@ -108,12 +108,16 @@ def wireless_on(serial: str, *, turn_on: bool = False, run=default_run, adb: str
 
 
 def reach(host: str, *, fixed: int = FIXED, ports=WIRELESS_PORTS, skip=(), keep_wireless: bool = False,
-          run=default_run, scan=open_ports, adb: str = "adb", settle: float = 4.0,
-          sleep=time.sleep) -> Reach:
+          run=None, scan=open_ports, adb: str = "adb", settle: float = 4.0,
+          sleep=time.sleep, env: dict[str, str] | None = None) -> Reach:
     """Reach the device at `host`: the fixed port if it answers, otherwise the wireless-debugging port
     found by scanning `ports`, from which `tcpip <fixed>` makes the fixed port listen again.
     `skip` names ports to leave alone. With `keep_wireless`, wireless debugging is turned back on
-    after `tcpip` when it went off (it was on, so the network is one the device trusts)."""
+    after `tcpip` when it went off (it was on, so the network is one the device trusts). `env` is
+    the environment every adb command runs with (None inherits); it is ignored when `run` is given."""
+    if run is None:
+        def run(argv, *, timeout=15):
+            return default_run(argv, timeout=timeout, env=env)
     fixed_serial = f"{host}:{fixed}"
     if _connect(fixed_serial, run, adb):
         return Reach(fixed_serial, "fixed", f"port {fixed} answered")
