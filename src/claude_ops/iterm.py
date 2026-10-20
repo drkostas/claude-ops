@@ -373,3 +373,118 @@ def tmux_client_ttys(session: str, *, tmux: str = "tmux", env: Mapping[str, str]
         return set()
     return {p[0] for p in (line.split() for line in r.stdout.splitlines())
             if len(p) == 2 and p[1] == "0" and p[0].startswith("/dev/")}
+
+
+# ------------------------------------------------------------------------------------ restarting
+
+#: iTerm2's session server, which owns the terminals when session restoration runs through it
+SERVER_MARK = "/iTermServer-"
+
+
+def _pids(argv: Sequence[str], env: Mapping[str, str] | None) -> list[int]:
+    try:
+        r = subprocess.run(list(argv), capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [int(x) for x in r.stdout.split() if x.isdigit()]
+
+
+def _children(pid: int, env: Mapping[str, str] | None) -> int:
+    try:
+        r = subprocess.run(["/bin/ps", "-Ao", "ppid="], capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return -1
+    return sum(1 for x in r.stdout.split() if x.isdigit() and int(x) == pid)
+
+
+class Processes:
+    """What restart_app touches outside iTerm2's scripting, replaced by a fake in tests."""
+
+    def __init__(self, env: Mapping[str, str] | None = None):
+        self.env = env
+
+    def app(self) -> list[int]:
+        return _pids(["/usr/bin/pgrep", "-x", "iTerm2"], self.env)
+
+    def server(self) -> list[int]:
+        return _pids(["/usr/bin/pgrep", "-f", SERVER_MARK], self.env)
+
+    def children(self, pid: int) -> int:
+        return _children(pid, self.env)
+
+    def kill(self, pid: int) -> None:
+        import os, signal   # noqa: E401, PLC0415
+        os.kill(pid, signal.SIGKILL)
+
+    def alive(self, pid: int) -> bool:
+        import os   # noqa: PLC0415
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def open(self) -> bool:
+        try:
+            return subprocess.run(["/usr/bin/open", "-a", "iTerm"], capture_output=True, timeout=30,
+                                  env=self.env).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def answers(self) -> bool:
+        return windows(env=self.env) is not None
+
+    def sleep(self, s: float) -> None:
+        import time   # noqa: PLC0415
+        time.sleep(s)
+
+
+def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
+                env: Mapping[str, str] | None = None) -> tuple[str, dict]:
+    """Restart iTerm2's app while its terminals stay, for an iTerm2 that stopped answering.
+
+    When iTerm2 restores sessions through its session server (iTermServer), every terminal belongs
+    to the server, not to the app: the app can be stopped, and opened again it reconnects to them,
+    so the programs in them (a tmux client, a shell, a long job) never notice. The app is stopped
+    with SIGKILL, because an app that stopped answering usually ignores a polite quit too.
+
+    Refused, with nothing stopped, unless exactly one iTerm2 and one iTermServer run, the server
+    holds at least one terminal and the app itself holds none (stopping it would end those).
+    Returns (outcome, detail): "success" when iTerm2 answers again and the server still holds as
+    many terminals as before, "partial" when it holds fewer, "failure" otherwise; detail carries
+    "message", "terminals_before" and "terminals_after"."""
+    p = procs or Processes(env)
+    apps, servers = p.app(), p.server()
+    if len(apps) != 1:
+        return "failure", {"message": f"expected one iTerm2 process, found {len(apps)}; nothing was stopped"}
+    if len(servers) != 1:
+        return "failure", {"message": "iTerm2's session server is not running (or more than one is), so "
+                                      "stopping the app would end its terminals; nothing was stopped"}
+    app, server = apps[0], servers[0]
+    held, own = p.children(server), p.children(app)
+    if held <= 0:
+        return "failure", {"message": "iTerm2's session server holds no terminal, so they belong to the "
+                                      "app and would end with it; nothing was stopped"}
+    if own != 0:
+        return "failure", {"message": f"iTerm2 itself holds {own} process(es), which stopping it would end; "
+                                      "nothing was stopped"}
+    p.kill(app)
+    for _ in range(40):
+        if not p.alive(app):
+            break
+        p.sleep(0.25)
+    else:
+        return "failure", {"message": "iTerm2 did not stop"}
+    if not p.open():
+        return "failure", {"message": "iTerm2 stopped, and could not be opened again"}
+    waited = 0.0
+    while not p.answers():
+        if waited >= answer_wait:
+            return "failure", {"message": f"iTerm2 opened again but did not answer within {answer_wait:.0f} s",
+                               "terminals_before": held}
+        p.sleep(3)
+        waited += 3
+    kept = p.children(server)
+    return ("success" if kept >= held else "partial"), {
+        "message": f"iTerm2 restarted; its session server holds {kept} of {held} terminals",
+        "terminals_before": held, "terminals_after": kept}
