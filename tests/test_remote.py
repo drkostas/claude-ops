@@ -54,6 +54,11 @@ def test_a_page_of_another_account_says_so_before_waiting_for_the_row():
     assert got == {"ok": False, "why": remote.OTHER_ACCOUNT, "signed_in": "theirs"}
 
 
+def test_the_account_script_reads_the_signed_in_account():
+    assert _page(remote.account_js(), "mine") == {"account": "mine"}
+    assert _page(remote.account_js(), None) == {"account": None}
+
+
 def test_a_page_of_the_same_account_still_looks_for_the_row():
     got = _page(remote.rename_js("session_A", "build", account="mine"), "mine")
     assert got == {"ok": False, "why": remote.NOT_LISTED}

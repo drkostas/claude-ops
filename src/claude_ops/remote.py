@@ -60,6 +60,18 @@ def remote_id(transcript: Path | str | None, tail: int = TAIL) -> str | None:
     return found["row"] if found else None
 
 
+def account_js() -> str:
+    """The page script that reads which account a claude.ai page is signed in to: {account} (its
+    uuid, or null when the page could not say). Compare it with remote_session's account before
+    renaming, so a session of another account is not looked for in a list that cannot show it."""
+    return """(async () => {
+  try {
+    const r = await fetch('/api/account', {credentials: 'include'});
+    return {account: (await r.json()).uuid || null};
+  } catch (e) { return {account: null}; }
+})()"""
+
+
 def rename_js(row_id: str, name: str, account: str | None = None) -> str:
     """The page script that renames one row of the claude.ai Code list and reads its title back:
     {ok, label, changed} or {ok: false, why}. A row already titled `name` is left alone. With
