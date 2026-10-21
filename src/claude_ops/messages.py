@@ -300,6 +300,47 @@ def around(path: Path | str, line: int, *, before: int = 5, after: int = 5, tool
     return out
 
 
+def last_said(path: Path | str, *, before: float | None = None, chunk: int = 1 << 20,
+              limit: int = 16 << 20) -> dict | None:
+    """The last text the assistant wrote in a transcript, before the time `before` when given:
+    {"text", "at", "line"} or None. A message a person sends a chat often answers it ("work on it",
+    "yes, that one"), and this is what it answers. Read from the end, `chunk` bytes at a time up to
+    `limit`, so a transcript of hundreds of megabytes costs a read of its tail."""
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+        fh = path.open("rb")
+    except OSError:
+        return None
+    with fh:
+        want = chunk
+        while True:
+            start = max(0, size - want)
+            fh.seek(start)
+            data = fh.read(size - start)
+            rows = data.split(b"\n")
+            if start:
+                rows = rows[1:]   # the first is cut
+            for back, raw in enumerate(reversed(rows)):
+                if b'"assistant"' not in raw:
+                    continue
+                try:
+                    d = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                if not isinstance(d, dict) or d.get("type") != "assistant":
+                    continue
+                at = _at(d.get("timestamp"))
+                if before is not None and at is not None and at >= before:
+                    continue
+                text = _text((d.get("message") or {}).get("content")).strip()
+                if text:
+                    return {"text": text, "at": at, "line": None if start else len(rows) - back}
+            if start == 0 or want >= limit:
+                return None
+            want *= 4
+
+
 # ------------------------------------------------------------------------------------ the CLI
 
 def _when(ts: float | None) -> str:

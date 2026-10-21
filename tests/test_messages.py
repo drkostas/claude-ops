@@ -161,3 +161,26 @@ def test_cli_lists_and_shows_context(tmp_path, monkeypatch, capsys):
     assert messages.main(["--around", "s1:2", "--after", "1"]) == 0
     out = capsys.readouterr().out
     assert ">>" in out and "fix the login page" in out and "done" in out
+
+
+def test_last_said_is_the_newest_assistant_text(tmp_path):
+    p = tmp_path / "t.jsonl"
+    rows = [_u("2026-01-05T10:00:00Z", "fix the build"), _a("2026-01-05T10:01:00Z", "Fixed; tests pass."),
+            _tool("2026-01-05T10:02:00Z", "Bash", "run it"), _a("2026-01-05T10:03:00Z", "Two items are open."),
+            _u("2026-01-05T10:04:00Z", "work on it")]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    got = messages.last_said(p)
+    assert got["text"] == "Two items are open." and got["line"] == 4
+    from datetime import datetime
+    before = datetime.fromisoformat("2026-01-05T10:02:30+00:00").timestamp()
+    assert messages.last_said(p, before=before)["text"] == "Fixed; tests pass."
+    assert messages.last_said(tmp_path / "missing.jsonl") is None
+
+
+def test_last_said_reads_back_in_chunks(tmp_path):
+    p = tmp_path / "t.jsonl"
+    filler = [_tool(f"2026-01-05T11:{i % 60:02d}:00Z", "Read", "x" * 200) for i in range(400)]
+    p.write_text("\n".join(json.dumps(r) for r in [_a("2026-01-05T10:00:00Z", "The answer.")] + filler) + "\n")
+    got = messages.last_said(p, chunk=4096)
+    assert got["text"] == "The answer." and got["line"] == 1
+    assert messages.last_said(p, chunk=4096, limit=4096) is None

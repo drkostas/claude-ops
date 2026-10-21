@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `messages.last_said(path, before=None)`: the last text the assistant wrote in a transcript (before a time when given), read from the end in growing chunks, so a short message sent to a chat can carry what it answers
 - `accounts.renew`, `usage` and `profile` send a User-Agent (`accounts.USER_AGENT`). The token endpoint is behind Cloudflare, which refused Python's default `Python-urllib/3.x` with 403 (error code 1010), so every renewal of a saved login failed while usage, on another host, still answered
 - `tracebacks` (`claude-ops tracebacks`): the Python tracebacks in log files, grouped by exception type and deepest frame (`--prefer` picks frames in your own code), read from a byte offset so a scheduled pass sees each one once (`tracebacks.read_new(path, offset)` returns the next offset). A traceback still being written waits, a shrunk log is read from the start, a chain is one traceback, and interleaved output from two threads keeps what was complete
 - `messages` (`claude-ops messages`): what the person typed into chats over any range, from any chats (by title, folder or session), with the conversation before and after any message (`--around <session>:<line>`). It reads queued messages (queue operations and `queued_command` attachments) as well as user records and folds the copies of one message into one, and leaves out text written by Claude Code, hooks, schedules, other sessions and programs that type into the terminal
