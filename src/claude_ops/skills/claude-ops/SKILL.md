@@ -88,6 +88,34 @@ drawn into the window.
 - Set iTerm2 to hide the tmux control window and to open tmux windows as normal windows (General,
   then tmux, in its settings). Without that, each attach adds an extra window.
 
+## Read what the person asked, and what was said around it
+
+Before you answer "what did they ask for", read their messages, not your memory of them.
+`claude-ops messages` lists what the person typed, oldest first, from any chats and any range, and
+`--around` shows the conversation before and after one message.
+
+```bash
+claude-ops messages --since 7d --chat build              # titles take globs; --folder and --session too
+claude-ops messages --since 2026-01-05 --until 2026-01-06 --grep "deploy|backup"
+claude-ops messages --around <session>:<line> --before 6 --after 12 --tools
+```
+
+- Never read only "user" records. A message typed while Claude works is a queue-operation first. It
+  may then arrive as a `queued_command` attachment inside the running turn and never as a user
+  record. Those asides are the requests most often forgotten. `messages` reads all three shapes and
+  folds the copies of one message into one entry.
+- A "user" record is often not the person. Task notifications, hook feedback, skill text,
+  compaction summaries, schedules and other sessions all write them. So does a program that types
+  into the terminal. `messages` drops a record by its own flags (`isMeta`, `origin`, `turnOrigin`,
+  `scheduledTaskId`) and by the text's opening.
+- A message that opens with a bracketed tag (`[watcher] ...`), or a paste whose every part does, is
+  treated as a program's. Pass your own pattern as `program_tag` when your tools type differently.
+- A queued message's copies arrive within hours of each other. The same words typed again later are
+  a new message.
+- To check that a request was done, read `--around` it, with `--tools` when you need to see what
+  was run. Then check the result itself (the merge, the file, the running service), not the chat's
+  account of it.
+
 ## Send a message safely
 
 ```bash
