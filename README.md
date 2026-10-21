@@ -37,7 +37,7 @@ claude-ops messages --since 3d --grep backup --json    # one entry per message, 
 claude-ops messages --around <session>:<line> --before 6 --after 10 --tools
 ```
 
-Text written by Claude Code, hooks, skills, task notifications, schedules and other sessions is left out, and so is text a program typed into the terminal (a message that opens with a bracketed tag such as `[watcher]`). Slash commands come with `--commands`. Each message has an id, `<session>:<line>`, and `--around` takes it. In Python, `messages.person_messages(transcripts, since=..., until=..., grep=...)` and `messages.around(path, line, before=..., after=...)` do the same.
+Text written by Claude Code, hooks, skills, task notifications, schedules and other sessions is left out, and so is text a program typed into the terminal (a message that opens with a bracketed tag such as `[watcher]`). Slash commands come with `--commands`. Each message has an id, `<session>:<line>`, and `--around` takes it. In Python, `messages.person_messages(transcripts, since=..., until=..., grep=...)` and `messages.around(path, line, before=..., after=...)` do the same. `messages.last_said(path, before=...)` is the last thing the assistant wrote, read from the end of the transcript, which is what a short reply such as "work on it" answers.
 
 ## Find the tracebacks a service logged
 
