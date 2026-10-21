@@ -333,7 +333,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "restack": ("restack", "rebuild a stack of one-commit branches on a new base, settling add-only conflicts"),
          "detach": ("detach", "start a command in its own session, so it outlives the chat"),
          "adb-reach": ("adb", "reach an Android device over adb again after a restart undid tcpip"),
-         "messages": ("messages", "what the person typed into chats, and the conversation around it")}
+         "messages": ("messages", "what the person typed into chats, and the conversation around it"),
+         "tracebacks": ("tracebacks", "Python tracebacks in log files, new since an offset, grouped")}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -39,6 +39,18 @@ claude-ops messages --around <session>:<line> --before 6 --after 10 --tools
 
 Text written by Claude Code, hooks, skills, task notifications, schedules and other sessions is left out, and so is text a program typed into the terminal (a message that opens with a bracketed tag such as `[watcher]`). Slash commands come with `--commands`. Each message has an id, `<session>:<line>`, and `--around` takes it. In Python, `messages.person_messages(transcripts, since=..., until=..., grep=...)` and `messages.around(path, line, before=..., after=...)` do the same.
 
+## Find the tracebacks a service logged
+
+A service that logs to a file collects Python tracebacks nobody reads. `claude-ops tracebacks` groups them by exception type and the deepest frame (in your own code when `--prefer` names it), and reads only what came after a byte offset, so a scheduled pass sees each one once.
+
+```bash
+claude-ops tracebacks ~/Library/Logs/app.err.log                     # every traceback, grouped and counted
+claude-ops tracebacks app.log --prefer "*/myapp/*" --ignore BrokenPipeError --json
+claude-ops tracebacks app.log --offset 81920                         # only what came after that byte
+```
+
+In Python, `tracebacks.read_new(path, offset)` returns the tracebacks after `offset`, the offset to start from next time and how many bytes it skipped (a backlog over 8 MB is skipped from its start). A traceback still being written at the end of the file waits for the next pass, a log that shrank is read from the start, a chain ("During handling of the above exception") is one traceback named by its last exception, and two threads writing at once keep what was complete. `tracebacks.group(traces, prefer)` folds them by signature, such as `KeyError at handlers.py:render`.
+
 ## Send a message into a running chat
 
 ```bash

@@ -496,6 +496,10 @@ iterm.close_empty_window(window_id)                          # "closed", "asked"
   lost. It fits `claude_human.desktops.frame_window(..., fallback=...)`.
 - An answer that could not be read is `None`, never "no windows".
 
+## Read the tracebacks a service logged
+
+When something on the machine "works but misbehaves", or before saying a service is healthy, read its log's tracebacks rather than the last few lines: `claude-ops tracebacks <log> --prefer "*/<your package>/*" --ignore BrokenPipeError`. The groups say which code fails and how often. A watcher that runs on a schedule keeps `read_new`'s next offset between passes and starts a new log at its end (the history is not news). Client disconnects (`BrokenPipeError`, `ConnectionResetError`) are a peer going away, not a bug in the service.
+
 ## Traps
 
 - iTerm2 consent. The first time a new program (a launchd job, a fresh Python) scripts iTerm2,
