@@ -18,12 +18,18 @@ import urllib.request
 from pathlib import Path
 from typing import Mapping
 
+from . import __version__
+
 LIVE_SERVICE = "Claude Code-credentials"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 BETA = "oauth-2025-04-20"
+#: every request names itself. The token endpoint sits behind Cloudflare, which refuses Python's own
+#: "Python-urllib/3.x" with 403 (error code 1010, a banned client signature), so a renewal without
+#: this header failed every time while usage and profile, on another host, still answered
+USER_AGENT = f"claude-ops/{__version__}"
 #: an account is spent at this percent of either its 5-hour or its weekly limit
 THRESHOLD = 98.0
 _LIMIT = re.compile(r"hit your (?:(session|weekly) )?limit", re.I)
@@ -65,7 +71,8 @@ def write_item(service: str, account: str, data: dict, *, run=subprocess.run,
 
 
 def _get(url: str, token: str, fetch) -> dict:
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "anthropic-beta": BETA})
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "anthropic-beta": BETA,
+                                                  "User-Agent": USER_AGENT})
     with fetch(req, timeout=15) as r:
         return json.loads(r.read())
 
@@ -115,7 +122,7 @@ def renew(login: dict, *, fetch=urllib.request.urlopen, now: dt.datetime | None 
     body = json.dumps({"grant_type": "refresh_token", "refresh_token": o["refreshToken"],
                        "client_id": CLIENT_ID, "scope": " ".join(o.get("scopes") or [])}).encode()
     req = urllib.request.Request(TOKEN_URL, data=body, method="POST",
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
     with fetch(req, timeout=15) as r:
         t = json.loads(r.read())
     now = now or dt.datetime.now(dt.timezone.utc)

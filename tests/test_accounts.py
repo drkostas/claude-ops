@@ -59,6 +59,7 @@ def test_usage_reads_the_two_limits():
     assert u["session"] == (21.0, dt.datetime(2026, 10, 18, 14, 9, 59, tzinfo=UTC))
     assert u["weekly"][0] == 6.0
     assert calls[0].get_header("Authorization") == "Bearer tok"
+    assert calls[0].get_header("User-agent") == ac.USER_AGENT
 
 
 def test_profile_names_the_account():
@@ -80,6 +81,8 @@ def test_renew_keeps_the_rest_and_dates_the_new_token():
     assert body == {"grant_type": "refresh_token", "refresh_token": "r", "client_id": ac.CLIENT_ID,
                     "scope": "user:inference user:profile"}
     assert ac.expired(old, NOW) and not ac.expired(new, NOW)
+    # Cloudflare refuses Python-urllib's own user agent at the token endpoint (403, error code 1010)
+    assert calls[0].get_header("User-agent") == ac.USER_AGENT and "urllib" not in ac.USER_AGENT
 
 
 def test_usable_at():
