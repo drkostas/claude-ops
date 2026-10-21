@@ -321,6 +321,36 @@ chat.server_context()             # "none", "iterm", "outside" or "unknown"
   the tab. Without set-titles every moved tab read "cd (tmux)".
 - Remote Control comes back named after the chat (`title_of` reads the chat's own title).
 
+## Give a Remote Control session a new title
+
+A Remote Control session keeps the title it was first made with. Resuming the chat reattaches it to
+that session, and neither `claude --remote-control <name>` nor `/rename` changes the title that
+claude.ai and the phone app show. `claude_ops.remote.set_title` changes it through the sessions API
+Claude Code itself uses, with the login of the account that owns the session, and reads it back. No
+browser has to be signed in to that account.
+
+```python
+from claude_ops import accounts, remote
+s = remote.remote_session(transcript)          # {"row", "account"}: the session, and whose it is
+items = [(accounts.LIVE_SERVICE, "<mac user>"), ("my-saved-login-b", "<mac user>")]
+login = accounts.login_for(s["account"], items)
+token = login["claudeAiOauth"]["accessToken"]
+remote.title(s["row"], token)                  # what claude.ai shows now
+remote.set_title(s["row"], "build", token)     # {"ok", "title", "changed"}, or {"ok": False, "why"}
+```
+
+- Use the token of the account that owns the session. A login that cannot see the session
+  (another account's, or a session that is gone) answers `remote.NOT_FOUND`, and an expired or
+  revoked login answers `remote.REFUSED`.
+- `set_title` reads the title first and sends nothing when it already matches, then reads it back
+  after the change. Report the title it read back, not the one you sent.
+- A restart can make a new session with a title of its own, so keep the session id with the title
+  you set, and set it again when the id changes.
+- Stop after a few failures for one session. A session that is never found stays not found.
+- Never print or log the token. Read it inside the script that makes the call.
+- The sessions API is not documented. If Anthropic changes it, `set_title` fails with a reason and
+  the chat itself keeps working.
+
 ## Give a chat its own worktree
 
 Several chats in one checkout switch branches under each other. `claude_ops.worktree` gives each a
