@@ -26,6 +26,19 @@ claude-ops search "pg_restore"      # search the full text of every chat (uses r
 
 Each result prints the line that resumes it (`cd <folder> && claude --resume <id>`). The index is cached in `~/.cache/claude-ops/sessions.json` and only changed files are read again, so a later run over twenty thousand chats takes a second or two. The time shown is the last message in the chat, not the file's modification time, because backup and restore tools give every file a new time. A chat is marked "maybe running" when it was active in the last 15 minutes and a `claude` process is running in its folder. Those are two separate facts, so it says "maybe".
 
+## Read what was asked, with what came around it
+
+A transcript holds much more than the person's messages, and a message typed while Claude was still working is often not a "user" record at all (it is queued, and may arrive as an attachment or never as a user record). `claude-ops messages` reads every shape, keeps only what the person typed or pasted, and shows the conversation around any of it.
+
+```bash
+claude-ops messages --since 7d                         # everything typed in the last week, oldest first
+claude-ops messages --since 2026-01-05 --until 2026-01-07 --chat "docs-*" --folder ~/code/app
+claude-ops messages --since 3d --grep backup --json    # one entry per message, with its id
+claude-ops messages --around <session>:<line> --before 6 --after 10 --tools
+```
+
+Text written by Claude Code, hooks, skills, task notifications, schedules and other sessions is left out, and so is text a program typed into the terminal (a message that opens with a bracketed tag such as `[watcher]`). Slash commands come with `--commands`. Each message has an id, `<session>:<line>`, and `--around` takes it. In Python, `messages.person_messages(transcripts, since=..., until=..., grep=...)` and `messages.around(path, line, before=..., after=...)` do the same.
+
 ## Send a message into a running chat
 
 ```bash
