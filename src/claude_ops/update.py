@@ -305,7 +305,7 @@ def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
             return False, "Claude's prompt is not on its screen"
         return True, f"quiet for {int(quiet_unhooked_s // 60)} minutes with no command running"
     if turn_ended_at < transcript_at - dt.timedelta(seconds=5):
-        # ⚠️ A TURN THAT ENDS IN AN API ERROR FIRES NO STOP HOOK (portal-local-gguf, 2026-10-11).
+        # ⚠ A TURN THAT ENDS IN AN API ERROR FIRES NO STOP HOOK (portal-local-gguf, 2026-10-11).
         # Its writes are newer than the last recorded end of turn, so without this the chat read as
         # working for ever. The same rule as a chat with no end on record: a long silence, and
         # Claude's empty prompt on its screen. Unknown screen stays "working".
@@ -378,14 +378,16 @@ def remote_control_of(path: Path | None) -> bool:
     return False
 
 
-def _lines_from_end(path: Path, block: int = 1 << 20):
+def _lines_from_end(path: Path, block: int = 1 << 20, limit: int | None = None):
     """The file's lines, newest first, read backwards in blocks so a long transcript is not read
-    whole to find its last few records."""
+    whole to find its last few records. With `limit`, only the last `limit` bytes are read, and a
+    line cut by that edge is not yielded."""
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         end, rest = f.tell(), b""
-        while end > 0:
-            start = max(0, end - block)
+        floor = 0 if limit is None else max(0, end - limit)
+        while end > floor:
+            start = max(floor, end - block)
             f.seek(start)
             chunk = f.read(end - start) + rest
             lines = chunk.split(b"\n")
@@ -394,6 +396,51 @@ def _lines_from_end(path: Path, block: int = 1 << 20):
                 if line.strip():
                     yield line.decode("utf-8", "replace")
             end = start
+
+
+#: the states `remote_control_state` reads from a transcript's own system records
+REMOTE_CONTROL_STATES = ("active", "off", "disconnected", "unavailable")
+#: how far back a transcript is read for its newest Remote Control record; a session whose newest
+#: record is older than that reads as unknown rather than costing a read of the whole file
+REMOTE_CONTROL_SCAN = 64 << 20
+
+
+def remote_control_state(path: Path | None, limit: int = REMOTE_CONTROL_SCAN) -> str | None:
+    """What the conversation's newest system record says about Remote Control: "active" (the bridge
+    started), "off" (switched off in the session), "disconnected" (lost, which happens when the
+    login stops working), "unavailable" (/remote-control was refused because the session runs
+    without a claude.ai account, for example on a local model), or None when the last `limit` bytes
+    hold no such record.
+
+    Only system records count. Claude Code writes each change as one: a `bridge_status` record when
+    the bridge starts or is switched off, an `informational` record when it is lost, and the answer
+    to /remote-control as a `local_command` record. The same words also appear in the text of a
+    conversation that discusses them and in the output of a command that searched for them, and a
+    reader that counted those would read a session's own grep as its state."""
+    if path is None:
+        return None
+    try:
+        for line in _lines_from_end(Path(path), limit=limit):
+            if "emote" not in line or '"system"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict) or d.get("type") != "system":
+                continue
+            content = str(d.get("content") or "")
+            if "/remote-control is active" in content:
+                return "active"
+            if "Remote Control disconnected" in content:
+                return "disconnected"
+            if "requires a claude.ai subscription" in content:
+                return "unavailable"
+            if d.get("subtype") == "bridge_status" and "off" in content.lower():
+                return "off"
+    except OSError:
+        return None
+    return None
 
 
 def model_of(path: Path | None) -> tuple[str | None, str | None]:
@@ -629,11 +676,15 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     return True, "its input line is empty"
 
 
-#: what a session's screen says when it lost its login, or its Remote Control with it
-SIGNED_OUT = ("Please run /login", "OAuth token unavailable", "requires a claude.ai subscription",
-              "Unknown command: /remote-control")
+#: what a session's screen says when it lost its login, or its Remote Control with it: how such
+#: a line starts, after the bullet Claude Code draws. The same words further in a line are a
+#: conversation about the outage, or a command that searched for them, and do not count
+SIGNED_OUT = ("Login expired", "Remote Control disconnected", "Unknown command: /remote-control",
+              "/remote-control requires a claude.ai subscription")
 #: what it says when Remote Control is on again
 RC_ACTIVE = ("/remote-control is active",)
+#: what precedes the words on such a line: spaces and the bullets and rules Claude Code draws
+_LEAD = re.compile(r"^[\s\u2300-\u23ff\u2500-\u27bf]+")
 #: seconds without a keyboard, mouse or trackpad event before nobody is taken to be at this computer
 AWAY_S = 600
 
@@ -642,11 +693,39 @@ def signed_out(screen: str | None) -> str | None:
     """The line on a session's screen saying it lost its login or its Remote Control, when that is
     the newest such word on it; None when it says nothing of the kind, or a later line says Remote
     Control is active again. A session in this state cannot be reached from a phone, and one that
-    lost its login cannot do anything asked of it until it is restarted with a working login."""
+    lost its login cannot do anything asked of it until it is restarted with a working login. The
+    words count as the start of a line, after Claude Code's bullet: a conversation that mentions
+    them, or a command that searched for them, is not a session that lost its login. Such a session
+    stays open at its prompt and answers every message with the same line, so from outside it looks
+    like a running chat while nothing it is sent is worked on."""
     for line in reversed((screen or "").splitlines()):
-        if any(m in line for m in RC_ACTIVE):
+        text = _LEAD.sub("", line)
+        if text.startswith(RC_ACTIVE):
             return None
-        if any(m in line for m in SIGNED_OUT):
+        if text.startswith(SIGNED_OUT):
+            return " ".join(line.split())
+    return None
+
+
+#: among SIGNED_OUT, the lines that say the login itself stopped working. Remote Control can be lost
+#: while the login still works (the signed-in account changed on the machine, a network drop), and
+#: such a session still works on what it is sent
+LOGIN_LOST = ("Login expired", "OAuth token unavailable")
+
+
+def login_lost(screen: str | None) -> str | None:
+    """The line on a session's screen saying its login stopped working, when that is the newest such
+    word on it: "Login expired · Please run /login", which such a session answers to every message,
+    or a Remote Control loss that names the token ("OAuth token unavailable"). None when the screen
+    says nothing of the kind, when its Remote Control dropped for another reason, or when a later
+    line says Remote Control is active again, which needs a working login. Everything sent to a
+    session in this state is refused, so a supervisor holds its messages and says so instead of
+    counting them delivered."""
+    for line in reversed((screen or "").splitlines()):
+        text = _LEAD.sub("", line)
+        if text.startswith(RC_ACTIVE):
+            return None
+        if text.startswith(SIGNED_OUT) and (text.startswith(LOGIN_LOST[0]) or LOGIN_LOST[1] in text):
             return " ".join(line.split())
     return None
 
@@ -1070,7 +1149,7 @@ def front_app(*, bundle_id: bool = False, env: Mapping[str, str] | None = None) 
     """The name of the application in front, or its bundle id (e.g. "com.googlecode.iterm2").
 
     `lsappinfo` asks LaunchServices, so it needs no Automation grant and always gives a fresh
-    answer. ⚠️ AppKit's frontmostApplication does not: inside one process with no run loop it keeps
+    answer. ⚠ AppKit's frontmostApplication does not: inside one process with no run loop it keeps
     its first answer (measured 2026-10-11, it still said Brave after Finder had come forward). On a
     locked screen the app in front is com.apple.loginwindow."""
     field, key = ("bundleid", "CFBundleIdentifier") if bundle_id else ("name", "LSDisplayName")
