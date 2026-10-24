@@ -599,6 +599,9 @@ ASKING = "Claude is asking something on its screen"
 #: a dialog's choice under its cursor ("❯ 1. Yes"), which is not the input line
 OPTION = re.compile(r"^❯\s*\d+\.\s")
 TYPED = "something is typed in its input line"
+#: the notice of a turn the usage limit stopped, which goes on by itself when the limit resets
+CONTINUES = "continuing automatically"
+LIMITED = "its usage limit stopped its turn, and the turn goes on by itself when the limit resets"
 
 #: a colour or attribute code (SGR) and an OSC 8 hyperlink, as a styled tmux capture writes them
 _SGR = re.compile(r"\x1b\[([0-9;:]*)m")
@@ -664,8 +667,18 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     # a question that was answered or cancelled ("⎿ · Where do you want to start?"), or its own
     # prose ("Do you want me to ship it?"). Read as a question, such a line held the session until
     # it scrolled away.
-    asked = [i for i, ln in enumerate(tail) if any(d in ln.lower() for d in DIALOG)]
     inputs = [i for i, ln in enumerate(tail) if ln.strip().startswith("❯") and not OPTION.match(ln.strip())]
+    # A turn the account's usage limit stopped goes on by itself when the limit resets, and says so
+    # under the input line ("Continuing automatically at 1:30am · esc to cancel"). That is no
+    # question, and the session is not idle either: a restart or a typed message would drop the
+    # turn it is about to continue. Only the line under the input line counts; the same words above
+    # it are the stopped turn's own message, which stays on screen after it continued.
+    below = tail[inputs[-1] + 1:] if inputs else []
+    waits = next((ln for ln in below if CONTINUES in ln.lower()), None)
+    if waits is not None:
+        return False, f"{LIMITED} ({' '.join(waits.split())})"
+    asked = [i for i, ln in enumerate(tail)
+             if any(d in ln.lower() for d in DIALOG) and CONTINUES not in ln.lower()]
     if asked and not (inputs and inputs[-1] > asked[-1]):
         return False, ASKING
     prompts = [ln.strip() for ln in lines[-8:] if ln.strip().startswith("❯")]
@@ -755,6 +768,8 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
     but the reason has to say who it is waiting for. The one exception is `question_blocks=False`,
     for a question the caller found nobody can answer (`question_unreachable`)."""
     prompt = empty_prompt(screen)
+    if not prompt[0] and prompt[1].startswith(LIMITED):
+        return prompt
     if not prompt[0] and prompt[1] == ASKING:
         if question_blocks:
             return False, "Claude is asking a question on its screen and waits for an answer"
