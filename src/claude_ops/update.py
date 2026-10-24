@@ -33,6 +33,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from . import chat as _chat
+from . import config as _config
 from . import inject as _inject
 
 SHELLS = {"zsh", "bash", "sh", "fish"}
@@ -227,6 +228,43 @@ def forgotten_shells(pid: int, procs: dict[int, dict], screen: str | None, now: 
         if age >= older_than_s:
             out.append({"pid": s, "age_s": int(age), "command": shown_command(commands.get(s, ""))})
     return sorted(out, key=lambda f: -f["age_s"])
+
+
+def stop_shell(pid: int, procs: dict[int, dict], *, started: dt.datetime, parent: int | None = None,
+               grace_s: float = 5.0, kill: Callable[[int, int], None] = os.kill,
+               sleep: Callable[[float], None] = time.sleep,
+               refresh: Callable[[], dict[int, dict]] | None = None) -> tuple[bool, str]:
+    """Stop one background shell a session left running (`forgotten_shells`), with every process
+    under it, only while `pid` still names that same process: its start time must be `started`, and
+    its parent `parent` when given (the session's process). A pid that another program took since is
+    never touched. SIGTERM goes to the processes under it first, then to the shell; what still runs
+    after `grace_s` gets SIGKILL. `procs` is `config.processes()`, and `refresh` reads it again
+    (the same by default). Returns (the shell is gone, what was done)."""
+    p = procs.get(pid)
+    if p is None:
+        return True, f"pid {pid} had already ended; nothing was stopped"
+    if p.get("started") != started:
+        return False, (f"pid {pid} is now another process (started {p.get('started')}, not {started}); "
+                       "nothing was stopped")
+    if parent is not None and p.get("ppid") != parent:
+        return False, f"pid {pid} is no longer under process {parent}; nothing was stopped"
+    under = _config.descendants(pid, procs)
+    victims = sorted(under) + [pid]
+    for v in victims:
+        try:
+            kill(v, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    sleep(grace_s)
+    now = (refresh or _config.processes)()
+    left = [v for v in victims if v in now and now[v].get("started") == (procs.get(v) or {}).get("started")]
+    for v in left:
+        try:
+            kill(v, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    forced = f", {len(left)} of them only with SIGKILL" if left else ""
+    return True, f"stopped pid {pid} and {len(under)} process(es) under it{forced}"
 
 
 def _took(d: dt.timedelta) -> str:
@@ -511,6 +549,8 @@ DIALOG = ("enter to confirm", "esc to cancel", "esc to discard", "do you want", 
 
 
 ASKING = "Claude is asking something on its screen"
+#: a dialog's choice under its cursor ("❯ 1. Yes"), which is not the input line
+OPTION = re.compile(r"^❯\s*\d+\.\s")
 TYPED = "something is typed in its input line"
 
 #: a colour or attribute code (SGR) and an OSC 8 hyperlink, as a styled tmux capture writes them
@@ -571,8 +611,15 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     if not screen:
         return False, "its screen could not be read"
     lines = [ln.rstrip() for ln in screen.splitlines() if ln.strip()]
-    tail = "\n".join(lines[-15:]).lower()
-    if any(d in tail for d in DIALOG):
+    tail = lines[-15:]
+    # A dialog's words count only while it is live. A live dialog takes the place of the input line,
+    # so an input line below the words means they are text above it: the echo Claude Code leaves of
+    # a question that was answered or cancelled ("⎿ · Where do you want to start?"), or its own
+    # prose ("Do you want me to ship it?"). Read as a question, such a line held the session until
+    # it scrolled away.
+    asked = [i for i, ln in enumerate(tail) if any(d in ln.lower() for d in DIALOG)]
+    inputs = [i for i, ln in enumerate(tail) if ln.strip().startswith("❯") and not OPTION.match(ln.strip())]
+    if asked and not (inputs and inputs[-1] > asked[-1]):
         return False, ASKING
     prompts = [ln.strip() for ln in lines[-8:] if ln.strip().startswith("❯")]
     if not prompts:
@@ -582,19 +629,59 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     return True, "its input line is empty"
 
 
+#: what a session's screen says when it lost its login, or its Remote Control with it
+SIGNED_OUT = ("Please run /login", "OAuth token unavailable", "requires a claude.ai subscription",
+              "Unknown command: /remote-control")
+#: what it says when Remote Control is on again
+RC_ACTIVE = ("/remote-control is active",)
+#: seconds without a keyboard, mouse or trackpad event before nobody is taken to be at this computer
+AWAY_S = 600
+
+
+def signed_out(screen: str | None) -> str | None:
+    """The line on a session's screen saying it lost its login or its Remote Control, when that is
+    the newest such word on it; None when it says nothing of the kind, or a later line says Remote
+    Control is active again. A session in this state cannot be reached from a phone, and one that
+    lost its login cannot do anything asked of it until it is restarted with a working login."""
+    for line in reversed((screen or "").splitlines()):
+        if any(m in line for m in RC_ACTIVE):
+            return None
+        if any(m in line for m in SIGNED_OUT):
+            return " ".join(line.split())
+    return None
+
+
+def question_unreachable(screen: str | None, seconds_since_input: float | None, *,
+                         away_s: float = AWAY_S) -> bool:
+    """A question on a session's screen that nobody can answer: its screen says it lost its login
+    or its Remote Control (`signed_out`), so no phone reaches it, and nobody has used this computer
+    for `away_s`. Waiting for an answer then waits for ever, while a restart into the same
+    conversation brings Remote Control back and loses only the dialog (what was asked stays in the
+    transcript, so it can be asked again). Unknown input time means somebody may be there."""
+    if seconds_since_input is None or seconds_since_input < away_s:
+        return False
+    return signed_out(screen) is not None
+
+
 def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
           turn_ended_at: dt.datetime | None, now: dt.datetime, *,
-          projects: Path = PROJECTS, commands: Mapping[int, str] | None = None) -> tuple[bool, str]:
+          projects: Path = PROJECTS, commands: Mapping[int, str] | None = None,
+          question_blocks: bool = True) -> tuple[bool, str]:
     """(may this chat be restarted or typed into now, why). Everything a chat produces is read:
     what is on its screen, its transcript and process (`idle`), and its background agents.
 
     A question on its screen is named first. While Claude waits for an answer the turn has not
     ended, and `idle` alone said "it is working" for a chat that had waited hours for the person.
     Restarting it would lose the question, so it waits either way,
-    but the reason has to say who it is waiting for."""
+    but the reason has to say who it is waiting for. The one exception is `question_blocks=False`,
+    for a question the caller found nobody can answer (`question_unreachable`)."""
     prompt = empty_prompt(screen)
     if not prompt[0] and prompt[1] == ASKING:
-        return False, "Claude is asking a question on its screen and waits for an answer"
+        if question_blocks:
+            return False, "Claude is asking a question on its screen and waits for an answer"
+        # a question nobody can answer (`question_unreachable`) does not hold it: the rest is read
+        # as for an empty prompt, and the reason says what is left behind
+        prompt = (True, "a question is on its screen that nobody can answer")
     if commands is None:
         commands = command_lines(shell_children(pid, procs))
     ok, why = idle(pid, procs, last_activity(transcript_of(chat_id, projects)), turn_ended_at,
