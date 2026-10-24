@@ -844,3 +844,86 @@ def test_a_cancelled_question_left_on_screen_is_not_a_question():
     trust = "❯ 1. Yes, I trust this folder\n  2. No, exit\nEnter to confirm · Esc to cancel\n"
     assert cu.empty_prompt(trust) == (False, cu.ASKING)
     assert cu.empty_prompt("⏺ done\n❯ half a message\n") == (False, cu.TYPED)
+
+
+def test_remote_control_state_reads_the_newest_system_record(tmp_path):
+    t = tmp_path / "chat.jsonl"
+    active = {"type": "system", "subtype": "bridge_status",
+              "content": "/remote-control is active · Continue here, on your phone"}
+    lost = {"type": "system", "subtype": "informational", "level": "warning",
+            "content": "Remote Control disconnected — OAuth token unavailable — run /login"}
+    off = {"type": "system", "subtype": "bridge_status", "content": "/remote-control is off"}
+    refused = {"type": "system", "subtype": "local_command",
+               "content": "<local-command-stdout>/remote-control requires a claude.ai subscription."
+                          "</local-command-stdout>"}
+    # the session's own text and its tool output quote the words and do not count
+    quoted = {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "its newest status line is '/remote-control is active'"}]}}
+    grepped = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "content": "Remote Control disconnected — OAuth token unavailable"}]}}
+    rows = lambda *ds: "".join(json.dumps(d) + "\n" for d in ds)  # noqa: E731
+    t.write_text(rows(active, lost, quoted))
+    assert cu.remote_control_state(t) == "disconnected"
+    t.write_text(rows(lost, active, grepped))
+    assert cu.remote_control_state(t) == "active"
+    t.write_text(rows(active, off))
+    assert cu.remote_control_state(t) == "off"
+    t.write_text(rows(refused))
+    assert cu.remote_control_state(t) == "unavailable"
+    t.write_text(rows(quoted, grepped))
+    assert cu.remote_control_state(t) is None
+    assert cu.remote_control_state(None) is None
+    assert cu.remote_control_state(tmp_path / "missing.jsonl") is None
+    # a record older than the scan limit is not read, so the state is unknown, not stale
+    t.write_text(rows(active, {"type": "user", "message": {"content": "x" * 5000}}))
+    assert cu.remote_control_state(t, limit=4000) is None
+    assert cu.remote_control_state(t, limit=1 << 20) == "active"
+
+
+def test_lines_from_end_stops_at_the_limit(tmp_path):
+    t = tmp_path / "f.txt"
+    t.write_text("first\nsecond\nthird\n")
+    assert list(cu._lines_from_end(t)) == ["third", "second", "first"]
+    assert list(cu._lines_from_end(t, block=4)) == ["third", "second", "first"]
+    # only whole lines inside the last `limit` bytes; the one the edge cuts is dropped
+    assert list(cu._lines_from_end(t, limit=9)) == ["third"]
+    assert list(cu._lines_from_end(t, limit=100)) == ["third", "second", "first"]
+
+
+SIGNED_OUT_SCREEN = (
+    "  Handover\n  Item: 0d0e0f10-1111-4222-8333-444455556666\n  Ask: please look at the tests\n"
+    "⏺ Login expired · Please run /login\n"
+    "✻ Churned for 0s · done 8:56 AM\n"
+    "────────────────────────────────────────\n❯ \n────────────────────────────────────────\n"
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+
+
+def test_signed_out_reads_the_words_only_as_the_start_of_a_line():
+    assert cu.signed_out(SIGNED_OUT_SCREEN) == "⏺ Login expired · Please run /login"
+    lost = SIGNED_OUT_SCREEN.replace("⏺ Login expired · Please run /login",
+                                     "⏺ Remote Control disconnected — OAuth token unavailable — run /login")
+    assert cu.signed_out(lost).startswith("⏺ Remote Control disconnected")
+    refused = "⏺ /remote-control requires a claude.ai subscription. Run /login to sign in.\n❯ \n"
+    assert cu.signed_out(refused) is not None
+    # a chat at its prompt after real work is not signed out
+    assert cu.signed_out("⏺ Done, the tests pass.\n❯ \n  ⏵⏵ accept edits on") is None
+    # the words further in a line are a conversation about the outage, or a search for the words
+    talk = ("⏺ Yesterday every chat read \"Login expired\" and lost Remote Control.\n"
+            "  ⎿  $ grep -c 'Login expired\\|Remote Control disconnected' pane.txt\n"
+            "  - Remote Control disconnected was the second line on every screen\n❯ \n")
+    assert cu.signed_out(talk) is None
+    # and a line that quotes the active words mid-way does not clear a real loss above it
+    assert cu.signed_out(LOGGED_OUT + "⏺ it should say '/remote-control is active' once back\n❯ \n") is not None
+
+
+def test_login_lost_is_the_login_not_every_remote_control_drop():
+    assert cu.login_lost(SIGNED_OUT_SCREEN) == "⏺ Login expired · Please run /login"
+    assert "OAuth token unavailable" in cu.login_lost(RC_GONE + "❯ \n")
+    # Remote Control lost for another reason: the login still works and the session takes messages
+    changed = ("⏺ Remote Control disconnected — signed-in claude.ai account or organization changed on "
+               "this machine — run /remote-control to start a session for the current account\n❯ \n")
+    assert cu.login_lost(changed) is None and cu.signed_out(changed) is not None
+    assert cu.login_lost("⏺ Unknown command: /remote-control\n❯ \n") is None
+    # back on a working login, the loss above is history
+    assert cu.login_lost(LOGGED_OUT + RC_BACK + "❯ \n") is None
+    assert cu.login_lost("all fine\n❯ \n") is None and cu.login_lost(None) is None
