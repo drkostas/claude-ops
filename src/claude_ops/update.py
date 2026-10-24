@@ -549,6 +549,8 @@ DIALOG = ("enter to confirm", "esc to cancel", "esc to discard", "do you want", 
 
 
 ASKING = "Claude is asking something on its screen"
+#: a dialog's choice under its cursor ("❯ 1. Yes"), which is not the input line
+OPTION = re.compile(r"^❯\s*\d+\.\s")
 TYPED = "something is typed in its input line"
 
 #: a colour or attribute code (SGR) and an OSC 8 hyperlink, as a styled tmux capture writes them
@@ -609,8 +611,15 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     if not screen:
         return False, "its screen could not be read"
     lines = [ln.rstrip() for ln in screen.splitlines() if ln.strip()]
-    tail = "\n".join(lines[-15:]).lower()
-    if any(d in tail for d in DIALOG):
+    tail = lines[-15:]
+    # A dialog's words count only while it is live. A live dialog takes the place of the input line,
+    # so an input line below the words means they are text above it: the echo Claude Code leaves of
+    # a question that was answered or cancelled ("⎿ · Where do you want to start?"), or its own
+    # prose ("Do you want me to ship it?"). Read as a question, such a line held the session until
+    # it scrolled away.
+    asked = [i for i, ln in enumerate(tail) if any(d in ln.lower() for d in DIALOG)]
+    inputs = [i for i, ln in enumerate(tail) if ln.strip().startswith("❯") and not OPTION.match(ln.strip())]
+    if asked and not (inputs and inputs[-1] > asked[-1]):
         return False, ASKING
     prompts = [ln.strip() for ln in lines[-8:] if ln.strip().startswith("❯")]
     if not prompts:

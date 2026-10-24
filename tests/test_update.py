@@ -825,3 +825,22 @@ def test_stop_shell_never_touches_a_pid_another_program_took():
     assert not ok and "no longer under process 999" in said and sent == []
     ok, said = cu.stop_shell(777, SHELL_TABLE, started=STARTED, kill=kill, sleep=lambda s: None)
     assert ok and "already ended" in said and sent == []
+
+
+def test_a_cancelled_question_left_on_screen_is_not_a_question():
+    # Esc on a question leaves its echo above the input line; the input line below it is empty
+    echo = ("⏺ User declined to answer questions\n"
+            "  ⎿  · Where do you want to start? (The parser / The tests / All of it)\n"
+            "✻ Brewed for 2m 35s · done 10:11 PM\n"
+            "───────────\n❯ \n───────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+    assert cu.empty_prompt(echo) == (True, "its input line is empty")
+    prose = "⏺ The fix is ready.\n  Do you want me to ship it?\n───\n❯ \n───\n"
+    assert cu.empty_prompt(prose)[0], "Claude's own prose asking the person something is not a dialog"
+    # a live dialog takes the input line's place: still a question
+    assert cu.empty_prompt(ASKING_SCREEN) == (False, cu.ASKING)
+    permission = ("Do you want to make this edit to app.py?\n❯ 1. Yes\n  2. Yes, allow all edits\n"
+                  "  3. No, and tell Claude what to do differently (esc)\n")
+    assert cu.empty_prompt(permission) == (False, cu.ASKING)
+    trust = "❯ 1. Yes, I trust this folder\n  2. No, exit\nEnter to confirm · Esc to cancel\n"
+    assert cu.empty_prompt(trust) == (False, cu.ASKING)
+    assert cu.empty_prompt("⏺ done\n❯ half a message\n") == (False, cu.TYPED)
