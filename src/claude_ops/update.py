@@ -175,12 +175,14 @@ def waiting_shells(shells: list[int], procs: dict[int, dict], commands: Mapping[
     return out
 
 
-def command_lines(pids: list[int], *, run=subprocess.run) -> dict[int, str]:
-    """{pid: its full command line} for the given processes, from one `ps`."""
+def command_lines(pids: list[int], *, run=subprocess.run,
+                  env: Mapping[str, str] | None = None) -> dict[int, str]:
+    """{pid: its full command line} for the given processes, from one `ps`. `env` is the
+    environment ps runs with, for callers that build their child environment themselves."""
     if not pids:
         return {}
     r = run(["/bin/ps", "-o", "pid=,command=", "-p", ",".join(str(p) for p in pids)],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=10, env=env)
     out = {}
     for line in (getattr(r, "stdout", "") or "").splitlines():
         head, _, rest = line.strip().partition(" ")
@@ -599,6 +601,8 @@ ASKING = "Claude is asking something on its screen"
 #: a dialog's choice under its cursor ("❯ 1. Yes"), which is not the input line
 OPTION = re.compile(r"^❯\s*\d+\.\s")
 TYPED = "something is typed in its input line"
+#: and when the screen itself could not be read, so nothing about it is known
+UNREAD = "its screen could not be read"
 #: the notice of a turn the usage limit stopped, which goes on by itself when the limit resets
 CONTINUES = "continuing automatically"
 LIMITED = "its usage limit stopped its turn, and the turn goes on by itself when the limit resets"
@@ -659,7 +663,7 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     trust prompt takes the Enter as a choice, and a half-typed message would be sent with the
     paste joined to it."""
     if not screen:
-        return False, "its screen could not be read"
+        return False, UNREAD
     lines = [ln.rstrip() for ln in screen.splitlines() if ln.strip()]
     tail = lines[-15:]
     # A dialog's words count only while it is live. A live dialog takes the place of the input line,

@@ -35,12 +35,27 @@ THRESHOLD = 98.0
 _LIMIT = re.compile(r"hit your (?:(session|weekly) )?limit", re.I)
 
 
+#: `security find-generic-password`'s exit code when no such item exists (errSecItemNotFound)
+NOT_FOUND = 44
+
+
+class Unreadable(RuntimeError):
+    """The keychain did not answer (locked, access refused, the command failed). Nothing is known
+    about the item, which is not the same as the item being missing."""
+
+
 def read_item(service: str, account: str, *, run=subprocess.run,
-              env: Mapping[str, str] | None = None) -> dict | None:
-    """A keychain item's JSON, or None when it is missing or not JSON."""
+              env: Mapping[str, str] | None = None, strict: bool = False) -> dict | None:
+    """A keychain item's JSON, or None when it is missing or not JSON.
+
+    With `strict`, a read that fails for any reason other than the item not existing raises
+    Unreadable, so a caller can tell "there is no such login" from "the keychain did not answer".
+    A monitor that reads the second as the first says a login is gone when it only could not look."""
     r = run(["security", "find-generic-password", "-s", service, "-a", account, "-w"],
             capture_output=True, text=True, env=env)
     if r.returncode != 0:
+        if strict and r.returncode != NOT_FOUND:
+            raise Unreadable((r.stderr or "").strip()[:200] or f"security exited {r.returncode}")
         return None
     try:
         return json.loads(r.stdout)

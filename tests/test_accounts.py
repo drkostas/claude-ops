@@ -177,3 +177,16 @@ def test_login_for_finds_the_saved_login_of_an_account():
     assert ac.login_for("uuid-b", items, run=run, fetch=fetch) == logins["saved-b"]
     assert ac.login_for("uuid-a", items, run=run, fetch=fetch) == logins["live"]
     assert ac.login_for("uuid-z", items, run=run, fetch=fetch) is None
+
+
+def test_read_item_tells_a_missing_item_from_a_keychain_that_did_not_answer():
+    def missing(argv, **kw):
+        return subprocess.CompletedProcess(argv, ac.NOT_FOUND, "", "The specified item could not be found in the keychain.")
+
+    def locked(argv, **kw):
+        return subprocess.CompletedProcess(argv, 36, "", "User interaction is not allowed.")
+    assert ac.read_item("svc", "tester", run=missing) is None
+    assert ac.read_item("svc", "tester", run=missing, strict=True) is None
+    assert ac.read_item("svc", "tester", run=locked) is None
+    with pytest.raises(ac.Unreadable):
+        ac.read_item("svc", "tester", run=locked, strict=True)
