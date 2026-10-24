@@ -957,3 +957,14 @@ def test_ready_names_the_wait_for_the_limit_and_does_not_restart(tmp_path, monke
         ok, why = cu.ready(100, MCP_ONLY, "C1", screen, ago(3600), NOW, projects=projects,
                            question_blocks=blocks)
         assert not ok and why.startswith(cu.LIMITED), why
+
+
+def test_command_lines_runs_ps_with_the_given_env():
+    seen = {}
+
+    def run(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "7 sleep 1\n", "")
+    assert cu.command_lines([7], run=run, env={"PATH": "/bin"}) == {7: "sleep 1"}
+    assert seen.get("env") == {"PATH": "/bin"}
+    assert cu.empty_prompt(None) == (False, cu.UNREAD)
