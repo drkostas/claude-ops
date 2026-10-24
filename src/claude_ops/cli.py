@@ -19,6 +19,8 @@ HOOKS = {
     "Stop": [{"hooks": [{"type": "command", "command": "claude-ops hook ask-what-you-need"}]}],
     "PostToolUse": [{"hooks": [{"type": "command", "command": "claude-ops hook context-check"}]}],
     "PostCompact": [{"hooks": [{"type": "command", "command": "claude-ops hook context-mark"}]}],
+    "PreToolUse": [{"matcher": "Bash|Write|Edit|MultiEdit|mcp__github__.*",
+                    "hooks": [{"type": "command", "command": "claude-ops hook no-session-links"}]}],
 }
 
 
@@ -120,6 +122,9 @@ def cmd_restore(a) -> int:
 
 
 def cmd_hook(a) -> int:
+    if a.name == "no-session-links":
+        from .hooks import no_session_links
+        return no_session_links.main()
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
@@ -305,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_restore)
 
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
-    s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark"))
+    s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("install", help="install the skills, or the hooks into settings.json")
