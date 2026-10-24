@@ -496,6 +496,10 @@ iterm.close_empty_window(window_id)                          # "closed", "asked"
   lost. It fits `claude_human.desktops.frame_window(..., fallback=...)`.
 - An answer that could not be read is `None`, never "no windows".
 
+## Say what a deploy brought
+
+When something you run moves a checkout to a new commit (a deploy, an update of a tool), tell the person which pull requests arrived, not the two hashes: `claude-ops changelog <old> <new> --repo <checkout>`. It walks the first-parent history, so each pull request is one line ("#12 Retry on a timeout"), and a commit pushed straight to the branch is listed by its subject. Take `old` from before the move, never from the remote, or the list is empty.
+
 ## Read the tracebacks a service logged
 
 When something on the machine "works but misbehaves", or before saying a service is healthy, read its log's tracebacks rather than the last few lines: `claude-ops tracebacks <log> --prefer "*/<your package>/*" --ignore BrokenPipeError`. The groups say which code fails and how often. A watcher that runs on a schedule keeps `read_new`'s next offset between passes and starts a new log at its end (the history is not news). Client disconnects (`BrokenPipeError`, `ConnectionResetError`) are a peer going away, not a bug in the service.

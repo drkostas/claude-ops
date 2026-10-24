@@ -51,6 +51,17 @@ claude-ops tracebacks app.log --offset 81920                         # only what
 
 In Python, `tracebacks.read_new(path, offset)` returns the tracebacks after `offset`, the offset to start from next time and how many bytes it skipped (a backlog over 8 MB is skipped from its start). A traceback still being written at the end of the file waits for the next pass, a log that shrank is read from the start, a chain ("During handling of the above exception") is one traceback named by its last exception, and two threads writing at once keep what was complete. `tracebacks.group(traces, prefer)` folds them by signature, such as `KeyError at handlers.py:render`.
 
+## What a deploy brought
+
+`claude-ops changelog <old> <new>` lists the pull requests merged between two commits, oldest first, so a deploy can say what arrived instead of two hashes. It reads the first-parent history, so the commits inside each pull request are left out.
+
+```bash
+claude-ops changelog 4f1c2e0 origin/main                  # "#12 Retry on a timeout", one per line
+claude-ops changelog v1.2.0 HEAD --repo ~/src/app --json
+```
+
+A merge commit is named by its pull request's title (the first line of the merge commit's body), a squash merge by its subject without the `(#12)`, and a commit pushed straight to the branch by its subject, with no number. In Python, `changelog.merged(old, new, repo)` returns the changes and raises ValueError when git cannot read the range.
+
 ## Send a message into a running chat
 
 ```bash

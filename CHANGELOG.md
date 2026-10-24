@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `changelog` (`claude-ops changelog <old> <new>`): the pull requests merged between two commits, oldest first, read from the first-parent history so the commits inside each pull request are not listed. A merge commit is named by its pull request's title (the first line of its body), a squash merge by its subject without the `(#N)`, and a commit pushed straight to the branch by its subject with no number. `changelog.merged(old, new, repo, env=)` returns `Change(sha, title, number, branch)`; `changelog.web_url(remote)` gives a GitHub remote's https address
 - `iterm.chat_tabs` and `set_tab_color` read None and False when iTerm2's Python API does not answer, instead of ending the program. The `iterm2` package raises SystemExit(1) when it cannot connect, which `except Exception` let through, so a scheduled job calling either function stopped on every run while iTerm2's API was unreachable
 - `messages.last_said(path, before=None)`: the last text the assistant wrote in a transcript (before a time when given), read from the end in growing chunks, so a short message sent to a chat can carry what it answers
 - `accounts.renew`, `usage` and `profile` send a User-Agent (`accounts.USER_AGENT`). The token endpoint is behind Cloudflare, which refused Python's default `Python-urllib/3.x` with 403 (error code 1010), so every renewal of a saved login failed while usage, on another host, still answered

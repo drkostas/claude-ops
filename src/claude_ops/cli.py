@@ -334,7 +334,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "detach": ("detach", "start a command in its own session, so it outlives the chat"),
          "adb-reach": ("adb", "reach an Android device over adb again after a restart undid tcpip"),
          "messages": ("messages", "what the person typed into chats, and the conversation around it"),
-         "tracebacks": ("tracebacks", "Python tracebacks in log files, new since an offset, grouped")}
+         "tracebacks": ("tracebacks", "Python tracebacks in log files, new since an offset, grouped"),
+         "changelog": ("changelog", "the pull requests merged between two commits, oldest first")}
 
 
 def main(argv: list[str] | None = None) -> int:
