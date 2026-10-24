@@ -927,3 +927,33 @@ def test_login_lost_is_the_login_not_every_remote_control_drop():
     # back on a working login, the loss above is history
     assert cu.login_lost(LOGGED_OUT + RC_BACK + "❯ \n") is None
     assert cu.login_lost("all fine\n❯ \n") is None and cu.login_lost(None) is None
+
+
+def test_a_turn_the_usage_limit_stopped_waits_for_its_reset_and_is_no_question():
+    # what Claude Code shows when the account's usage limit stopped a turn that goes on by itself
+    limited = ("  ⎿  You've hit your session limit · resets 1:30am\n"
+               "⏺ Usage limit reached · continuing automatically at 1:30am · esc to cancel\n"
+               "✻ Brewed for 6s · done 11:10 PM\n"
+               "───────────\n❯ \n───────────\n"
+               "  ⚠ Usage limit reached · limit resets 1:30am\n"
+               "    Continuing automatically at 1:30am · esc to cancel · /usage-credits to continue now\n"
+               "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+    ok, why = cu.empty_prompt(limited)
+    assert not ok and why.startswith(cu.LIMITED) and "1:30am" in why, why
+    assert why != cu.ASKING, "a notice under the input line is not a question"
+    # after it continued, the stopped turn's own message stays above the input line: not a wait
+    continued = ("⏺ Usage limit reached · continuing automatically at 1:30am · esc to cancel\n"
+                 "⏺ Done.\n───────────\n❯ \n───────────\n  ⏵⏵ bypass permissions on\n")
+    assert cu.empty_prompt(continued) == (True, "its input line is empty")
+
+
+def test_ready_names_the_wait_for_the_limit_and_does_not_restart(tmp_path, monkeypatch):
+    projects, _ = _chat_dir(tmp_path)
+    monkeypatch.setattr(cu, "last_activity", lambda p: ago(900))
+    screen = ("⏺ Usage limit reached · continuing automatically at 1:30am · esc to cancel\n"
+              "───\n❯ \n───\n  ⚠ Usage limit reached · limit resets 1:30am\n"
+              "    Continuing automatically at 1:30am · esc to cancel\n")
+    for blocks in (True, False):
+        ok, why = cu.ready(100, MCP_ONLY, "C1", screen, ago(3600), NOW, projects=projects,
+                           question_blocks=blocks)
+        assert not ok and why.startswith(cu.LIMITED), why
