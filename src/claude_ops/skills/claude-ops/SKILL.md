@@ -379,6 +379,39 @@ remote.set_title(s["row"], "build", token)     # {"ok", "title", "changed"}, or 
 - The sessions API is not documented. If Anthropic changes it, `set_title` fails with a reason and
   the chat itself keeps working.
 
+## Move the chats to another Claude account
+
+Every chat on a Mac reads one login, the keychain item `accounts.LIVE_SERVICE`. With a copy of each
+account's login in an item of its own, a program can move the chats to the other account when the one
+in use runs out (`accounts.choose` says when), without a browser.
+
+```python
+from claude_ops import accounts
+live = accounts.read_item(accounts.LIVE_SERVICE, "<mac user>")        # the login in use
+accounts.write_item("my-saved-login-a", "<mac user>", live)            # keep a copy of it
+other = accounts.read_item("my-saved-login-b", "<mac user>")
+accounts.write_item(accounts.LIVE_SERVICE, "<mac user>", other)       # the chats now use b
+block = kept_block_for_b or accounts.account_block(accounts.profile(other["claudeAiOauth"]["accessToken"]))
+accounts.write_account(accounts.CLAUDE_JSON, block, backup="/path/to/claude.json.backup")
+```
+
+- Write the config too. Claude Code names the signed-in account twice: the keychain holds the
+  login, and the `oauthAccount` block of `~/.claude.json` holds its ids, email and profile, with no
+  secret in it; `/login` writes both. A switch that writes only the keychain leaves Claude Code
+  naming the old account as the owner of every new Remote Control session, and
+  `config.login_digest` does not move, so nothing that watches it sees the switch.
+- Keep a copy of each account's block (`accounts.read_account`) while that account is in use, and
+  write it back at the switch. With no copy, `account_block(profile)` gives the three fields that
+  name the account, and Claude Code fills in the rest when it next fetches the profile.
+- `write_account` is safe beside running chats, which rewrite the file every minute or two: it reads
+  the file whole, replaces the block and nothing else, writes beside the file and renames over it in
+  one step only while the file still holds what was read, and starts over otherwise. Read the block
+  again after the next rewrite (`changed_since`) to see that it was kept.
+- Never renew the login in use (`accounts.renew` is for a saved copy): a renewal replaces the
+  refresh token, and the chats holding the old one are signed out.
+- Running chats move to the new login by themselves; their Remote Control sessions do not. Send
+  each chat `/remote-control` again.
+
 ## Give a chat its own worktree
 
 Several chats in one checkout switch branches under each other. `claude_ops.worktree` gives each a
