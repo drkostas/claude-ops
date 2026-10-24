@@ -7,18 +7,30 @@ new account by themselves; their Remote Control sessions do not, and need `/remo
 
 ⛔ NEVER RENEW THE LOGIN IN USE. A renewal replaces the refresh token, and the program holding the
 old one is signed out. Renew only a saved copy nobody else is using.
+
+⚠️ THE KEYCHAIN IS NOT THE WHOLE LOGIN. Claude Code also keeps who is signed in, without any secret,
+in the `oauthAccount` block of its config file (`~/.claude.json`): the account and organization ids,
+the email, the profile. `/login` writes both; a program that writes only the keychain item leaves the
+config naming the old account, and Claude Code then records the old account as the owner of every new
+Remote Control session while the session runs on the new one, and `config.login_digest` does not move.
+`read_account` and `write_account` keep that block in step (see them for how the file is written while
+running Claude Code processes rewrite it).
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Mapping
 
 from . import __version__
+from .config import CLAUDE_JSON
 
 LIVE_SERVICE = "Claude Code-credentials"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -205,3 +217,111 @@ def limit_hit(transcript: Path, scan: int = 400) -> dict | None:
     except OSError:
         return None
     return None
+
+
+#: the key of a Claude Code config file that names the account signed in (no secret in it)
+ACCOUNT_KEY = "oauthAccount"
+#: how a block built from `profile` names the account: the config's names for the profile's fields
+_FROM_PROFILE = (("accountUuid", "uuid"), ("emailAddress", "email"), ("organizationUuid", "org"))
+
+
+class ConfigChanged(RuntimeError):
+    """The config file changed under every try to write it. Nothing was written."""
+
+
+def _read_bytes(path: Path) -> bytes:
+    """The file's bytes, read in one call. One name, so a test can stand in another writer."""
+    return path.read_bytes()
+
+
+def read_account(path: "os.PathLike | str" = CLAUDE_JSON) -> "dict | None":
+    """The account a Claude Code config file says is signed in: its `oauthAccount` block, a copy.
+    None when the file is missing, is not a JSON object, or holds no such block."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    block = data.get(ACCOUNT_KEY) if isinstance(data, dict) else None
+    return dict(block) if isinstance(block, dict) else None
+
+
+def account_block(profile: dict) -> dict:
+    """An `oauthAccount` block built from `profile(token)`, for an account whose block was never
+    kept: the ids and the email, which is what names the account. Claude Code fills in the rest of
+    the profile when it next fetches it."""
+    return {key: profile.get(field) for key, field in _FROM_PROFILE}
+
+
+def account_email(block: "dict | None") -> "str | None":
+    """The email an `oauthAccount` block names, or None."""
+    return (block or {}).get("emailAddress") or None
+
+
+def write_account(path: "os.PathLike | str", block: dict, *, backup: "os.PathLike | str | None" = None,
+                  tries: int = 3) -> dict:
+    """Make the config file's `oauthAccount` block equal to `block`, and leave every other key as it
+    is. Returns {"changed": whether anything was written, "backup": the copy taken or None,
+    "mtime_ns": the file's time afterwards}.
+
+    ⚠️ RUNNING CLAUDE CODE PROCESSES REWRITE THIS FILE EVERY MINUTE OR TWO, so it is written the way
+    they could not break: read whole, the block replaced in the parsed object, the result written to
+    a temporary file beside it, and only when the file still holds the bytes that were read is the
+    temporary file renamed over it (one atomic step, with the original's mode). A file that changed
+    in between is read again and the write tried again, `tries` times, then ConfigChanged is raised
+    with nothing written. A file whose block already equals `block` is not written at all, and no
+    backup is taken. The result is read back before returning, so a "changed" answer means the file
+    on disk now holds the block.
+
+    `backup`, when given, receives a copy of the file as it was before the first write (not before
+    a write that did not happen). A caller writing a person's real config keeps one.
+
+    A file that is missing or not a JSON object raises ValueError: this writes an account into an
+    existing config, it does not make one."""
+    path = Path(path)
+    for _ in range(max(1, tries)):
+        try:
+            raw = _read_bytes(path)
+        except OSError as e:
+            raise ValueError(f"{path} cannot be read: {e.strerror or type(e).__name__}") from None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise ValueError(f"{path} is not JSON") from None
+        if not isinstance(data, dict):
+            raise ValueError(f"{path} does not hold a JSON object")
+        if data.get(ACCOUNT_KEY) == block:
+            return {"changed": False, "backup": None, "mtime_ns": path.stat().st_mtime_ns}
+        data[ACCOUNT_KEY] = dict(block)
+        text = json.dumps(data, indent=2) + ("\n" if raw.endswith(b"\n") else "")
+        if backup is not None:
+            shutil.copy2(path, backup)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+            if _read_bytes(path) != raw:
+                os.unlink(tmp)
+                continue            # another program wrote meanwhile: start from what it wrote
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        if read_account(path) != block:
+            raise ConfigChanged(f"{path} does not hold the account just written")
+        return {"changed": True, "backup": None if backup is None else str(backup),
+                "mtime_ns": path.stat().st_mtime_ns}
+    raise ConfigChanged(f"{path} changed under each of {tries} tries; nothing was written")
+
+
+def changed_since(path: "os.PathLike | str", mtime_ns: int) -> "bool | None":
+    """Whether the file has been written since a `write_account` whose result said `mtime_ns`, so
+    a caller can read the block again after the next rewrite by a running Claude Code and see
+    whether it was kept. None when the file cannot be read."""
+    try:
+        return Path(path).stat().st_mtime_ns != mtime_ns
+    except OSError:
+        return None
