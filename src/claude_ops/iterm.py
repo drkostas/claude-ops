@@ -98,11 +98,21 @@ def chat_tabs(*, prefix: str = "claude-", tmux: str = "tmux",
                 row.append((name, _key((c.red, c.green, c.blue)) if c is not None else None, s.session_id))
             out.append(row)
 
-    try:
-        iterm2.run_until_complete(main, retry=False)
-    except Exception:  # noqa: BLE001 - iTerm2 not answering: nothing is known
+    if not _run(iterm2, main):
         return None
     return out
+
+
+def _run(iterm2, main) -> bool:
+    """Run `main` in a connection of its own; False when iTerm2's API did not answer. The `iterm2`
+    package ends the program with SystemExit(1) when it cannot connect ("There was a problem
+    connecting to iTerm2"), and SystemExit is not an Exception, so a plain except let every caller's
+    whole program end there instead of reading None."""
+    try:
+        iterm2.run_until_complete(main, retry=False)
+    except (Exception, SystemExit):  # noqa: BLE001 - iTerm2 not answering: nothing is known
+        return False
+    return True
 
 
 def set_tab_color(session_id: str, color: Color) -> bool:
@@ -123,11 +133,7 @@ def set_tab_color(session_id: str, color: Color) -> bool:
         p.set_use_tab_color(True)
         await session.async_set_profile_properties(p)
 
-    try:
-        iterm2.run_until_complete(main, retry=False)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    return _run(iterm2, main)
 
 
 def color_chat_tabs(*, prefix: str = "claude-", remembered: Mapping[str, Color] | None = None,
