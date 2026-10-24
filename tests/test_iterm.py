@@ -144,3 +144,16 @@ def test_restart_that_never_answers_is_a_failure():
     assert outcome == "failure" and "did not answer" in detail["message"]
     p = FakeProcs(dies=False)
     assert iterm.restart_app(procs=p)[0] == "failure" and p.opened == 0
+
+
+def test_an_api_that_does_not_answer_reads_none_and_does_not_end_the_program(monkeypatch):
+    import sys
+    import types
+
+    def refuse(main, retry=False):
+        raise SystemExit(1)   # what the iterm2 package does when it cannot connect
+    fake = types.SimpleNamespace(run_until_complete=refuse)
+    monkeypatch.setitem(sys.modules, "iterm2", fake)
+    monkeypatch.setattr(iterm, "tmux_by_tty", lambda **k: {})
+    assert iterm.chat_tabs() is None
+    assert iterm.set_tab_color("w0t0p0:ABC", (1.0, 0.0, 0.0)) is False

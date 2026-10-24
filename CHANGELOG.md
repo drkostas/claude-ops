@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `iterm.chat_tabs` and `set_tab_color` read None and False when iTerm2's Python API does not answer, instead of ending the program. The `iterm2` package raises SystemExit(1) when it cannot connect, which `except Exception` let through, so a scheduled job calling either function stopped on every run while iTerm2's API was unreachable
 - `messages.last_said(path, before=None)`: the last text the assistant wrote in a transcript (before a time when given), read from the end in growing chunks, so a short message sent to a chat can carry what it answers
 - `accounts.renew`, `usage` and `profile` send a User-Agent (`accounts.USER_AGENT`). The token endpoint is behind Cloudflare, which refused Python's default `Python-urllib/3.x` with 403 (error code 1010), so every renewal of a saved login failed while usage, on another host, still answered
 - `tracebacks` (`claude-ops tracebacks`): the Python tracebacks in log files, grouped by exception type and deepest frame (`--prefer` picks frames in your own code), read from a byte offset so a scheduled pass sees each one once (`tracebacks.read_new(path, offset)` returns the next offset). A traceback still being written waits, a shrunk log is read from the start, a chain is one traceback, and interleaved output from two threads keeps what was complete
