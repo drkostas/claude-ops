@@ -745,3 +745,83 @@ def test_idle_names_the_shell_it_waits_for():
     ok, why = cu.idle(100, procs, ago(120), ago(110), NOW)
     assert not ok and why == "it is running a command (pid 103, for 4h47m)"
     assert cu.idle(100, WITH_CMD, ago(120), ago(110), NOW)[1] == "it is running a command"
+
+
+# ----------------------------------------------------------------------------- unreachable questions
+
+LOGGED_OUT = "⏺ Login expired · Please run /login\n"
+RC_GONE = "⏺ Remote Control disconnected — OAuth token unavailable — run /login to restore Remote Control\n"
+RC_BACK = "  /remote-control is active · Continue here, on your phone, or at https://example.org/x\n"
+ASKING_SCREEN = "❯ 1. Digest them (Recommended)\n  2. Push them too\nEnter to select · Esc to cancel\n"
+
+
+def test_signed_out_reads_the_newest_word_on_the_screen():
+    assert cu.signed_out("work\n" + LOGGED_OUT + "❯ ") == "⏺ Login expired · Please run /login"
+    assert "OAuth token unavailable" in cu.signed_out(RC_GONE + ASKING_SCREEN)
+    assert cu.signed_out("⏺ Unknown command: /remote-control\n❯ ") is not None
+    # Remote Control came back after the loss: the newest word wins
+    assert cu.signed_out(RC_GONE + RC_BACK + "❯ ") is None
+    assert cu.signed_out("all fine\n❯ ") is None and cu.signed_out(None) is None
+
+
+def test_a_question_is_unreachable_only_when_signed_out_and_nobody_is_there():
+    screen = RC_GONE + ASKING_SCREEN
+    assert cu.question_unreachable(screen, 3600)
+    assert not cu.question_unreachable(screen, 60), "somebody used the computer a minute ago"
+    assert not cu.question_unreachable(screen, None), "unknown input time: somebody may be there"
+    assert not cu.question_unreachable(ASKING_SCREEN, 3600), "a phone still reaches it"
+
+
+def test_ready_lets_an_unreachable_question_go_and_nothing_else(tmp_path, monkeypatch):
+    projects, _ = _chat_dir(tmp_path)
+    monkeypatch.setattr(cu, "last_activity", lambda p: ago(900))
+    screen = RC_GONE + ASKING_SCREEN
+    ok, why = cu.ready(100, MCP_ONLY, "C1", screen, ago(3600), NOW, projects=projects)
+    assert not ok and "question" in why, "a question holds a restart by default"
+    ok, why = cu.ready(100, MCP_ONLY, "C1", screen, ago(3600), NOW, projects=projects, question_blocks=False)
+    assert ok and "nobody can answer" in why, why
+    # the rest still holds it: a command running, or a turn that wrote a moment ago
+    assert not cu.ready(100, WITH_CMD, "C1", screen, ago(3600), NOW, projects=projects,
+                        question_blocks=False)[0]
+    monkeypatch.setattr(cu, "last_activity", lambda p: ago(30))
+    assert not cu.ready(100, MCP_ONLY, "C1", screen, ago(3600), NOW, projects=projects,
+                        question_blocks=False)[0]
+
+
+# ----------------------------------------------------------------------------- stopping a forgotten shell
+
+STARTED = ago(3 * 86400)
+SHELL_TABLE = {**MCP_ONLY, 103: {"ppid": 100, "comm": "/bin/zsh", "started": STARTED},
+               104: {"ppid": 103, "comm": "grep", "started": STARTED},
+               105: {"ppid": 104, "comm": "head", "started": STARTED}}
+
+
+def _signals():
+    sent = []
+    return sent, (lambda pid, sig: sent.append((pid, sig)))
+
+
+def test_stop_shell_stops_the_shell_and_everything_under_it():
+    sent, kill = _signals()
+    ok, said = cu.stop_shell(103, SHELL_TABLE, started=STARTED, parent=100, kill=kill,
+                             sleep=lambda s: None, refresh=lambda: dict(MCP_ONLY))
+    assert ok and "pid 103 and 2 process(es)" in said, said
+    assert sent == [(104, cu.signal.SIGTERM), (105, cu.signal.SIGTERM), (103, cu.signal.SIGTERM)], \
+        "what runs under the shell goes first, so the shell does not start anything new"
+    # what ignored SIGTERM gets SIGKILL, and only when it is still the same process
+    sent, kill = _signals()
+    still = {**MCP_ONLY, 104: SHELL_TABLE[104], 105: {**SHELL_TABLE[105], "started": NOW}}
+    ok, said = cu.stop_shell(103, SHELL_TABLE, started=STARTED, kill=kill, sleep=lambda s: None,
+                             refresh=lambda: still)
+    assert ok and "1 of them only with SIGKILL" in said, said
+    assert sent[-1] == (104, cu.signal.SIGKILL) and (105, cu.signal.SIGKILL) not in sent
+
+
+def test_stop_shell_never_touches_a_pid_another_program_took():
+    sent, kill = _signals()
+    ok, said = cu.stop_shell(103, SHELL_TABLE, started=ago(60), kill=kill, sleep=lambda s: None)
+    assert not ok and "another process" in said and sent == []
+    ok, said = cu.stop_shell(103, SHELL_TABLE, started=STARTED, parent=999, kill=kill, sleep=lambda s: None)
+    assert not ok and "no longer under process 999" in said and sent == []
+    ok, said = cu.stop_shell(777, SHELL_TABLE, started=STARTED, kill=kill, sleep=lambda s: None)
+    assert ok and "already ended" in said and sent == []
