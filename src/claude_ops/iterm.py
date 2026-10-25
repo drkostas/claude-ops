@@ -366,6 +366,20 @@ def window_of_ttys(ttys: set[str], raw: str | None = None, *,
     return hits.pop() if len(hits) == 1 else None
 
 
+def windows_of_ttys(ttys: set[str], raw: str | None = None, *,
+                    env: Mapping[str, str] | None = None) -> set[int] | None:
+    """Every iTerm2 window holding a session on one of these terminals: an empty set when none does,
+    and None when iTerm2 could not be read. Ask this to know whether something is shown at all.
+    window_of_ttys answers only for exactly one window, so a tmux session attached from two windows
+    reads there as shown nowhere, and a caller that then opens a tab for it opens one more each time."""
+    if not ttys:
+        return set()
+    raw = _osa(_TTYS, 8, env=env) if raw is None else raw
+    if raw is None:
+        return None
+    return {w for w, tty in parse_ttys(raw) if tty in ttys}
+
+
 def tmux_client_ttys(session: str, *, tmux: str = "tmux", env: Mapping[str, str] | None = None) -> set[str]:
     """The terminals of the plain clients attached to a tmux session (a control-mode client has
     none of its own that iTerm2 shows)."""
