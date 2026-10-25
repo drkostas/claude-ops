@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 import pytest
+import urllib.error
+from email.message import Message
 
 from claude_ops import accounts as ac
 
@@ -318,3 +320,54 @@ def test_changed_since_sees_the_next_rewrite(tmp_path):
     os.utime(f, ns=(out["mtime_ns"] + 1_000_000, out["mtime_ns"] + 1_000_000))
     assert ac.changed_since(f, out["mtime_ns"]) is True
     assert ac.changed_since(tmp_path / "missing.json", 0) is None
+
+
+# --- a 429 says how long to wait ------------------------------------------------------------
+
+def refusing(code, retry_after=None):
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    calls = []
+
+    def fetch(req, timeout=15):
+        calls.append(req)
+        raise urllib.error.HTTPError(req.full_url, code, "refused", headers, None)
+    return fetch, calls
+
+
+def test_a_429_is_rate_limited_with_its_retry_after():
+    fetch, calls = refusing(429, "3448")
+    with pytest.raises(ac.RateLimited) as got:
+        ac.usage("tok", fetch=fetch)
+    assert got.value.retry_after_s == 3448 and got.value.url == ac.USAGE_URL
+    assert got.value.until(NOW) == NOW + dt.timedelta(seconds=3448)
+    assert "429" in str(got.value) and "3448" in str(got.value)
+    assert len(calls) == 1                                  # asked once, never again by itself
+    with pytest.raises(ac.RateLimited) as got:
+        ac.profile("tok", fetch=refusing(429, "60")[0])
+    assert got.value.retry_after_s == 60 and got.value.url == ac.PROFILE_URL
+
+
+def test_a_429_without_retry_after_is_still_rate_limited_but_says_no_time():
+    with pytest.raises(ac.RateLimited) as got:
+        ac.usage("tok", fetch=refusing(429)[0])
+    assert got.value.retry_after_s is None and got.value.until(NOW) is None
+    assert "no Retry-After" in str(got.value)
+
+
+def test_other_http_errors_come_through_as_they_were():
+    with pytest.raises(urllib.error.HTTPError) as got:
+        ac.usage("tok", fetch=refusing(401)[0])
+    assert got.value.code == 401
+    with pytest.raises(urllib.error.HTTPError):
+        ac.profile("tok", fetch=refusing(500, "10")[0])
+
+
+def test_retry_after_reads_seconds_or_an_http_date():
+    assert ac.retry_after_seconds("120") == 120
+    assert ac.retry_after_seconds(" 7 ") == 7
+    assert ac.retry_after_seconds("Sun, 18 Oct 2026 12:30:00 GMT", now=NOW) == 1800
+    assert ac.retry_after_seconds("Sun, 18 Oct 2026 11:00:00 GMT", now=NOW) == 0     # a date in the past
+    assert ac.retry_after_seconds(None) is None and ac.retry_after_seconds("") is None
+    assert ac.retry_after_seconds("soon") is None

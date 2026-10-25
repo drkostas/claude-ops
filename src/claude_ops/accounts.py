@@ -25,7 +25,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Mapping
 
@@ -54,6 +56,42 @@ NOT_FOUND = 44
 class Unreadable(RuntimeError):
     """The keychain did not answer (locked, access refused, the command failed). Nothing is known
     about the item, which is not the same as the item being missing."""
+
+
+class RateLimited(RuntimeError):
+    """Anthropic answered a usage or profile read with 429. `retry_after_s` is the Retry-After
+    header in seconds (None when it was missing or unreadable), and `until(now)` the time the read
+    is allowed again. A caller that keeps asking every few minutes keeps the limit going, and says
+    nothing about when it ends; one that waits `retry_after_s` does neither."""
+
+    def __init__(self, retry_after_s: "int | None", url: str = ""):
+        self.retry_after_s = retry_after_s
+        self.url = url
+        after = f"retry after {retry_after_s} s" if retry_after_s is not None else "no Retry-After"
+        super().__init__(f"HTTP Error 429: rate limited ({after})")
+
+    def until(self, now: "dt.datetime | None" = None) -> "dt.datetime | None":
+        if self.retry_after_s is None:
+            return None
+        return (now or dt.datetime.now(dt.timezone.utc)) + dt.timedelta(seconds=self.retry_after_s)
+
+
+def retry_after_seconds(value: "str | None", now: "dt.datetime | None" = None) -> "int | None":
+    """The seconds a Retry-After header asks for: a number of seconds, or an HTTP date read against
+    `now` (never negative). None when the header is missing or unreadable."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return int(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return max(0, int((when - now).total_seconds()))
 
 
 def read_item(service: str, account: str, *, run=subprocess.run,
@@ -98,10 +136,18 @@ def write_item(service: str, account: str, data: dict, *, run=subprocess.run,
 
 
 def _get(url: str, token: str, fetch) -> dict:
+    """One authenticated GET. A 429 is raised as RateLimited with its Retry-After, so the caller can
+    wait that long instead of asking again; every other HTTP error is raised as it came."""
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "anthropic-beta": BETA,
                                                   "User-Agent": USER_AGENT})
-    with fetch(req, timeout=15) as r:
-        return json.loads(r.read())
+    try:
+        with fetch(req, timeout=15) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            header = e.headers.get("Retry-After") if e.headers is not None else None
+            raise RateLimited(retry_after_seconds(header), url) from None
+        raise
 
 
 def _when(s: str | None) -> dt.datetime | None:
@@ -109,7 +155,8 @@ def _when(s: str | None) -> dt.datetime | None:
 
 
 def usage(token: str, *, fetch=urllib.request.urlopen) -> dict:
-    """{"session": (percent, resets_at), "weekly": (percent, resets_at)} for the token's account."""
+    """{"session": (percent, resets_at), "weekly": (percent, resets_at)} for the token's account.
+    Raises RateLimited (with the seconds to wait) when Anthropic answers 429."""
     d = _get(USAGE_URL, token, fetch)
     out = {}
     for key, name in (("five_hour", "session"), ("seven_day", "weekly")):
@@ -137,7 +184,7 @@ def login_for(account: str, items: list[tuple[str, str]], *, run=subprocess.run,
 
 
 def profile(token: str, *, fetch=urllib.request.urlopen) -> dict:
-    """{"email", "uuid", "org"} of the token's account."""
+    """{"email", "uuid", "org"} of the token's account. Raises RateLimited on a 429, as `usage` does."""
     d = _get(PROFILE_URL, token, fetch)
     account, org = d.get("account") or {}, d.get("organization") or {}
     return {"email": account.get("email"), "uuid": account.get("uuid"), "org": org.get("uuid")}
