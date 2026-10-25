@@ -48,6 +48,20 @@ def test_unpark_and_keep_only_and_definitions(tmp_path):
     assert sorted(mcp_park.parked(prk)) == ["b", "c"]
 
 
+def test_put_keeps_a_definition_parked_and_writes_only_a_change(tmp_path):
+    cfg, prk = _files(tmp_path, {"a": _def("a")}, parked={"b": _def("b")})
+    assert mcp_park.put({"c": _def("c")}, parked_path=prk) == ["c"]
+    assert mcp_park.parked(prk) == {"b": _def("b"), "c": _def("c")}
+    assert stat.S_IMODE(os.stat(prk).st_mode) == 0o600   # definitions hold keys
+    before = prk.stat().st_mtime_ns
+    assert mcp_park.put({"c": _def("c")}, parked_path=prk) == []
+    assert prk.stat().st_mtime_ns == before              # the same definition again writes nothing
+    newer = {**_def("c"), "args": ["c", "--v2"]}
+    assert mcp_park.put({"c": newer}, parked_path=prk) == ["c"]
+    assert mcp_park.parked(prk) == {"b": _def("b"), "c": newer}
+    assert list(mcp_park.configured(cfg)) == ["a"]       # the configuration is not touched
+
+
 def test_update_json_starts_again_when_another_program_wrote_and_keeps_a_backup(tmp_path):
     path = tmp_path / "c.json"
     path.write_text(json.dumps({"n": 1}) + "\n")

@@ -6,6 +6,7 @@ server, and the servers a session never uses still cost memory. Parking keeps a 
 definition (its command, arguments and keys) in a separate file, `~/.claude/mcp-parked.json`,
 where no session starts it. A session that needs a parked server can still be given it with
 `--mcp-config <file>` built from `definitions()`, and `unpark` puts it back for every session.
+`put` keeps a definition parked without it ever being configured, for an installer.
 
     claude-ops mcp-park list
     claude-ops mcp-park park <server>...
@@ -120,6 +121,19 @@ def unpark(names: Iterable[str], *, config_path: os.PathLike | str = CONFIG,
     left = configured(config_path)
     _write_parked(parked_path, {n: d for n, d in parked(parked_path).items() if n not in left})
     return sorted(back)
+
+
+def put(servers: dict[str, dict], *, parked_path: os.PathLike | str = PARKED) -> list[str]:
+    """Keep these definitions parked, replacing any of the same name; the names whose parked
+    definition changed, sorted. It is for an installer that provides a server not every session
+    should start: the definition stays current where a session can still be given it. The
+    configuration is left as it is, so a server it also names starts in every session until it is
+    parked."""
+    have = parked(parked_path)
+    changed = sorted(n for n, d in servers.items() if have.get(n) != d)
+    if changed:
+        _write_parked(parked_path, {**have, **{n: servers[n] for n in changed}})
+    return changed
 
 
 def keep_only(names: Iterable[str], *, config_path: os.PathLike | str = CONFIG,
