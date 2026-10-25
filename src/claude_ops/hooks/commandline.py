@@ -142,6 +142,21 @@ def parse(command: str) -> list[dict]:
     return [c for c in out if c["words"]]
 
 
+def without_heredoc_bodies(command: str) -> str:
+    """The command line with every here-document body blanked out, character for character, so each
+    position in the result names the same place in the original line. A body is data (a commit
+    message, a script being written to a file), never shell words, so a hook that looks for a command
+    word, or rewrites one in place, reads this instead of the raw line. Newlines stay, and so do the
+    operator line and the closing delimiter."""
+    out = list(command)
+    for m in HEREDOC_PARTS.finditer(command):
+        if m.group(5):
+            for i in range(m.start(5), m.end(5)):
+                if out[i] != "\n":
+                    out[i] = " "
+    return "".join(out)
+
+
 def strip_comments(command: str) -> str:
     """The command line without its comments: a `#` that starts a word, outside quotes, to the end
     of its line (the newline stays, so the next line is still a command of its own)."""
