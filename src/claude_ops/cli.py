@@ -24,7 +24,9 @@ HOOKS = {
                    {"matcher": "Bash|Write|Edit|MultiEdit|mcp__github__.*",
                     "hooks": [{"type": "command", "command": "claude-ops hook public-voice"}]},
                    {"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
-                    "hooks": [{"type": "command", "command": "claude-ops hook protected-checkouts"}]}],
+                    "hooks": [{"type": "command", "command": "claude-ops hook protected-checkouts"}]},
+                   {"matcher": "Bash|mcp__github__.*",
+                    "hooks": [{"type": "command", "command": "claude-ops hook plain-voice"}]}],
 }
 
 
@@ -135,6 +137,9 @@ def cmd_hook(a) -> int:
     if a.name == "protected-checkouts":
         from .hooks import protected_checkouts
         return protected_checkouts.main([])
+    if a.name == "plain-voice":
+        from .hooks import plain_voice
+        return plain_voice.main([])
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
@@ -194,6 +199,17 @@ def cmd_rover(a) -> int:
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=boot, stderr=boot, start_new_session=True)
     print(f"rover launched (pid {proc.pid}). The flight log is the newest run-*.log in the harness OUTDIR.")
     return 0
+
+
+def cmd_unwrap_github(a) -> int:
+    from . import github_unwrap
+    out = github_unwrap.run(a.repo, write=a.apply, limit=a.limit)
+    verb = "joined" if a.apply else "to join"
+    print(f"{out['fixed'] if a.apply else out['found']} {verb}; failed {len(out['failed'])}; "
+          f"archived and skipped {len(out['skipped'])}")
+    for f in out["failed"][:20]:
+        print(f"  failed: {f}")
+    return 1 if out["failed"] else 0
 
 
 def cmd_merge(a) -> int:
@@ -360,8 +376,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
-                                    "public-voice", "protected-checkouts"))
+                                    "public-voice", "protected-checkouts", "plain-voice"))
     s.set_defaults(func=cmd_hook)
+
+    s = sub.add_parser("unwrap-github", help="join the broken paragraphs in what you posted on GitHub")
+    s.add_argument("--repo", action="append", help="owner/name (repeatable); every owned one when absent")
+    s.add_argument("--apply", action="store_true", help="rewrite them; without it, only report")
+    s.add_argument("--limit", type=int, default=None, help="stop after this many")
+    s.set_defaults(func=cmd_unwrap_github)
 
     s = sub.add_parser("install", help="install the skills, or the hooks into settings.json")
     s.add_argument("what", choices=("skills", "hooks"))
