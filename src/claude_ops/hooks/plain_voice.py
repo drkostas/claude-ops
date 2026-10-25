@@ -117,24 +117,47 @@ def texts_of(payload: dict) -> list[tuple[str, str]]:
     return []
 
 
+def check_text(text: str, cfg: Config, where: str = "the text") -> str | None:
+    """Why `text` may not go to GitHub, or None."""
+    if markdown.is_wrapped(text):
+        at = (markdown.wrapped(text, 1) or [""])[0]
+        path = save(markdown.unwrap(text))
+        return (f"{where} has a paragraph broken across lines, at {at!r}. GitHub shows every line "
+                f"break, so each sentence is cut in the middle of a line, and on a phone half the line "
+                f"stays empty. Write each paragraph on one line. The same text with its paragraphs "
+                f"joined is saved in {path}; send that file instead (for gh, --body-file {path})")
+    hit = phrase_hit(text, cfg)
+    if hit:
+        return f"{where} has {hit[1]}, in {hit[0]!r}. Rewrite that sentence and send it again"
+    return None
+
+
 def check(payload: dict, cfg: Config) -> str | None:
     """Why this tool call is refused, or None."""
     for where, text in texts_of(payload):
-        if markdown.is_wrapped(text):
-            at = (markdown.wrapped(text, 1) or [""])[0]
-            path = save(markdown.unwrap(text))
-            return (f"{where} has a paragraph broken across lines, at {at!r}. GitHub shows every line "
-                    f"break, so each sentence is cut in the middle of a line, and on a phone half the line "
-                    f"stays empty. Write each paragraph on one line. The same text with its paragraphs "
-                    f"joined is saved in {path}; send that file instead (for gh, --body-file {path})")
-        hit = phrase_hit(text, cfg)
-        if hit:
-            return f"{where} has {hit[1]}, in {hit[0]!r}. Rewrite that sentence and send it again"
+        why = check_text(text, cfg, where)
+        if why:
+            return why
     return None
 
 
 def main(argv: list[str] | None = None) -> int:
+    """As a hook, the tool call on stdin. With `--file PATH`, the text in that file: a script that
+    posts to GitHub itself (no tool call a hook could see) checks its body before it sends it. A file
+    that cannot be read is refused (exit 2), where a broken hook lets the call through."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "--file" in argv:
+        i = argv.index("--file")
+        try:
+            with open(argv[i + 1], encoding="utf-8") as f:
+                why = check_text(f.read(), load(argv))
+        except (IndexError, OSError) as e:
+            print(f"Blocked: the text to check could not be read ({e}).", file=sys.stderr)
+            return 2
+        if why:
+            print(f"Blocked: {why}.", file=sys.stderr)
+            return 2
+        return 0
     try:
         cfg = load(argv)
         payload = json.load(sys.stdin)
