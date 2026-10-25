@@ -67,13 +67,25 @@ def test_a_client_started_in_the_repeated_hour_claims_its_container_at_either_mo
     assert [x["id"] for x in mc.orphans([c], one, now)] == ["ccc"]
 
 
-def test_each_client_claims_one_container_and_images_must_match():
+def test_a_client_covers_every_container_within_its_slack_and_images_must_match():
     now = time.time()
     a = {"id": "a", "created": now - 5 * 3600, "image": IMAGE, "command": ""}
     b = {"id": "b", "created": now - 5 * 3600 + 4, "image": IMAGE, "command": ""}
     other = {"id": "o", "created": now - 5 * 3600, "image": "ghcr.io/example/other", "command": ""}
     clients = [{"starts": [a["created"]], "image": IMAGE, "command": ""}]
-    assert sorted(c["id"] for c in mc.orphans([a, b, other], clients, now)) == ["b", "o"]
+    # b was made four seconds after a's client started: nobody can tell whose it is, so it stays
+    assert [c["id"] for c in mc.orphans([a, b, other], clients, now)] == ["o"]
+
+
+def test_a_client_in_the_repeated_hour_never_makes_the_right_container_an_orphan():
+    # the client's start means two moments an hour apart; a container made at the other moment and
+    # the container it really started are both covered (one client claiming one container stopped
+    # the wrong one)
+    now = time.time()
+    right = {"id": "right", "created": now - 4 * 3600, "image": IMAGE, "command": ""}
+    earlier = {"id": "earlier", "created": now - 5 * 3600, "image": IMAGE, "command": ""}
+    client = [{"starts": [right["created"] + 2 - 3600, right["created"] + 2], "image": IMAGE, "command": ""}]
+    assert mc.orphans([earlier, right], client, now) == []
 
 
 def test_a_young_container_is_never_an_orphan():
@@ -125,7 +137,8 @@ def test_only_run_rm_containers_outside_compose_are_looked_at(capsys):
 
 
 def test_main_lists_and_stops_only_with_the_flag(capsys):
-    now = time.time()
+    # a summer noon: no repeated hour within five hours of it, whatever the day the suite runs
+    now = datetime(2026, 7, 10, 12, 0, tzinfo=TZ).timestamp()
     orphan_at = datetime.fromtimestamp(now - 5 * 3600, TZ)
     kept_at = datetime.fromtimestamp(now - 4 * 3600, TZ)
     fake = FakeRun(docker_line("orphan1", orphan_at) + "\n" + docker_line("kept1", kept_at) + "\n",

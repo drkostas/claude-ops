@@ -135,17 +135,18 @@ def _gap(created: float, client: dict) -> float:
 
 def orphans(containers: list[dict], clients: list[dict], now: float | None = None, *,
             slack: float = SLACK_S, min_age_s: float = DEFAULT_MIN_AGE_MIN * 60) -> list[dict]:
-    """The containers no live client of the same image started, each with its `age_s`. Each client
-    claims at most one container, the nearest in time. A container younger than `min_age_s` is left
-    out: its client may still be starting."""
+    """The containers no live client of the same image could have started, each with its `age_s`.
+    A client covers every container of its image created within `slack` of any moment its start
+    can mean: a client in the repeated hour has two, and a container made an hour before the right
+    one must not be read as the orphan while the right one is (a client claiming one container
+    did exactly that). An orphan is a container nobody could have started; a real orphan made
+    within seconds of a live client is left running, the safe side. A container younger than
+    `min_age_s` is left out: its client may still be starting."""
     now = time.time() if now is None else now
-    free = list(clients)
     out = []
     for c in sorted(containers, key=lambda c: c["created"]):
         age = now - c["created"]
-        candidates = [k for k in free if k["image"] == c["image"] and _gap(c["created"], k) <= slack]
-        if candidates:
-            free.remove(min(candidates, key=lambda k: _gap(c["created"], k)))
+        if any(k["image"] == c["image"] and _gap(c["created"], k) <= slack for k in clients):
             continue
         if age < min_age_s:
             continue
