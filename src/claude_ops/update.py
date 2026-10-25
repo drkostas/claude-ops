@@ -232,6 +232,34 @@ def forgotten_shells(pid: int, procs: dict[int, dict], screen: str | None, now: 
     return sorted(out, key=lambda f: -f["age_s"])
 
 
+def docker_clients(pid: int, procs: dict[int, dict]) -> list[int]:
+    """The `docker` client processes under a chat's process, at any depth (`procs` is
+    `config.processes()`): the MCP servers a chat runs as `docker run -i --rm <image>`."""
+    return sorted(p for p in _config.descendants(pid, procs) if (procs.get(p) or {}).get("comm") == "docker")
+
+
+def end_chat_process(pid: int, procs: dict[int, dict] | None = None,
+                     kill: Callable[[int, int], None] | None = None) -> list[int]:
+    """SIGTERM a chat's process, and first the docker clients under it. A docker client that gets
+    SIGTERM passes it to its container, which exits and is removed by its own --rm; a client that
+    dies with its parent leaves the container running, and nine such containers were found holding
+    memory for months. Returns the client pids that were signalled. Raises what os.kill raises for
+    the chat's own pid (ProcessLookupError when it is gone)."""
+    k = kill if kill is not None else os.kill          # read at the call, so a test's os.kill is the one used
+    try:
+        table = procs if procs is not None else _config.processes()
+    except (OSError, subprocess.SubprocessError):
+        table = {}
+    clients = docker_clients(pid, table)
+    for c in clients:
+        try:
+            k(c, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    k(pid, signal.SIGTERM)
+    return clients
+
+
 def stop_shell(pid: int, procs: dict[int, dict], *, started: dt.datetime, parent: int | None = None,
                grace_s: float = 5.0, kill: Callable[[int, int], None] = os.kill,
                sleep: Callable[[float], None] = time.sleep,
@@ -1233,7 +1261,7 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
     model, effort = model_of(transcript)
     name = title_of(transcript)   # a rename after the start is kept, not undone by the old -n
     try:
-        os.kill(int(pid), signal.SIGTERM)
+        end_chat_process(int(pid))
     except (OSError, TypeError, ValueError) as e:
         return False, f"could not end the Claude process: {e}"
 
@@ -1277,7 +1305,7 @@ def restart_tmux(pid: int, name: str, chat_id: str, *, command: str | None = Non
         command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=rc,
                               model=model, effort=effort, name=title_of(transcript))
     try:
-        os.kill(int(pid), signal.SIGTERM)
+        end_chat_process(int(pid))
     except (OSError, TypeError, ValueError) as e:
         return False, f"could not end the Claude process in {name}: {e}"
 
@@ -1326,7 +1354,7 @@ def restart_into_tmux(pid: int, session_id: str, cwd: str, chat_id: str, *,
     command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=title or True,
                           model=model, effort=effort)
     try:
-        os.kill(int(pid), signal.SIGTERM)
+        end_chat_process(int(pid))
     except (OSError, TypeError, ValueError) as e:
         return False, {"step": "stop", "why": f"could not end the Claude process: {e}"}
 

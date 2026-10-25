@@ -1,4 +1,6 @@
 """When a chat may be touched, and how it is restarted in place."""
+import pathlib
+import signal
 import datetime as dt
 import json
 import subprocess
@@ -827,6 +829,22 @@ SHELL_TABLE = {**MCP_ONLY, 103: {"ppid": 100, "comm": "/bin/zsh", "started": STA
 def _signals():
     sent = []
     return sent, (lambda pid, sig: sent.append((pid, sig)))
+
+
+def test_a_restart_ends_the_chats_docker_clients_with_it():
+    table = {100: {"ppid": 1, "comm": "claude"}, 200: {"ppid": 100, "comm": "docker"},
+             201: {"ppid": 100, "comm": "node"}, 300: {"ppid": 201, "comm": "docker"},
+             400: {"ppid": 1, "comm": "docker"}}
+    assert cu.docker_clients(100, table) == [200, 300]
+    killed = []
+    clients = cu.end_chat_process(100, table, kill=lambda p, sig: killed.append((p, sig)))
+    # the clients first, then the chat; a docker process not under the chat, and the chat's other
+    # children, are left to end as they did before
+    assert clients == [200, 300]
+    assert killed == [(200, signal.SIGTERM), (300, signal.SIGTERM), (100, signal.SIGTERM)]
+    src = (pathlib.Path(cu.__file__)).read_text()
+    assert "os.kill(int(pid), signal.SIGTERM)" not in src and src.count("end_chat_process(int(pid))") == 3, \
+        "every restart path ends the chat through end_chat_process"
 
 
 def test_stop_shell_stops_the_shell_and_everything_under_it():

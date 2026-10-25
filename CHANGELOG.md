@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `mcp-containers`: a client covers every container of its image made within seconds of any moment its start can mean; it no longer claims one container, which in the repeated hour of the autumn change could leave the container it really started read as the orphan. A real orphan made within seconds of a live client stays running, the safe side.
+- `update.end_chat_process(pid)`: a restart in place (`restart_iterm`, `restart_tmux`, `restart_into_tmux`) first sends SIGTERM to the `docker` clients under the chat's process, then to the chat. A docker client passes the signal to its container, which exits and is removed by its own `--rm`; one that died with its parent left the container running (`mcp-containers` finds those).
 - `mcp-containers` reads docker's `<no value>` for a missing compose label as none, so a container started as `docker run --rm` is looked at; the first filter left every one out.
 - `mcp-containers` looks only at containers started as `docker run --rm` outside any compose project (docker inspect: AutoRemove and no compose label). The first version read every running container, so `--stop` stopped services a compose file runs.
 - `mcp-containers` (`claude-ops mcp-containers [--stop] [--min-age MINUTES] [--json]`): the MCP server containers a chat left behind. A chat that runs an MCP server as `docker run -i --rm <image>` leaves the container running when it ends by a signal; each running container is matched to a live `docker run` client of the same image started within seconds of it (a start in the repeated hour of the autumn change is tried at both moments it can mean), one with no client is an orphan, and `--stop` stops them. A container younger than `--min-age` (120) is left alone.
