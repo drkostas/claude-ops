@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `chat.claude_command` takes `model` and `effort` (`--model`, `--effort`), so a chat can start on a model other than the settings' default, as `resume_command` already reopens one. With `settings` neither is added, since the settings file decides the model
 - `commandline.without_heredoc_bodies(command)`: the command line with every here-document body blanked out, character for character, so each position still names the same place in the original line. A body is data (a commit message, a script written to a file), never shell words, so a hook that looks for a command word, or rewrites one in place, reads this instead of the raw line. A hook that rewrote every `open` outside quotes also rewrote the words "open Wi-Fi" inside a commit message
 - `markdown.unwrap` is idempotent (`unwrap(unwrap(t)) == unwrap(t)`), so text it wrote is never read as wrapped again. A line longer than `MAX_WRAPPED` (120) is a paragraph already on one line, never a wrapped line, so the line after it is not joined to it. A second `unwrap-github` run found posts the first had rewritten and joined more of them
 - `plain-voice --file PATH` checks the text in a file and exits 2 with the reason when it may not go to GitHub, for a script that posts with gh itself, where no hook sees a tool call. `plain_voice.check_text(text, cfg)` is the check on its own

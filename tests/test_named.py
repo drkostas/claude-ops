@@ -20,6 +20,16 @@ def test_commands_carry_the_mode_only_when_given():
     assert chat.resume_command("soma", "ID", None) == "claude --resume ID -n soma --remote-control soma"
 
 
+def test_a_chat_can_start_on_a_model_and_effort_of_its_own():
+    assert (chat.claude_command("paper", None, remote_control=False, model="opus", effort="high")
+            == "claude -n paper --model opus --effort high")
+    assert (chat.claude_command("paper", "plan", model="opus")
+            == "claude -n paper --model opus --remote-control paper --permission-mode plan")
+    # a settings file decides the model of a chat it starts, as it does for a resume
+    assert (chat.claude_command("paper", None, remote_control=False, settings="/s.json", model="opus")
+            == "claude --settings /s.json -n paper")
+
+
 def test_commands_give_a_chat_only_the_mcp_servers_in_its_file():
     assert (chat.claude_command("soma", None, remote_control=False, mcp_config="/m/soma.json")
             == "claude --strict-mcp-config --mcp-config /m/soma.json -n soma")
