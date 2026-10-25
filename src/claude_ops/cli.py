@@ -22,7 +22,9 @@ HOOKS = {
     "PreToolUse": [{"matcher": "Bash|Write|Edit|MultiEdit|mcp__github__.*",
                     "hooks": [{"type": "command", "command": "claude-ops hook no-session-links"}]},
                    {"matcher": "Bash|Write|Edit|MultiEdit|mcp__github__.*",
-                    "hooks": [{"type": "command", "command": "claude-ops hook public-voice"}]}],
+                    "hooks": [{"type": "command", "command": "claude-ops hook public-voice"}]},
+                   {"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+                    "hooks": [{"type": "command", "command": "claude-ops hook protected-checkouts"}]}],
 }
 
 
@@ -130,6 +132,9 @@ def cmd_hook(a) -> int:
     if a.name == "public-voice":
         from .hooks import public_voice
         return public_voice.main([])
+    if a.name == "protected-checkouts":
+        from .hooks import protected_checkouts
+        return protected_checkouts.main([])
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
@@ -351,7 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
-                                    "public-voice"))
+                                    "public-voice", "protected-checkouts"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("install", help="install the skills, or the hooks into settings.json")
