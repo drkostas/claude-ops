@@ -4,7 +4,7 @@ import json
 
 from claude_ops import github_unwrap as gu
 
-WRAPPED = "Title\n\nA sentence that was wrapped\nin the middle.\n"
+WRAPPED = "Title\n\nA sentence long enough that its writer wrapped it\nin the middle.\n"
 FLAT = "Title\n\nA sentence on one line.\n"
 
 
@@ -45,7 +45,7 @@ def test_it_reports_without_writing_by_default():
 def test_apply_rewrites_only_the_users_wrapped_texts():
     gh = FakeGitHub()
     out = gu.run(write=True, gh=gh, say=lambda s: None, sleep=lambda s: None)
-    joined = "Title\n\nA sentence that was wrapped in the middle.\n"
+    joined = "Title\n\nA sentence long enough that its writer wrapped it in the middle.\n"
     assert out["fixed"] == 3 and gh.patches == [("repos/someone/demo/issues/1", joined),
                                                 ("repos/someone/demo/issues/comments/10", joined),
                                                 ("repos/someone/demo/releases/20", joined)]

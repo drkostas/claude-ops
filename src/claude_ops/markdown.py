@@ -20,8 +20,13 @@ from __future__ import annotations
 
 import re
 
-#: a fence that opens or closes a code block
-FENCE = re.compile(r"^\s{0,3}(```|~~~)")
+#: a fence that opens or closes a code block, also written with escaped backticks (\`\`\`), which
+#: GitHub shows as text but its writer meant as code
+FENCE = re.compile(r"^\s{0,3}(```|~~~|\\`\\`\\`)")
+#: ⛔ ONLY A LONG LINE WAS WRAPPED. Wrapped text fills its lines to near the wrap width (72 or 100);
+#: a short line followed by another is a line its writer meant as its own (a list without markers, one
+#: check per line), and joining those would make the text worse, not better
+MIN_WRAPPED = 45
 #: a line that starts a block of its own, so it is never joined to the line before
 BLOCK = re.compile(r"^\s*(?:[-*+]\s|\d{1,9}[.)]\s|#{1,6}(?:\s|$)|>|\||<)")
 #: a horizontal rule
@@ -49,7 +54,9 @@ def unwrap(text: str) -> str:
     out: list[str] = []
     in_fence = False
     joinable = False            # whether the last line out may take the next one
+    last = ""                   # the line before, as written
     for line in lines:
+        before, last = last, line
         if FENCE.match(line):
             in_fence = not in_fence
             out.append(line)
@@ -67,7 +74,8 @@ def unwrap(text: str) -> str:
             out.append(line)            # indented code, after a blank line or a block
             continue
         alone = _stands_alone(stripped)
-        if joinable and not alone and not BLOCK.match(line) and not RULE.match(line):
+        if (joinable and len(before.rstrip()) >= MIN_WRAPPED and not alone and not BLOCK.match(line)
+                and not RULE.match(line)):
             out[-1] = out[-1].rstrip() + " " + stripped
             joinable = not _hard_break(line)
             continue
