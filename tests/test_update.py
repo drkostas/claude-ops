@@ -769,6 +769,21 @@ def test_a_usage_limit_or_a_bad_request_is_not_retried(tmp_path):
         assert cu.stopped_on_api_error(t) is None, text
 
 
+def test_an_expired_login_is_a_login_stop_and_nothing_else_is(tmp_path):
+    login = _write(tmp_path / "l.jsonl", {"type": "user"}, _err("Login expired · Please run /login",
+                                                              error="authentication_failed"))
+    assert cu.stopped_on_login_error(login) == {"uuid": "E1", "at": "2026-10-16T18:50:28.314Z",
+                                    "error": "authentication_failed", "text": "Login expired · Please run /login"}
+    assert cu.newest_api_error(login)["error"] == "authentication_failed"
+    lost = _write(tmp_path / "c.jsonl", _err("API Error: Connection lost mid-response."))
+    assert cu.stopped_on_login_error(lost) is None and cu.newest_api_error(lost)["error"] == "server_error"
+    # signed in again: the next turn is the newest message, so it is not signed out any more
+    back = _write(tmp_path / "b.jsonl", _err("Login expired · Please run /login", error="authentication_failed"),
+                  {"type": "user"}, {"type": "assistant"})
+    assert cu.stopped_on_login_error(back) is None and cu.newest_api_error(back) is None
+    assert cu.stopped_on_login_error(None) is None
+
+
 def test_anything_after_the_error_means_the_chat_moved_on(tmp_path):
     lost = _err("API Error: Connection lost mid-response.")
     assert cu.stopped_on_api_error(_write(tmp_path / "u.jsonl", lost, {"type": "user"})) is None
