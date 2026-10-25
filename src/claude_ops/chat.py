@@ -229,19 +229,27 @@ def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
     return shlex.join(parts)
 
 
+#: the settings that turn ultracode on, which Claude Code keeps for the session only. Compact, so
+#: `ps` prints it as one word and `update.resume_line` can find it again.
+ULTRACODE_SETTINGS = '{"ultracode":true}'
+
+
 def resume_command(name: str, chat_id: str, mode: str | None, *, remote_control: bool = True,
                    settings: str | None = None, model: str | None = None,
                    effort: str | None = None, mcp_config: str | None = None,
-                   mcp_strict: bool = True) -> str:
+                   mcp_strict: bool = True, ultracode: bool = False) -> str:
     """The command that reopens conversation `chat_id` under the same name, in the mode given
     (read a running chat's mode with `update.permission_mode` before ending it). `model` and
     `effort` reopen it on what it last ran on (`update.model_of`). With `settings`, the settings
     file decides the model, so neither is added. `mcp_config` and `mcp_strict` are as in
-    `claude_command`."""
+    `claude_command`. `ultracode` reopens it with ultracode on (`update.ultracode_of`), which a
+    resume otherwise drops, since Claude Code keeps it for the session only; not with `settings`,
+    where a second settings flag would replace the file."""
     parts = (["claude"] + (["--settings", settings] if settings else []) + _mcp(mcp_config, mcp_strict)
              + ["--resume", chat_id, "-n", name])
     if not settings:
         parts += (["--model", model] if model else []) + (["--effort", effort] if effort else [])
+        parts += ["--settings", ULTRACODE_SETTINGS] if ultracode else []
     if remote_control:
         parts += ["--remote-control", name]
     if mode:

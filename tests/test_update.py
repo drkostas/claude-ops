@@ -556,6 +556,56 @@ def test_model_of_reads_backwards_across_blocks(tmp_path):
     assert cu.model_of(t) == ("claude-opus-5-5", "xhigh")
 
 
+def test_ultracode_of_reads_the_newest_record_of_it(tmp_path):
+    t = tmp_path / "c.jsonl"
+
+    def write(*records):
+        t.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    enter = {"type": "attachment", "attachment": {"type": "ultra_effort_enter", "reminderType": "full"}}
+    leave = {"type": "attachment", "attachment": {"type": "ultra_effort_exit"}}
+    said = {"type": "user", "message": {"content": "<local-command-stdout>Set effort level to max (this "
+                                                   "session only): Maximum capability · Ultracode on"
+                                                   "</local-command-stdout>"}}
+    off = {"type": "user", "message": {"content": "<local-command-stdout>Ultracode off</local-command-stdout>"}}
+    write(enter, _json_assistant())
+    assert cu.ultracode_of(t) is True
+    write(enter, leave)
+    assert cu.ultracode_of(t) is False, "it went off later"
+    write(leave, said)
+    assert cu.ultracode_of(t) is True, "turned on with /effort, before the next turn wrote its record"
+    write(enter, off)
+    assert cu.ultracode_of(t) is False
+    write({**enter, "isSidechain": True})
+    assert cu.ultracode_of(t) is None, "a subagent's record is not the chat's"
+    typed = {"type": "user", "message": {"content": "please say Ultracode on"}}
+    write(typed)
+    assert cu.ultracode_of(t) is None, "words a person typed are not the command's output"
+    assert cu.ultracode_of(None) is None and cu.ultracode_of(tmp_path / "missing.jsonl") is None
+
+
+def _json_assistant():
+    return {"type": "assistant", "effort": "max", "message": {"model": "claude-opus-5-5", "content": []}}
+
+
+def test_resume_line_carries_ultracode():
+    started = "claude -n ops --effort max"
+    assert (cu.resume_line(started, "U", ultracode=True)
+            == "claude -n ops --effort max --settings '{\"ultracode\":true}' --resume U")
+    # `ps` prints the settings it was resumed with as one word; the next restart decides again
+    resumed = 'claude -n ops --effort max --settings {"ultracode":true}'
+    assert cu.resume_line(resumed, "U") == "claude -n ops --effort max --settings '{\"ultracode\":true}' --resume U", \
+        "unknown: kept as it was"
+    assert cu.resume_line(resumed, "U", ultracode=False) == "claude -n ops --effort max --resume U", \
+        "turned off since: not given again"
+    assert (cu.resume_line(resumed, "U", model="claude-opus-5-5", effort="max", ultracode=True)
+            == "claude -n ops --effort max --model claude-opus-5-5 --settings '{\"ultracode\":true}' --resume U"), \
+        "the ultracode settings are not a settings file: the model and effort are still given"
+    # a chat with a settings file of its own keeps it and gets no second settings flag
+    assert (cu.resume_line("claude --settings /s.json -n ops", "U", ultracode=True)
+            == "claude --settings /s.json -n ops --resume U")
+
+
 def test_resume_line_keeps_the_model_and_effort_chosen_inside_the_chat():
     started = "claude --allow-dangerously-skip-permissions -n ops --model opus --effort medium"
     assert (cu.resume_line(started, "U", model="claude-sonnet-5", effort="high")

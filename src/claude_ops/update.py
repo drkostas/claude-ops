@@ -508,6 +508,45 @@ def model_of(path: Path | None) -> tuple[str | None, str | None]:
     return None, None
 
 
+#: what the /effort command prints when it turns ultracode on or off
+_ULTRACODE_SAID = re.compile(r"\bUltracode (on|off)\b")
+
+
+def ultracode_of(path: Path | None) -> bool | None:
+    """Whether ultracode was on, as the conversation last said: True or False from its newest record
+    of it, None when it never said.
+
+    Ultracode (standing workflow orchestration, at any effort level) lasts for the session only:
+    `/effort ultracode on`, or the toggle in the /effort picker, turns it on, and a resumed chat came
+    back with it off. Claude Code marks it in the transcript with an `ultra_effort_enter` attachment
+    on each turn it is on and `ultra_effort_exit` when it goes off, and /effort prints "Ultracode on"
+    or "Ultracode off" when it changes, before the next turn. A subagent's records (`isSidechain`)
+    are skipped."""
+    if path is None:
+        return None
+    try:
+        for line in _lines_from_end(Path(path)):
+            if "ultra_effort_" not in line and "Ultracode o" not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict) or d.get("isSidechain"):
+                continue
+            a = d.get("attachment")
+            if isinstance(a, dict) and a.get("type") in ("ultra_effort_enter", "ultra_effort_exit"):
+                return a["type"] == "ultra_effort_enter"
+            content = (d.get("message") or {}).get("content") if d.get("type") == "user" else None
+            if isinstance(content, str) and "<local-command-stdout>" in content:
+                said = _ULTRACODE_SAID.search(content)
+                if said:
+                    return said.group(1) == "on"
+    except OSError:
+        pass
+    return None
+
+
 def title_of(path: Path | None) -> str | None:
     """The chat's own title (`/rename` or `-n`): its newest `custom-title` record, read from the end,
     so a long transcript is not read whole (one of 1.8 GB took two seconds)."""
@@ -573,7 +612,8 @@ def background_agent(chat_id: str, now: float | None = None, projects: Path = PR
 def resume_line(args: str | None, chat_id: str, mode: str | None = None,
                 remote_control: str | bool | None = None, model: str | None = None,
                 effort: str | None = None, name: str | None = None,
-                mcp_config: str | bool | None = None, mcp_strict: bool = True) -> str:
+                mcp_config: str | bool | None = None, mcp_strict: bool = True,
+                ultracode: bool | None = None) -> str:
     """The command that reopens this conversation with the flags it was started with.
 
     `args` is the process's command line (`ps -o args=`), and `mode` the permission mode it was
@@ -587,7 +627,11 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
     A chat started with its own MCP servers (`--strict-mcp-config --mcp-config <file>`) keeps them.
     `mcp_config` changes that: a file gives the chat only the servers in it from this restart on, and
     False starts it again with every MCP server its configuration names. With `mcp_strict=False` a
-    file gives the chat its servers beside the configured ones, and `--strict-mcp-config` goes."""
+    file gives the chat its servers beside the configured ones, and `--strict-mcp-config` goes.
+
+    `ultracode` is whether ultracode was on (`ultracode_of`): True starts it with ultracode on again,
+    False without, and None keeps what its command line said. A chat with a settings file of its own
+    keeps that file and is not given ultracode, since a second settings flag would replace it."""
     argv = (args or "").split()
     out = ["claude"]
     if argv and Path(argv[0]).name == "claude":
@@ -608,6 +652,14 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
             out[out.index(flag) + 1] = value
         else:
             out.extend([flag, value])
+
+    # the ultracode settings an earlier restart passed are decided again below, never kept as a file
+    had_ultracode = False
+    if "--settings" in out and out.index("--settings") + 1 < len(out) \
+            and out[out.index("--settings") + 1] == _chat.ULTRACODE_SETTINGS:
+        k = out.index("--settings")
+        del out[k:k + 2]
+        had_ultracode = True
 
     if name:
         if "--name" in out:
@@ -637,6 +689,8 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
         elif not mcp_strict and "--strict-mcp-config" in out:
             out.remove("--strict-mcp-config")
         put("--mcp-config", mcp_config)
+    if (had_ultracode if ultracode is None else ultracode) and "--settings" not in out:
+        out += ["--settings", _chat.ULTRACODE_SETTINGS]
     tail = ["--permission-mode", mode] if mode else []
     return shlex.join(out + tail + ["--resume", chat_id])
 
@@ -1320,7 +1374,8 @@ def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
 
     if not _wait(at_shell, stop_s):
         return False, f"Claude did not stop within {int(stop_s)} seconds of being asked to"
-    cmd = resume_line(args, chat_id, mode, remote_control=rc, model=model, effort=effort, name=name)
+    cmd = resume_line(args, chat_id, mode, remote_control=rc, model=model, effort=effort, name=name,
+                      ultracode=ultracode_of(transcript))
     ok, detail = _inject.send_iterm(session_id, f"cd {shlex.quote(cwd)} && {cmd}", True, env=env)
     if not ok:
         return False, f"could not type the resume command ({detail})"
@@ -1349,7 +1404,8 @@ def restart_tmux(pid: int, name: str, chat_id: str, *, command: str | None = Non
         model, effort = model_of(transcript)
         # the title the chat has now: a rename after the start is kept, not undone by the old -n
         command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=rc,
-                              model=model, effort=effort, name=title_of(transcript))
+                              model=model, effort=effort, name=title_of(transcript),
+                              ultracode=ultracode_of(transcript))
     try:
         end_chat_process(int(pid))
     except (OSError, TypeError, ValueError) as e:
@@ -1398,7 +1454,7 @@ def restart_into_tmux(pid: int, session_id: str, cwd: str, chat_id: str, *,
     mode = permission_mode(screen_of("iterm", session_id, env=env))
     model, effort = model_of(transcript_of(chat_id))
     command = resume_line(process_args(pid, env=env), chat_id, mode, remote_control=title or True,
-                          model=model, effort=effort)
+                          model=model, effort=effort, ultracode=ultracode_of(transcript_of(chat_id)))
     try:
         end_chat_process(int(pid))
     except (OSError, TypeError, ValueError) as e:
