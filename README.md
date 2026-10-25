@@ -140,6 +140,19 @@ A command a chat starts in the background shares the chat's process group, so it
 does. `detach` starts it as the leader of a new session (macOS has no `setsid` command), with no
 input and its output appended to the log, and prints its pid, which is also its group id.
 
+## The MCP server containers a chat left behind
+
+```bash
+claude-ops mcp-containers           # list the running MCP containers no live chat runs (id, image, age)
+claude-ops mcp-containers --stop    # and stop them; docker's --rm then removes them
+```
+
+A chat that runs an MCP server as `docker run -i --rm <image>` leaves the container running when
+the chat ends by a signal: the client dies, the server waits on a stdin nobody closes, and `--rm`
+only removes a container that exits. Each running container is matched to a live `docker run`
+client of the same image started within seconds of it; one with no client is an orphan. A container
+younger than `--min-age` minutes (120) is left alone, since its client may still be starting.
+
 ## An Android device back on adb after a restart
 
 ```bash
