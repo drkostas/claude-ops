@@ -411,6 +411,12 @@ accounts.write_account(accounts.CLAUDE_JSON, block, backup="/path/to/claude.json
   refresh token, and the chats holding the old one are signed out.
 - Running chats move to the new login by themselves; their Remote Control sessions do not. Send
   each chat `/remote-control` again.
+- A chat whose Remote Control is still on answers `/remote-control` with a menu: its link, then
+  "Disconnect this session", "Show QR code" and "Continue". The menu stays open until a key closes
+  it, and while it is open the chat takes no message. A sweep that sends `/remote-control` to every
+  chat and waits for a new link left eleven chats on this menu at once. After sending it, read the
+  screen: when `update.rc_menu(screen)` says the menu is open, `inject.press(target, "Escape")`
+  closes it and Remote Control stays on.
 
 ## Give a chat its own worktree
 
