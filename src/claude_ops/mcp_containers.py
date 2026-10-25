@@ -6,7 +6,12 @@ crash), the client dies with it, but the container keeps running: `--rm` removes
 when it exits, and the server waits on a stdin nobody closes. Over weeks they add up (nine from two
 months on one Mac, each holding its memory), and `docker ps` stops telling what is really in use.
 
-A running container is matched to a live `docker run` client of the same image whose start is
+Only a container started as `docker run --rm` is looked at: one docker will remove when it exits
+(AutoRemove) and that no compose project owns. A service a compose file runs has no client by
+design and is never an orphan. ⛔ The first version read every running container, and `--stop` took
+nine services down (a wiki, its database, a notifier) for a minute before they were started again.
+
+Such a container is matched to a live `docker run` client of the same image whose start is
 within a few seconds of the container's creation. One with no client is an orphan. `ps -o lstart`
 prints wall-clock time, and in the hour the clocks go back a wall time names two moments: a client
 started then is tried at both. A container younger than `--min-age` minutes is never touched: its
@@ -29,6 +34,9 @@ from datetime import datetime
 
 #: docker ps prints this (the zone name after the offset is ignored)
 PS_FORMAT = "{{.ID}}\t{{.CreatedAt}}\t{{.Image}}\t{{.Command}}"
+#: docker inspect prints this: whether docker removes the container when it exits (--rm), and the
+#: compose project that owns it, if any
+INSPECT_FORMAT = "{{.Id}}\t{{.HostConfig.AutoRemove}}\t{{index .Config.Labels \"com.docker.compose.project\"}}"
 #: how far apart a container's creation and its client's start may be, in seconds
 SLACK_S = 20
 DEFAULT_MIN_AGE_MIN = 120
@@ -62,6 +70,29 @@ def _docker_time(text: str) -> float | None:
         return datetime.strptime(" ".join(words[:3]), "%Y-%m-%d %H:%M:%S %z").timestamp()
     except ValueError:
         return None
+
+
+def parse_inspect(text: str) -> dict[str, dict]:
+    """`docker inspect --format INSPECT_FORMAT` -> {id prefix (12): {auto_remove, compose}}."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or not parts[0].strip():
+            continue
+        out[parts[0].strip()[:12]] = {"auto_remove": parts[1].strip().lower() == "true",
+                                      "compose": parts[2].strip() if len(parts) > 2 else ""}
+    return out
+
+
+def run_rm_only(containers: list[dict], inspected: dict[str, dict]) -> list[dict]:
+    """The containers started as `docker run --rm` and owned by no compose project. One docker
+    inspect did not describe is left out: unknown is never an orphan."""
+    out = []
+    for c in containers:
+        i = inspected.get(c["id"][:12])
+        if i and i["auto_remove"] and not i["compose"]:
+            out.append({**c, **i})
+    return out
 
 
 def parse_clients(text: str) -> list[dict]:
@@ -121,14 +152,22 @@ def orphans(containers: list[dict], clients: list[dict], now: float | None = Non
 
 
 def read(runner: Runner = subprocess.run, env: Mapping[str, str] | None = None) -> tuple[list[dict], list[dict]]:
-    """(containers, clients) from this machine; `env` is the environment the two commands run with
-    (the caller's when None). Raises RuntimeError when docker does not answer."""
+    """(containers, clients) from this machine: only the containers started as `docker run --rm`
+    outside any compose project, and the live `docker run` clients. `env` is the environment the
+    commands run with (the caller's when None). Raises RuntimeError when docker does not answer."""
     kw = {"capture_output": True, "text": True, "env": None if env is None else dict(env)}
     r = runner(["docker", "ps", "--format", PS_FORMAT], timeout=30, **kw)
     if r.returncode != 0:
         raise RuntimeError(f"docker ps failed: {(r.stderr or '').strip()[:200]}")
+    containers = parse_containers(r.stdout)
+    if containers:
+        i = runner(["docker", "inspect", "--format", INSPECT_FORMAT, *[c["id"] for c in containers]],
+                   timeout=60, **kw)
+        if i.returncode != 0:
+            raise RuntimeError(f"docker inspect failed: {(i.stderr or '').strip()[:200]}")
+        containers = run_rm_only(containers, parse_inspect(i.stdout))
     p = runner(["ps", "-Ao", "lstart=,command="], timeout=10, **kw)
-    return parse_containers(r.stdout), parse_clients(p.stdout)
+    return containers, parse_clients(p.stdout)
 
 
 def stop(ids: Sequence[str], runner: Runner = subprocess.run, env: Mapping[str, str] | None = None) -> list[str]:

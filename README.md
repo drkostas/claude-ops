@@ -149,9 +149,11 @@ claude-ops mcp-containers --stop    # and stop them; docker's --rm then removes 
 
 A chat that runs an MCP server as `docker run -i --rm <image>` leaves the container running when
 the chat ends by a signal: the client dies, the server waits on a stdin nobody closes, and `--rm`
-only removes a container that exits. Each running container is matched to a live `docker run`
-client of the same image started within seconds of it; one with no client is an orphan. A container
-younger than `--min-age` minutes (120) is left alone, since its client may still be starting.
+only removes a container that exits. Only containers started that way are looked at (docker will
+remove them when they exit, and no compose project owns them); a service a compose file runs is
+never an orphan. Each is matched to a live `docker run` client of the same image started within
+seconds of it; one with no client is an orphan. A container younger than `--min-age` minutes (120)
+is left alone, since its client may still be starting.
 
 ## An Android device back on adb after a restart
 
