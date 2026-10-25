@@ -471,6 +471,19 @@ A bot's dependency update (Dependabot, Renovate) is merged with `--dependency-bu
 manifests alone within that level, so a chat does not have to read the files and the versions
 itself. `--method auto` takes the first merge method the repository allows.
 
+Several numbers at once merge in turn: `claude-ops merge 12 34 56 --repo owner/name`. Each is merged
+only when it is clean, through the same single-pull-request merge, so each one still reads the checks
+in the step it merges. A pull request that has fallen behind its base is brought up to date with
+`gh pr update-branch`, one at a time, and the loop waits while its checks re-run. This is for a set
+of green pull requests under a branch rule that requires them to be up to date, where merging one
+makes the others fall behind: the command updates and re-checks each in turn, instead of a chat
+writing that loop by hand. It stops when every one is merged, when one is refused (a conflict, a
+draft, a check that did not pass), or at the timeout, and prints one line per pull request. Exit
+code: 0 all merged, 2 some still not ready at the timeout, 3 one refused, 7 the production
+confirmation did not pass. `--confirm-prod` then waits for the last merge commit's own checks and
+for a deployment of it to reach success, and `--prod-environment <name>` keeps only deployments
+whose environment name contains it.
+
 ## Repository tools: union, secret-shapes, mutate, plan-apply
 
 - **A rebase stopped on a conflict where both sides only added lines** (two branches adding an entry

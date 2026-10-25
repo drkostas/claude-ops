@@ -131,3 +131,190 @@ def test_pull_request_reads_the_gate_fields():
     pr = merge.pull_request("7", "owner/repo", gh=gh)
     assert pr["title"] == BOT_PR["title"] and gh.calls[0][4] == merge.GATE_FIELDS and gh.calls[0][-1] == "owner/repo"
     assert merge.dependency_bump_review(pr, "minor").ok
+
+
+# --- cascade: merge several, each only when it is clean --------------------
+
+class PR:
+    """A pull request gh can look at, merge and update. `status` is its merge-state status; after
+    `update-branch` from BEHIND it becomes `update_to`; while BLOCKED it turns CLEAN after
+    `blocked_polls` cascade state-reads (checks finishing)."""
+
+    def __init__(self, number, status="CLEAN", *, update_to="CLEAN", blocked_polls=0, oid=None):
+        self.n = str(number)
+        self.status = status
+        self.update_to = update_to
+        self.blocked_polls = blocked_polls
+        self.oid = oid or ("oid" + str(number))
+        self.merged = False
+        self.merge_oid = None
+
+
+class FakeRepo:
+    """gh over a set of pull requests. `strict` makes merging one put every other open pull request
+    behind its base, the way a branch rule that requires up-to-date does. `checks` and `deployment`
+    are what the merge commit's check-runs and its deployment report, for --confirm-prod."""
+
+    def __init__(self, prs, *, strict=False, checks="success", deployment="success"):
+        self.prs = {p.n: p for p in prs}
+        self.strict, self.checks, self.deployment = strict, checks, deployment
+        self.calls = []
+
+    def __call__(self, args):
+        self.calls.append(args)
+        if args[0] == "api":
+            return self._api(args[1])
+        cmd = args[:2]
+        if cmd == ["pr", "view"]:
+            return self._view(args)
+        if cmd == ["pr", "merge"]:
+            return self._merge(args)
+        if cmd == ["pr", "update-branch"]:
+            p = self.prs[args[2]]
+            if p.status == "BEHIND":
+                p.status, p.oid = p.update_to, p.oid + "u"
+            return run(0)
+        if cmd == ["repo", "view"]:
+            return run(out=json.dumps({"mergeCommitAllowed": True, "squashMergeAllowed": True,
+                                       "rebaseMergeAllowed": True, "nameWithOwner": "owner/repo"}))
+        return run(1, err="unexpected: " + " ".join(args))
+
+    def _view(self, args):
+        p = self.prs[args[2]]
+        fields = args[args.index("--json") + 1]
+        if p.merged:
+            return run(out=json.dumps({"number": int(p.n), "state": "MERGED", "headRefOid": p.oid,
+                                       "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+                                       "mergeCommit": {"oid": p.merge_oid},
+                                       "statusCheckRollup": [check_run("ci")]}))
+        if fields == merge.STATE_FIELDS and p.status == "BLOCKED" and p.blocked_polls > 0:
+            p.blocked_polls -= 1
+            if p.blocked_polls == 0:
+                p.status = "CLEAN"
+        rollup = [check_run("ci")] if p.status == "CLEAN" else [check_run("ci", status="IN_PROGRESS", conclusion="")]
+        return run(out=json.dumps({"number": int(p.n), "state": "OPEN", "headRefOid": p.oid,
+                                   "mergeCommit": None, "statusCheckRollup": rollup,
+                                   "mergeable": "CONFLICTING" if p.status == "DIRTY" else "MERGEABLE",
+                                   "mergeStateStatus": p.status}))
+
+    def _merge(self, args):
+        p = self.prs[args[2]]
+        if p.status != "CLEAN":
+            return run(1, err="not mergeable")
+        if "--match-head-commit" in args and args[args.index("--match-head-commit") + 1] != p.oid:
+            return run(1, err="head moved")
+        p.merged, p.merge_oid = True, "merged" + p.n
+        if self.strict:
+            for q in self.prs.values():
+                if not q.merged and q.status in ("CLEAN", "BLOCKED"):
+                    q.status = "BEHIND"
+        return run(0)
+
+    def _api(self, path):
+        if "check-runs" in path:
+            return run(out=json.dumps({"check_runs": [{"name": "ci", "status": "completed",
+                                                       "conclusion": self.checks}]}))
+        if "/statuses" in path:
+            return run(out=json.dumps([{"state": self.deployment}]))
+        if "deployments" in path:
+            return run(out=json.dumps([{"id": 99, "environment": "Production"}]))
+        return run(1, err="unexpected api: " + path)
+
+
+def casc(gh, numbers, *, timeout_s=600, **kw):
+    t = [0.0]
+    return merge.cascade(numbers, "owner/repo", gh=gh, poll_s=10, settle_s=30, timeout_s=timeout_s,
+                         sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0], **kw)
+
+
+def merges_of(gh, n):
+    return [c for c in gh.calls if c[:2] == ["pr", "merge"] and c[2] == str(n)]
+
+
+def test_classify():
+    assert merge.classify({"state": "OPEN", "mergeStateStatus": "CLEAN"}) == "clean"
+    assert merge.classify({"state": "OPEN", "mergeStateStatus": "BEHIND"}) == "behind"
+    assert merge.classify({"state": "OPEN", "mergeStateStatus": "BLOCKED"}) == "waiting"
+    assert merge.classify({"state": "OPEN", "mergeStateStatus": "UNSTABLE"}) == "waiting"
+    assert merge.classify({"state": "OPEN", "mergeStateStatus": "DIRTY"}) == "dirty"
+    assert merge.classify({"state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "UNKNOWN"}) == "dirty"
+    assert merge.classify({"state": "OPEN", "mergeStateStatus": "DRAFT"}) == "draft"
+    assert merge.classify({"state": "MERGED"}) == "merged"
+    assert merge.classify({"state": "CLOSED"}) == "closed"
+
+
+def test_cascade_merges_each_clean_pull_request_in_one_step():
+    gh = FakeRepo([PR(1), PR(2)])
+    code, said = casc(gh, ["1", "2"])
+    assert code == 0 and "#1  merged" in said and "#2  merged" in said
+    assert gh.prs["1"].merged and gh.prs["2"].merged
+    assert len(merges_of(gh, 1)) == 1 and len(merges_of(gh, 2)) == 1
+
+
+def test_cascade_updates_a_behind_pull_request_then_merges_it():
+    gh = FakeRepo([PR(1, status="BEHIND", update_to="CLEAN")])
+    code, said = casc(gh, ["1"])
+    assert code == 0 and "#1  merged" in said
+    assert any(c[:2] == ["pr", "update-branch"] and c[2] == "1" for c in gh.calls)
+
+
+def test_cascade_waits_while_blocked_and_never_merges_until_clean():
+    gh = FakeRepo([PR(1, status="BLOCKED", blocked_polls=2)])
+    code, said = casc(gh, ["1"])
+    assert code == 0 and "#1  merged" in said
+    # it is blocked, not behind: it must not update the branch, and it merges once the checks clear
+    assert not any(c[:2] == ["pr", "update-branch"] for c in gh.calls)
+    assert len(merges_of(gh, 1)) == 1
+
+
+def test_cascade_never_merges_a_conflict_but_merges_the_clean_one_first():
+    gh = FakeRepo([PR(1, status="DIRTY"), PR(2, status="CLEAN")])
+    code, said = casc(gh, ["1", "2"])
+    assert gh.prs["2"].merged and not gh.prs["1"].merged
+    assert code == 3 and "#1  refused" in said and "conflict" in said
+    assert merges_of(gh, 1) == []
+
+
+def test_cascade_refuses_a_lone_conflict_without_merging():
+    gh = FakeRepo([PR(1, status="DIRTY")])
+    code, said = casc(gh, ["1"])
+    assert code == 3 and "refused" in said and not gh.prs["1"].merged
+    assert not any(c[:2] == ["pr", "merge"] for c in gh.calls)
+
+
+def test_cascade_handles_a_strict_rule_that_puts_the_rest_behind():
+    gh = FakeRepo([PR(1), PR(2), PR(3)], strict=True)
+    code, said = casc(gh, ["1", "2", "3"])
+    assert code == 0 and all(gh.prs[n].merged for n in ("1", "2", "3"))
+    updated = [c[2] for c in gh.calls if c[:2] == ["pr", "update-branch"]]
+    assert "2" in updated and "3" in updated          # each later one was behind after a merge
+    assert all(len(merges_of(gh, n)) == 1 for n in ("1", "2", "3"))
+
+
+def test_cascade_confirms_production_after_the_last_merge():
+    gh = FakeRepo([PR(1)], checks="success", deployment="success")
+    code, said = casc(gh, ["1"], confirm_prod=True)
+    assert code == 0 and "deployment succeeded" in said
+    assert any(c[0] == "api" and "deployments" in c[1] for c in gh.calls)
+
+
+def test_cascade_reports_a_failed_production_deployment():
+    gh = FakeRepo([PR(1)], deployment="failure")
+    code, said = casc(gh, ["1"], confirm_prod=True)
+    assert gh.prs["1"].merged                          # the merge happened
+    assert code == 7 and "failure" in said
+
+
+def test_cascade_times_out_with_a_pull_request_still_waiting():
+    gh = FakeRepo([PR(1, status="BLOCKED", blocked_polls=0)])   # never clears
+    code, said = casc(gh, ["1"], timeout_s=50)
+    assert code == 2 and "still waiting" in said and not gh.prs["1"].merged
+
+
+def test_confirm_production_needs_both_checks_and_the_deployment():
+    ok, msg = merge.confirm_production("owner/repo", "abc", gh=FakeRepo([], checks="success", deployment="success"),
+                                       sleep=lambda s: None, clock=lambda: 0.0)
+    assert ok and "passed its checks" in msg
+    ok, msg = merge.confirm_production("owner/repo", "abc", gh=FakeRepo([], checks="failure"),
+                                       sleep=lambda s: None, clock=lambda: 0.0)
+    assert not ok and "did not pass" in msg
