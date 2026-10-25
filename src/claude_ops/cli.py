@@ -202,7 +202,8 @@ def cmd_merge(a) -> int:
         code, said = merge.merge_when_green(a.numbers[0], a.repo, method=a.method,
                                             timeout_s=a.timeout * 60, poll_s=a.poll,
                                             allow_no_checks=a.allow_no_checks,
-                                            dependency_bump=a.dependency_bump)
+                                            dependency_bump=a.dependency_bump,
+                                            dependency_bots=tuple(merge.dependency_bump.UPDATERS) + tuple(a.bot or ()))
         print(said, file=sys.stdout if code == 0 else sys.stderr)
         return code
     if a.dependency_bump or a.allow_no_checks:
@@ -297,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dependency-bump", choices=("patch", "minor"), default=None,
                    help="merge only a bot's update of lockfiles and manifests up to this level "
                         "(exit 6 otherwise; one pull request only)")
+    s.add_argument("--bot", action="append", metavar="LOGIN",
+                   help="another updater whose pull requests --dependency-bump may merge, by the login gh "
+                        "prints (Dependabot and Renovate are known); repeatable")
     s.add_argument("--confirm-prod", action="store_true",
                    help="after the last merge, wait for that commit's checks and a deployment of it to succeed")
     s.add_argument("--prod-environment",

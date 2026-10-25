@@ -35,6 +35,7 @@ import subprocess
 import time
 
 from . import dependency_bump
+from . import dependency_bump as dependency_bump_mod
 
 #: a check counts as passed only with one of these conclusions
 PASSED = {"SUCCESS", "SKIPPED"}
@@ -105,6 +106,7 @@ def allowed_methods(repo: str | None, gh) -> list[str]:
 def merge_when_green(number: str, repo: str | None = None, *, method: str = "merge",
                      timeout_s: float = 1800, poll_s: float = 20, settle_s: float = 60,
                      allow_no_checks: bool = False, dependency_bump: str | None = None,
+                     dependency_bots=None,
                      gh=None, env: dict | None = None, sleep=time.sleep,
                      clock=time.monotonic) -> tuple[int, str]:
     """Wait for every check on the pull request's head, then merge it if all passed.
@@ -118,9 +120,11 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
     if dependency_bump is not None:
         try:
             pr = _view(number, repo, gh, GATE_FIELDS)
+            diff = _diff(number, repo, gh)
         except RuntimeError as e:
             return 4, f"could not read the pull request: {e}"
-        gate = dependency_bump_review(pr, dependency_bump)
+        gate = dependency_bump_review(pr, dependency_bump, diff,
+                                      dependency_bots or dependency_bump_mod.UPDATERS)
         if not gate.ok:
             return 6, "not merged on its own: " + gate.reason
     if method == "auto":
@@ -165,9 +169,17 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
     return 0, f"merged {head[:12]} as {oid[:12]} ({method}), every check on it passed"
 
 
-def dependency_bump_review(pr: dict, up_to: str) -> dependency_bump.Verdict:
+def _diff(number: str, repo: str | None, gh) -> str:
+    r = gh(["pr", "diff", str(number)] + (["--repo", repo] if repo else []))
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[:300])
+    return r.stdout
+
+
+def dependency_bump_review(pr: dict, up_to: str, diff: str | None = None,
+                           bots=dependency_bump.UPDATERS) -> dependency_bump.Verdict:
     """The gate `--dependency-bump` applies, over a pull request read with GATE_FIELDS."""
-    return dependency_bump.review_pr(pr, up_to=up_to)
+    return dependency_bump.review_pr(pr, up_to=up_to, diff=diff, bots=bots)
 
 
 # ---------------------------------------------------------------------------
