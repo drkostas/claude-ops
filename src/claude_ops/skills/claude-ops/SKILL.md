@@ -304,8 +304,14 @@ update.restart_tmux(pid, "claude-<name>", chat_id)     # the same, inside the ch
   `restart_iterm` sends SIGTERM, waits for the shell, and types the resume line.
 - A resume loses the permission mode the chat was switched to. `permission_mode` reads it from the
   footer first. `resume_line` keeps the start flags it knows (name, Remote Control, model, the skip
-  permission flags) and drops the rest, because `ps` prints a first prompt without its quotes and
-  its first word would arrive as a new message.
+  permission flags, a settings file, a chat's own MCP servers) and drops the rest, because `ps` prints
+  a first prompt without its quotes and its first word would arrive as a new message.
+- Every chat starts every MCP server its configuration names, and with many chats open that is a lot
+  of memory (one copy of each server per chat). Start a chat with only the servers in a file of its
+  own (`claude_command(..., mcp_config=<file>)`, which adds `--strict-mcp-config --mcp-config <file>`).
+  A restart keeps both flags, so a changed set is a rewritten file and a restart.
+  `resume_line(..., mcp_config=<file>)` gives a running chat its own file at its next restart, and
+  `mcp_config=False` gives it every server again.
 - A chat is also busy while a background agent it started writes (`background_agent`: a file
   under `<chat id>/subagents/` written in the last two minutes). The agent runs inside the chat's
   process and dies with it, and it never writes to the chat's own transcript.
