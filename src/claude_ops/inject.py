@@ -181,6 +181,23 @@ def send_tmux(name: str, text: str, enter: bool, *, env: Mapping[str, str] | Non
     return r.returncode == 0, r.stderr.strip()[:300]
 
 
+#: the keys `press` sends, by their tmux names
+KEYS = ("Escape",)
+
+
+def press(target: str, key: str, *, transport: str = "tmux",
+          env: Mapping[str, str] | None = None) -> tuple[bool, str]:
+    """Press one key in a tmux session: Escape, to close a menu without choosing anything in it
+    (`update.rc_menu`). Nothing is typed and nothing is logged, since a key carries no text. Look at
+    the screen first: in a session at work, Escape stops its turn."""
+    if key not in KEYS:
+        raise ValueError(f"press sends {', '.join(KEYS)}, not {key!r}")
+    if transport != "tmux":
+        raise ValueError(f"press reaches tmux sessions only, not {transport}")
+    r = subprocess.run([TMUX, "-u", "send-keys", "-t", target, key], capture_output=True, text=True, env=env)
+    return r.returncode == 0, r.stderr.strip()[:300]
+
+
 def _log(entry: dict, log: Path) -> None:
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as f:
