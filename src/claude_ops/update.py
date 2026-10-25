@@ -1060,16 +1060,14 @@ def _text_of(d: dict) -> str:
     return c if isinstance(c, str) else ""
 
 
-def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
-    """The transient API error a conversation stopped on, or None.
+def newest_api_error(path: Path | None, scan: int = 2000) -> dict | None:
+    """The API error a conversation's turn ended on, of any kind, or None.
 
-    When the connection to the API drops mid-turn ("API Error: Connection lost mid-response"),
-    Claude Code ends the turn with an assistant record marked `isApiErrorMessage`, and the session
-    then waits at its prompt as if it had finished. This answers {"uuid", "at", "error", "text"} when
-    that record is the conversation's newest message (nothing typed or queued after it) and its error
-    is transient: the text starts with "API Error:" and the kind is not one of NOT_TRANSIENT. A usage
-    limit ("You've hit your session limit"), a prompt that is too long, billing or an expired login
-    are not, since asking again cannot help. At most `scan` lines are read from the end."""
+    Claude Code ends a turn the API refused with an assistant record marked `isApiErrorMessage`, and
+    the session then waits at its prompt as if it had finished. This answers {"uuid", "at", "error",
+    "text"} when that record is the conversation's newest message (nothing typed or queued after it,
+    and a subagent's record does not count). `error` is Claude Code's kind ("server_error",
+    "rate_limit", "authentication_failed", ...). At most `scan` lines are read from the end."""
     if path is None:
         return None
     try:
@@ -1084,14 +1082,36 @@ def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
                 continue
             if d.get("type") != "assistant" or not d.get("isApiErrorMessage"):
                 return None
-            text = _text_of(d).strip()
-            if not text.startswith("API Error:") or d.get("error") in NOT_TRANSIENT:
-                return None
             return {"uuid": d.get("uuid"), "at": d.get("timestamp"), "error": d.get("error"),
-                    "text": text}
+                    "text": _text_of(d).strip()}
     except OSError:
         return None
     return None
+
+
+def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
+    """The transient API error a conversation stopped on, or None.
+
+    When the connection to the API drops mid-turn ("API Error: Connection lost mid-response"), the
+    session waits at its prompt as if it had finished (newest_api_error). This answers that error
+    when it is transient: the text starts with "API Error:" and the kind is not one of NOT_TRANSIENT.
+    A usage limit ("You've hit your session limit"), a prompt that is too long, billing or an expired
+    login are not, since asking again cannot help."""
+    err = newest_api_error(path, scan)
+    if not err or not err["text"].startswith("API Error:") or err["error"] in NOT_TRANSIENT:
+        return None
+    return err
+
+
+def stopped_on_login_error(path: Path | None, scan: int = 2000) -> dict | None:
+    """The login error a conversation stopped on ("Login expired · Please run /login"), or None.
+
+    A session whose login expired or was revoked ends every turn this way and answers nothing until
+    it is signed in again, and a running session does not read a login put back after it signed
+    itself out: it needs a restart. Answers newest_api_error's record when its kind is
+    authentication_failed. login_lost reads the same from a screen; this needs no terminal."""
+    err = newest_api_error(path, scan)
+    return err if err and err["error"] == "authentication_failed" else None
 
 
 def continue_after_error(err: dict | None, answered: str | None, told: int, *,
