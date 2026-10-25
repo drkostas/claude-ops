@@ -79,8 +79,10 @@ def parse_inspect(text: str) -> dict[str, dict]:
         parts = line.split("\t")
         if len(parts) < 2 or not parts[0].strip():
             continue
-        out[parts[0].strip()[:12]] = {"auto_remove": parts[1].strip().lower() == "true",
-                                      "compose": parts[2].strip() if len(parts) > 2 else ""}
+        compose = parts[2].strip() if len(parts) > 2 else ""
+        if compose in ("<no value>", "<nil>"):      # how docker's template prints a label that is not there
+            compose = ""
+        out[parts[0].strip()[:12]] = {"auto_remove": parts[1].strip().lower() == "true", "compose": compose}
     return out
 
 
