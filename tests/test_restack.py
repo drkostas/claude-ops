@@ -67,3 +67,34 @@ def test_the_command_line(tmp_path, capsys):
     lines = out.splitlines()
     assert "kept both sides in list.txt" in lines
     assert [line.split()[0] for line in lines if not line.startswith("kept")] == ["one", "two"]
+
+
+def test_upstream_moves_every_commit_after_a_rewritten_base(tmp_path):
+    """The pull request below merged with its commit rewritten: only the commits after its old head
+    move, settled one by one, and the old commit does not come back."""
+    repo, one, two = stack(tmp_path)
+    old_head = git(one, "rev-parse", "HEAD").strip()
+    commit(two, "notes.txt", "1\n", "first note")
+    commit(two, "list.txt", "a\nb\nc\nd\n", "add d")
+    # the base takes "add b" as a new commit of its own, and gains another line at the end
+    commit(repo, "list.txt", "a\nz\nb\n", "add b (squashed)")
+    commit(repo, "list.txt", "a\nz\nb\ny\n", "add y")
+    said = []
+    assert restack.restack("main", [two], upstream=old_head, env=ENV, say=said.append) == 0
+    assert git(two, "log", "--format=%s", "main..two").split() == ["add", "d", "first", "note", "add", "c"]
+    assert (two / "list.txt").read_text() == "a\nz\nb\ny\nc\nd\n"
+    assert said and said[-1].startswith("two ")
+
+
+def test_upstream_on_the_command_line(tmp_path, capsys):
+    repo, one, two = stack(tmp_path)
+    old_head = git(one, "rev-parse", "HEAD").strip()
+    commit(repo, "list.txt", "a\nz\nb\n", "add b (squashed)")
+    old = dict(os.environ)
+    os.environ.update(ENV)
+    try:
+        assert cli.main(["restack", "main", str(two), "--upstream", old_head]) == 0
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
+    assert git(two, "log", "--format=%s", "main..two").strip() == "add c"

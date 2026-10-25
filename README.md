@@ -141,6 +141,8 @@ claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps 
   through.
 - `restack <base> <worktree>...` rebuilds a stack of one-commit branches on a new base, bottom first,
   settling add-only conflicts with `union`, and stops at the first one that needs a person.
+  `--upstream COMMIT` moves every commit after COMMIT for a bottom branch of several commits, such as
+  one whose base pull request merged with its commits rewritten.
 - `plan-apply` applies a written plan's `(Write `path`)` and `(Edit on `path`)` steps exactly, and
   stops at the first step that cannot be applied.
 
