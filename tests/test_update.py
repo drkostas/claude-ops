@@ -250,6 +250,23 @@ def test_restart_iterm_terminates_waits_and_types_the_resume_line(monkeypatch):
     assert typed == ["cd /work/soma && claude -n soma --permission-mode plan --resume NEW"]
 
 
+def test_restart_iterm_comes_back_in_the_mode_the_supervisor_chooses(monkeypatch):
+    typed, state = [], {"claude": True}
+    monkeypatch.setattr(cu, "screen_of", lambda kind, h, env=None: "⏵⏵ accept edits on")
+    monkeypatch.setattr(cu, "process_args", lambda pid, env=None: "claude -n soma --resume OLD")
+    monkeypatch.setattr(cu.os, "kill", lambda pid, sig: state.update(claude=False))
+    monkeypatch.setattr(cu._inject, "iterm_sessions", lambda env=None: {
+        "ABC": {"name": "soma (2.1.294)" if state["claude"] else "soma (-zsh)"}})
+    monkeypatch.setattr(cu._inject, "send_iterm",
+                        lambda sid, text, enter, env=None: (typed.append(text), state.update(claude=True)) and (True, "sent"))
+    monkeypatch.setattr(cu.time, "sleep", lambda s: None)
+    seen = []
+    ok, _ = cu.restart_iterm(100, "ABC", "/work/soma", "NEW", stop_s=5, back_s=5,
+                             choose_mode=lambda m: seen.append(m) or ("plan" if m == "plan" else "bypassPermissions"))
+    assert ok and seen == ["acceptEdits"]
+    assert typed == ["cd /work/soma && claude -n soma --permission-mode bypassPermissions --resume NEW"]
+
+
 def test_remote_control_of_reads_the_newest_bridge_status(tmp_path):
     t = tmp_path / "chat.jsonl"
     active = {"type": "system", "subtype": "bridge_status",
