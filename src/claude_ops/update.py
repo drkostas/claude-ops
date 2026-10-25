@@ -1266,13 +1266,18 @@ def _wait(pred: Callable[[], bool], seconds: float, step: float = 2.0) -> bool:
 
 def restart_iterm(pid: int, session_id: str, cwd: str, chat_id: str, *,
                   env: Mapping[str, str] | None = None, stop_s: float = 30,
-                  back_s: float = 90) -> tuple[bool, str]:
+                  back_s: float = 90, choose_mode=None) -> tuple[bool, str]:
     """End the chat in an iTerm2 session and resume the same conversation there.
 
     The permission mode is read from the footer and the start flags from the process, the process
     gets SIGTERM, and once the session is back at a shell the resume line is typed into it. The
-    answer is (back at Claude's prompt, what happened)."""
+    answer is (back at Claude's prompt, what happened). `choose_mode(seen)` turns the mode read from
+    the footer (None when it shows none) into the one the chat comes back in, for a supervisor
+    whose rule is not "the mode it was in" (keep plan mode, say, and bring every other chat back in
+    one mode); without it the chat comes back in the mode it was in."""
     mode = permission_mode(screen_of("iterm", session_id, env=env))
+    if choose_mode is not None:
+        mode = choose_mode(mode)
     args = process_args(pid, env=env)
     transcript = transcript_of(chat_id)
     rc = remote_control_of(transcript) or None
