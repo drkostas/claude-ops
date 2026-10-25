@@ -84,17 +84,37 @@ def test_a_young_container_is_never_an_orphan():
 
 
 class FakeRun:
-    def __init__(self, docker_ps: str, ps: str, fail_docker: bool = False):
+    def __init__(self, docker_ps: str, ps: str, fail_docker: bool = False, inspect: str | None = None):
         self.docker_ps, self.ps, self.fail_docker, self.calls = docker_ps, ps, fail_docker, []
+        self.inspect = inspect
 
     def __call__(self, args, **kw):
         self.calls.append(list(args))
         if args[:2] == ["docker", "ps"]:
             return subprocess.CompletedProcess(args, 1 if self.fail_docker else 0, "" if self.fail_docker else self.docker_ps,
                                                "Cannot connect to the Docker daemon" if self.fail_docker else "")
+        if args[:2] == ["docker", "inspect"]:
+            # every container asked about was started as docker run --rm, outside compose, unless told otherwise
+            text = self.inspect if self.inspect is not None else "".join(f"{cid}\ttrue\t\n" for cid in args[3:])
+            return subprocess.CompletedProcess(args, 0, text, "")
         if args[:2] == ["docker", "stop"]:
             return subprocess.CompletedProcess(args, 0, "\n".join(args[2:]) + "\n", "")
         return subprocess.CompletedProcess(args, 0, self.ps, "")
+
+
+def test_only_run_rm_containers_outside_compose_are_looked_at(capsys):
+    # ⛔ a wiki, its database and a notifier run by compose have no client by design: never orphans
+    now = time.time()
+    old = datetime.fromtimestamp(now - 30 * 3600, TZ)
+    listing = (docker_line("mcporphan01", old) + "\n" + docker_line("wikiservice", old, "ghcr.io/example/wiki") + "\n"
+               + docker_line("plainrun001", old, "ghcr.io/example/plain") + "\n")
+    inspect = "mcporphan01\ttrue\t\nwikiservice\tfalse\twiki\nplainrun001\tfalse\t\n"
+    fake = FakeRun(listing, "", inspect=inspect)
+    containers, _clients = mc.read(fake)
+    assert [c["id"] for c in containers] == ["mcporphan01"]
+    assert mc.main(["--stop"], runner=fake, now=now) == 0
+    assert ["docker", "stop", "mcporphan01"] in fake.calls and not any("wikiservice" in c for c in fake.calls if c[:2] == ["docker", "stop"])
+    assert mc.run_rm_only(mc.parse_containers(listing), {}) == [], "a container inspect did not describe is left out"
 
 
 def test_main_lists_and_stops_only_with_the_flag(capsys):
@@ -106,6 +126,7 @@ def test_main_lists_and_stops_only_with_the_flag(capsys):
     assert mc.main([], runner=fake, now=now) == 0
     out = capsys.readouterr().out
     assert "orphan1" in out and "kept1" not in out and "5 h old" in out
+    assert any(c[:3] == ["docker", "inspect", "--format"] for c in fake.calls), "each container is inspected first"
     assert not any(c[:2] == ["docker", "stop"] for c in fake.calls)
     assert mc.main(["--stop", "--json"], runner=fake, now=now) == 0
     out = capsys.readouterr().out
@@ -121,7 +142,7 @@ def test_the_environment_given_reaches_every_command():
 
     mc.read(runner, {"PATH": "/usr/bin"})
     mc.stop(["x"], runner, {"PATH": "/usr/bin"})
-    assert seen == [{"PATH": "/usr/bin"}] * 3
+    assert seen == [{"PATH": "/usr/bin"}] * 3        # docker ps, ps (no containers, so no inspect), docker stop
     mc.read(runner)
     assert seen[-1] is None
 
