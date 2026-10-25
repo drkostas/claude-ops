@@ -13,6 +13,8 @@ def check_run(name, status="COMPLETED", conclusion="SUCCESS"):
     return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion}
 
 
+BOT_DIFF = ("diff --git a/web/package.json b/web/package.json\n--- a/web/package.json\n+++ b/web/package.json\n"
+            "@@ -10,3 +10,3 @@\n   \"dependencies\": {\n-    \"next\": \"16.3.8\",\n+    \"next\": \"16.4.1\",\n")
 BOT_PR = {"title": "chore(deps): bump next from 16.3.8 to 16.4.1 in /web", "body": "",
           "author": {"login": "app/dependabot", "is_bot": True},
           "files": [{"path": "web/package.json"}, {"path": "web/package-lock.json"}],
@@ -23,12 +25,14 @@ class FakeGh:
     """gh with a pull request whose checks move through `views`, one per look. `pr` is what the
     dependency gate reads; `allowed` what `repo view` says the repository permits."""
 
-    def __init__(self, views, merge_code=0, pr=None, allowed=("merge", "squash", "rebase")):
+    def __init__(self, views, merge_code=0, pr=None, allowed=("merge", "squash", "rebase"), diff=None):
         self.views, self.calls, self.merge_code, self.merged = list(views), [], merge_code, False
-        self.pr, self.allowed = pr or BOT_PR, allowed
+        self.pr, self.allowed, self.diff = pr or BOT_PR, allowed, BOT_DIFF if diff is None else diff
 
     def __call__(self, args):
         self.calls.append(args)
+        if args[:2] == ["pr", "diff"]:
+            return run(out=self.diff)
         if args[:2] == ["pr", "merge"]:
             self.merged = self.merge_code == 0
             return run(self.merge_code, err="" if self.merge_code == 0 else "head moved")
@@ -118,6 +122,17 @@ def test_dependency_bump_merges_only_a_bots_update_within_the_level():
     gh = FakeGh([[check_run("tests")]], pr=person)
     code, said = go(gh, dependency_bump="minor")
     assert code == 6 and "not by a bot" in said and not any(c[:2] == ["pr", "merge"] for c in gh.calls)
+    sneaky = BOT_DIFF + "diff --git a/web/package-lock.json b/web/package-lock.json\n@@ -1,2 +1,2 @@\n     \"node_modules/left-pad\": {\n-      \"version\": \"1.3.0\",\n+      \"version\": \"2.0.0\",\n"
+    gh = FakeGh([[check_run("tests")]], diff=sneaky)
+    code, said = go(gh, dependency_bump="minor")
+    assert code == 6 and "left-pad" in said and "do not name" in said, "the diff is read, not only the text"
+    assert any(c[:2] == ["pr", "diff"] for c in gh.calls)
+    app = dict(BOT_PR, author={"login": "app/some-app", "is_bot": True})
+    code, said = go(FakeGh([[check_run("tests")]], pr=app), dependency_bump="minor")
+    assert code == 6 and "not by a bot" in said, "an App that is not a named updater is not a bot here"
+    code, said = go(FakeGh([[check_run("tests")]], pr=app), dependency_bump="minor",
+                    dependency_bots=merge.dependency_bump.UPDATERS + ("app/some-app",))
+    assert code == 0, "unless the caller names it"
     code_change = dict(BOT_PR, files=BOT_PR["files"] + [{"path": "web/src/app.ts"}])
     code, said = go(FakeGh([[check_run("tests")]], pr=code_change), dependency_bump="minor")
     assert code == 6 and "web/src/app.ts" in said
