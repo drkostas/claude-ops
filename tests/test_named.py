@@ -106,3 +106,8 @@ def test_resume_command_reopens_on_the_model_and_effort_it_last_ran_on():
     assert (chat.resume_command("ops", "ID", None, remote_control=False, settings="/s.json",
                                 model="claude-sonnet-5", effort="high")
             == "claude --settings /s.json --resume ID -n ops")
+    assert (chat.resume_command("ops", "ID", None, remote_control=False, effort="max", ultracode=True)
+            == "claude --resume ID -n ops --effort max --settings '{\"ultracode\":true}'"), \
+        "ultracode comes back on, as the settings Claude Code reads it from"
+    assert (chat.resume_command("ops", "ID", None, remote_control=False, settings="/s.json", ultracode=True)
+            == "claude --settings /s.json --resume ID -n ops"), "never a second settings flag"
