@@ -165,14 +165,31 @@ def test_heavy_queue(monkeypatch):
 
     # --- ⭐ the turn: round robin across chats, oldest first within a chat ------------------------
     log = STATE / "order.log"
+    go = STATE / "go"
     job = ["bash", "-c", f'echo "$0" >> {log}; sleep 0.6']
-    first = start("busy", "first", "--", "bash", "-c", f'echo busy-1 >> {log}; sleep 3')
-    time.sleep(0.5)                                       # busy-1 holds the slot while the rest queue
+
+    def soon(cond, timeout=30.0):
+        end = time.time() + timeout
+        while time.time() < end and not cond():
+            time.sleep(0.05)
+        return cond()
+
+    def waiting():
+        return len(list((STATE / "queue").glob("*.json")))     # a job that took the slot has no ticket
+
+    # busy-1 holds the slot until every job below is in the queue, however slow the machine is
+    first = start("busy", "first", "--", "bash", "-c",
+                  f'echo busy-1 >> {log}; until [ -e {go} ]; do sleep 0.1; done')
+    check(soon(lambda: log.exists() and "busy-1" in log.read_text()), "busy-1 holds the slot")
     a = []
-    for i in (1, 2, 3):                                   # apart, so their tickets keep this order
+    for i in (1, 2, 3):
+        # each only once the one before is in the queue: started 0.3 s apart on a slow runner,
+        # a2's ticket was written before a1's, and a2 ran first
         a.append(start("chat-a", f"a{i}", "--", *job, f"a{i}"))
-        time.sleep(0.3)
+        check(soon(lambda i=i: waiting() == i), f"a{i} waits in the queue")
     b = start("chat-b", "b1", "--", *job, "b1")           # queued after all three of chat-a
+    check(soon(lambda: waiting() == 4), "b1 waits in the queue")
+    go.touch()
     for q in [first, *a, b]:
         q.wait(timeout=60)
     order = log.read_text().split()
