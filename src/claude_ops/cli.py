@@ -386,7 +386,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "adb-reach": ("adb", "reach an Android device over adb again after a restart undid tcpip"),
          "messages": ("messages", "what the person typed into chats, and the conversation around it"),
          "tracebacks": ("tracebacks", "Python tracebacks in log files, new since an offset, grouped"),
-         "changelog": ("changelog", "the pull requests merged between two commits, oldest first")}
+         "changelog": ("changelog", "the pull requests merged between two commits, oldest first"),
+         "mcp-park": ("mcp_park", "move MCP servers between the configuration and a parked file, or keep only some")}
 
 
 def main(argv: list[str] | None = None) -> int:

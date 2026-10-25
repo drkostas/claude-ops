@@ -165,6 +165,27 @@ never an orphan. Each is matched to a live `docker run` client of the same image
 seconds of it; one with no client is an orphan. A container younger than `--min-age` minutes (120)
 is left alone, since its client may still be starting.
 
+## Park the MCP servers most chats do not use
+
+```bash
+claude-ops mcp-park list                       # configured and parked servers
+claude-ops mcp-park keep github context7 tavily   # park every configured server but these
+claude-ops mcp-park unpark playwright          # put one back for every chat
+```
+
+Claude Code starts every MCP server `~/.claude.json` names, in every session, so with many sessions
+open each runs its own copy of each server, used or not. `mcp-park` moves a server's definition (its
+command, arguments and keys) to `~/.claude/mcp-parked.json`, where no session starts it, and back.
+A session that needs a parked server can be given it alone with `--mcp-config <file>`, built from
+`mcp_park.definitions()`. Passed without `--strict-mcp-config` (`chat.claude_command(...,
+mcp_strict=False)`), the file joins the configured servers, and plugin servers and connectors still load.
+
+Running sessions rewrite `~/.claude.json` every minute or two, so it is changed with
+`config.update_json`. The file is read whole, rebuilt from what was read, written beside it and
+renamed over it only while it still holds those bytes, and read and rebuilt again when another
+program wrote meanwhile. A copy of what it replaced is kept unless `--no-backup` is given. The
+parked file is written with mode 0600, since definitions hold keys.
+
 ## One Tavily server for several keys
 
 Each Tavily API key has its own usage limit. One MCP server per key means one process per key in every chat, and moving to the next server by hand when one says its limit is reached. `claude_ops.tavily` is one MCP server that holds all the keys and moves to the next by itself when Tavily refuses a key for its limit (HTTP 429, 432 or 433) or as invalid (401). It offers the tools of the tavily-mcp package, with the same names and arguments (`tavily_search`, `tavily_extract`, `tavily_crawl`, `tavily_map`, `tavily_research`), and needs nothing beyond the standard library.
