@@ -196,7 +196,8 @@ def _mcp(mcp_config: str | None, strict: bool = True) -> list[str]:
 
 def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
                    settings: str | None = None, mcp_config: str | None = None,
-                   mcp_strict: bool = True) -> str:
+                   mcp_strict: bool = True, model: str | None = None,
+                   effort: str | None = None) -> str:
     """The command that starts a named chat: `claude -n <name>`, with Remote Control under the same
     name (it works inside tmux), and `--permission-mode <mode>` when a mode is given.
 
@@ -211,9 +212,16 @@ def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
     (`--strict-mcp-config --mcp-config <file>`), and a restart keeps both flags. With
     `mcp_strict=False` it starts them beside the servers its configuration names (`--mcp-config
     <file>` alone), so plugin servers and connectors still load; a server in the file replaces a
-    configured one of the same name."""
+    configured one of the same name.
+
+    `model` and `effort` start the chat on that model and effort level (`--model`, `--effort`) in
+    place of the settings' default, as `resume_command` reopens one. With `settings`, the settings
+    file decides the model, so neither is added. A restart keeps them, since `update.model_of` reads
+    both back from the conversation."""
     parts = (["claude"] + (["--settings", settings] if settings else []) + _mcp(mcp_config, mcp_strict)
              + ["-n", name])
+    if not settings:
+        parts += (["--model", model] if model else []) + (["--effort", effort] if effort else [])
     if remote_control:
         parts += ["--remote-control", name]
     if mode:
