@@ -78,3 +78,15 @@ def test_main_refuses_with_exit_2_and_fails_open(tmp_path, monkeypatch, capsys):
     assert pv.main(["--config", os.devnull]) == 2 and "broken across lines" in capsys.readouterr().err
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert pv.main([]) == 0
+
+
+def test_a_file_is_checked_with_file_and_an_unreadable_one_is_refused(tmp_path, capsys):
+    cfg = tmp_path / "plain.json"
+    cfg.write_text(json.dumps({"patterns": [{"regex": "—", "why": "an em-dash"}]}))
+    good, bad = tmp_path / "good.md", tmp_path / "bad.md"
+    good.write_text("Title\n\nOne paragraph on one line.\n")
+    bad.write_text("Title\n\nOne thing — another.\n")
+    assert pv.main(["--config", str(cfg), "--file", str(good)]) == 0
+    assert pv.main(["--config", str(cfg), "--file", str(bad)]) == 2 and "an em-dash" in capsys.readouterr().err
+    assert pv.main(["--file", str(tmp_path / "missing.md")]) == 2 and "could not be read" in capsys.readouterr().err
+    assert pv.check_text(WRAPPED, pv.Config(), "the body").startswith("the body has a paragraph broken")
