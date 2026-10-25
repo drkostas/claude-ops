@@ -82,12 +82,22 @@ Every send is written to `~/.local/state/claude-ops/inject.jsonl` before it happ
 ```bash
 claude-ops merge 123                                   # the repository of the current folder
 claude-ops merge 123 --repo owner/name --method squash # waits up to 30 minutes for running checks
+claude-ops merge 123 --repo owner/name --method auto --dependency-bump minor   # a bot's update only
 ```
 
 It waits for every check on the pull request's current head, refuses if any did not pass or if
 there are none, and merges that exact head (`--match-head-commit`), so a push in between is refused.
 Exit codes: 0 merged, 2 still running or no checks, 3 a check failed, 4 the merge was refused,
-5 not open.
+5 not open, 6 not the dependency update asked for.
+
+`--method auto` uses the first of merge, squash and rebase the repository allows, so one command
+serves repositories with different settings. `--dependency-bump patch` or `minor` merges only a
+dependency update a program may take on its own: opened by a bot (Dependabot, Renovate), changing
+only lockfiles and dependency manifests, every bump named in its title or body ("bump X from A to
+B") within that level, with a 0.x version's second number counted as major. Anything else, a source
+or workflow file in the change, a bump that cannot be read, a larger move, exits 6 with the reason,
+before any waiting. In Python, `dependency_bump.review(title, body, files, author, up_to=)` is the
+same reading, and `merge.pull_request(number, repo)` reads a pull request with the fields it needs.
 
 ## Find general code in a private project
 

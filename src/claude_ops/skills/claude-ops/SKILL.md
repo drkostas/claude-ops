@@ -464,7 +464,12 @@ separate steps can merge a pull request whose checks went red in between, or who
 from a shortened log. The command waits for every check on the current head, refuses any that did
 not pass and a pull request with no checks, and merges that exact head with `--match-head-commit`.
 Read its exit code: 0 merged, 2 still running or no checks, 3 a check failed (its names are
-printed), 4 the merge was refused, 5 not open.
+printed), 4 the merge was refused, 5 not open, 6 not the dependency update asked for.
+
+A bot's dependency update (Dependabot, Renovate) is merged with `--dependency-bump patch` or
+`minor`: the command refuses, with the reason, anything that is not a bot's change of lockfiles and
+manifests alone within that level, so a chat does not have to read the files and the versions
+itself. `--method auto` takes the first merge method the repository allows.
 
 ## Repository tools: union, secret-shapes, mutate, plan-apply
 
