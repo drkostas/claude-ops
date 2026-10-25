@@ -19,7 +19,22 @@ These were tried and rejected.
 - A cloud cron runs somewhere that cannot reach this machine or its terminal.
 
 So the scheduler (launchd, cron or systemd) does the polling, and it is silent when nothing is new.
-When something is new, `claude-ops inject` pastes one prompt into the chat and submits it.
+When something is new, one prompt reaches the chat: through the chats' message queue when the
+machine has one, else pasted into the chat by `claude-ops inject`.
+
+## Queue first, paste second
+
+A paste gets one try at the moment the job runs. A chat that is busy, that is asking its user a
+question, or whose user is typing, misreads the text or loses it, and a job that fires at a fixed
+time has no second try until its next run (a weekly reminder sent twice on one evening lost the
+week). When the machine keeps a queue for its chats (a record that holds each message and delivers
+it when the chat is free and not asking anything), hand the prompt to that queue and treat the
+queue's acceptance as sent. The queue also keeps one copy of the same text while it is open, so a
+job that fires twice sends once. Paste only where no queue exists, or for what is a paste by nature
+(a chat's own resume line, a test typing into a throwaway chat).
+
+`claude_ops.watch.run_source` takes `send=`: a function of the target and the text that returns
+`{"result": "sent"}` once the message is handed over, whatever carries it.
 
 ## The sender
 
@@ -62,7 +77,8 @@ Things that went wrong with senders like this one.
 2. Send only when there is something, with a prompt that says what to check and that the chat
    should reason first and act second.
 3. Advance the seen-set ONLY after the send returned "sent". A closed chat or a failed send keeps
-   the items, so the next run offers them again and nothing is lost.
+   the items, so the next run offers them again and nothing is lost. "sent" means handed over (to
+   the queue, or pasted), never read.
 4. The first run records what is already there and sends nothing.
 5. Take a lock, so two scheduled runs do not both send.
 6. Count failures per source. After a few failed runs in a row, send one alert into the chat, so an
@@ -73,7 +89,8 @@ Things that went wrong with senders like this one.
    timestamp each time, and one cleanup job failed on every run with an error only its own log held.
    Read the log once after installing the job, and check the job reports what it did.
 
-`claude_ops.watch` does steps 3 to 6 for you.
+`claude_ops.watch` does steps 3 to 6 for you. Pass `send=` to hand the prompt to a queue instead
+of pasting it.
 
 ```python
 from pathlib import Path

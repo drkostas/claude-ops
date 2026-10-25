@@ -85,6 +85,10 @@ def run_source(state: State, source: str, fetch, describe, target: str, *, trans
     """Check one source and wake the chat if it has new items.
 
     fetch() returns a list of item ids (or raises). describe(new_ids) returns the prompt text.
+    send(target, text, transport=...) carries the prompt and returns {"result": "sent"} once it is
+    handed over: the default pastes it into the chat (inject); pass your own to hand it to a message
+    queue the chats read from, which keeps it until the chat is free and sends one copy of the same
+    text while it is open. The seen-set advances only on "sent".
     """
     try:
         ids = list(fetch())
