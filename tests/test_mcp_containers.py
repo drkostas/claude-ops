@@ -102,6 +102,13 @@ class FakeRun:
         return subprocess.CompletedProcess(args, 0, self.ps, "")
 
 
+def test_a_missing_compose_label_prints_as_no_value_and_means_none():
+    # docker's template prints "<no value>" for a label that is not there: that container is run --rm
+    got = mc.parse_inspect("abc123def456\ttrue\t<no value>\nfed654cba321\ttrue\twiki\n")
+    assert got["abc123def456"] == {"auto_remove": True, "compose": ""}
+    assert got["fed654cba321"]["compose"] == "wiki"
+
+
 def test_only_run_rm_containers_outside_compose_are_looked_at(capsys):
     # ⛔ a wiki, its database and a notifier run by compose have no client by design: never orphans
     now = time.time()
