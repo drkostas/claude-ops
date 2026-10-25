@@ -12,13 +12,15 @@ start, and for a process, the version it runs and when it started.
 """
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import hashlib
 import json
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 HOME = Path.home()
@@ -194,3 +196,64 @@ def snapshot() -> dict[str, str | None]:
         "plugins_digest": digest_json(PLUGINS),
         "instructions_digest": digest_files(instruction_files(GLOBAL_MD)),
     }
+
+
+# ---------------------------------------------------------------- writing the configuration
+
+class ConfigChanged(RuntimeError):
+    """The file kept changing under each try, and nothing was written."""
+
+
+def update_json(path: os.PathLike | str, change: Callable[[dict], "dict | None"], *,
+                backup: os.PathLike | str | None = None, tries: int = 3) -> dict:
+    """Rewrite a JSON object file that other programs also rewrite, without losing their writes.
+    `change` gets a copy of the parsed object and returns the object to write, or None to leave the
+    file as it is. Returns {"changed", "backup", "mtime_ns"}.
+
+    ⚠️ RUNNING CLAUDE CODE PROCESSES REWRITE `~/.claude.json` EVERY MINUTE OR TWO. So the file is read
+    whole, `change` builds the new object from what was read, the result is written to a temporary
+    file beside it, and only while the file still holds the bytes that were read is the temporary
+    file renamed over it (one atomic step, keeping the original's mode). A file that changed in
+    between is read again and `change` called again, `tries` times, then ConfigChanged is raised with
+    nothing written. An object `change` leaves equal is not written at all.
+
+    `backup`, when given, receives the exact bytes the write replaced, with the file's mode. A
+    missing file, or one that is not a JSON object, raises ValueError."""
+    path = Path(path)
+    backed_up = None
+    for _ in range(max(1, tries)):
+        try:
+            raw = path.read_bytes()
+        except OSError as e:
+            raise ValueError(f"{path} cannot be read: {e.strerror or type(e).__name__}") from None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise ValueError(f"{path} is not JSON") from None
+        if not isinstance(data, dict):
+            raise ValueError(f"{path} does not hold a JSON object")
+        new = change(copy.deepcopy(data))
+        if new is None or new == data:
+            return {"changed": False, "backup": backed_up, "mtime_ns": path.stat().st_mtime_ns}
+        text = json.dumps(new, indent=2) + ("\n" if raw.endswith(b"\n") else "")
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+            if path.read_bytes() != raw:
+                os.unlink(tmp)
+                continue            # another program wrote meanwhile: start from what it wrote
+            if backup is not None:  # the bytes this write replaces, exactly
+                Path(backup).write_bytes(raw)
+                os.chmod(backup, path.stat().st_mode & 0o7777)
+                backed_up = str(backup)
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        return {"changed": True, "backup": backed_up, "mtime_ns": path.stat().st_mtime_ns}
+    raise ConfigChanged(f"{path} changed under each of {tries} tries; nothing was written")
