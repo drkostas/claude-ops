@@ -112,6 +112,20 @@ def test_main_lists_and_stops_only_with_the_flag(capsys):
     assert '"stopped": ["orphan1"]' in out and ["docker", "stop", "orphan1"] in fake.calls
 
 
+def test_the_environment_given_reaches_every_command():
+    seen = []
+
+    def runner(args, **kw):
+        seen.append(kw.get("env"))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    mc.read(runner, {"PATH": "/usr/bin"})
+    mc.stop(["x"], runner, {"PATH": "/usr/bin"})
+    assert seen == [{"PATH": "/usr/bin"}] * 3
+    mc.read(runner)
+    assert seen[-1] is None
+
+
 def test_main_says_when_docker_does_not_answer(capsys):
     assert mc.main([], runner=FakeRun("", "", fail_docker=True)) == 2
     assert "docker ps failed" in capsys.readouterr().err

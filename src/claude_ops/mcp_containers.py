@@ -24,7 +24,7 @@ import json
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 
 #: docker ps prints this (the zone name after the offset is ignored)
@@ -120,20 +120,23 @@ def orphans(containers: list[dict], clients: list[dict], now: float | None = Non
     return out
 
 
-def read(runner: Runner = subprocess.run) -> tuple[list[dict], list[dict]]:
-    """(containers, clients) from this machine. Raises RuntimeError when docker does not answer."""
-    r = runner(["docker", "ps", "--format", PS_FORMAT], capture_output=True, text=True, timeout=30)
+def read(runner: Runner = subprocess.run, env: Mapping[str, str] | None = None) -> tuple[list[dict], list[dict]]:
+    """(containers, clients) from this machine; `env` is the environment the two commands run with
+    (the caller's when None). Raises RuntimeError when docker does not answer."""
+    kw = {"capture_output": True, "text": True, "env": None if env is None else dict(env)}
+    r = runner(["docker", "ps", "--format", PS_FORMAT], timeout=30, **kw)
     if r.returncode != 0:
         raise RuntimeError(f"docker ps failed: {(r.stderr or '').strip()[:200]}")
-    p = runner(["ps", "-Ao", "lstart=,command="], capture_output=True, text=True, timeout=10)
+    p = runner(["ps", "-Ao", "lstart=,command="], timeout=10, **kw)
     return parse_containers(r.stdout), parse_clients(p.stdout)
 
 
-def stop(ids: Sequence[str], runner: Runner = subprocess.run) -> list[str]:
+def stop(ids: Sequence[str], runner: Runner = subprocess.run, env: Mapping[str, str] | None = None) -> list[str]:
     """Stop these containers; `--rm` then removes them. Returns the ids docker reported stopped."""
     if not ids:
         return []
-    r = runner(["docker", "stop", *ids], capture_output=True, text=True, timeout=120)
+    r = runner(["docker", "stop", *ids], capture_output=True, text=True, timeout=120,
+               env=None if env is None else dict(env))
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 
@@ -143,7 +146,8 @@ def words(found: list[dict]) -> str:
     return "\n".join(f"{c['id']}  {c['image']}  {int(c['age_s'] // 3600)} h old" for c in found)
 
 
-def main(argv: list[str] | None = None, runner: Runner = subprocess.run, now: float | None = None) -> int:
+def main(argv: list[str] | None = None, runner: Runner = subprocess.run, now: float | None = None,
+         env: Mapping[str, str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="claude-ops mcp-containers",
                                 description="list or stop the MCP server containers no live chat runs")
     p.add_argument("--stop", action="store_true", help="stop the orphans (docker stop)")
@@ -152,12 +156,12 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run, now: fl
     p.add_argument("--json", action="store_true", help="print one JSON object")
     a = p.parse_args(argv)
     try:
-        containers, clients = read(runner)
+        containers, clients = read(runner, env)
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
         return 2
     found = orphans(containers, clients, now, min_age_s=a.min_age * 60)
-    stopped = stop([c["id"] for c in found], runner) if a.stop else []
+    stopped = stop([c["id"] for c in found], runner, env) if a.stop else []
     if a.json:
         print(json.dumps({"running": len(containers), "clients": len(clients), "orphans": found,
                           "stopped": stopped}))
