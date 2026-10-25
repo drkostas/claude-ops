@@ -199,6 +199,12 @@ def cmd_merge(a) -> int:
     return code
 
 
+def cmd_mcp_containers(a) -> int:
+    from . import mcp_containers
+    argv = (["--stop"] if a.stop else []) + ["--min-age", str(a.min_age)] + (["--json"] if a.json else [])
+    return mcp_containers.main(argv)
+
+
 def cmd_stall(a) -> int:
     from . import watch
     r = watch.stall(Path(a.path), minutes=a.minutes, max_hours=a.max_hours,
@@ -313,6 +319,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--max", type=int, default=200)
     s.set_defaults(func=cmd_restore)
+
+    s = sub.add_parser("mcp-containers", help="list or stop the MCP server containers no live chat runs")
+    s.add_argument("--stop", action="store_true", help="stop the orphans (docker stop)")
+    s.add_argument("--min-age", type=float, default=120, metavar="MINUTES",
+                   help="leave a container younger than this alone (default 120)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_mcp_containers)
 
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
