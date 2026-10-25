@@ -130,6 +130,12 @@ def test_resume_line_keeps_gives_and_removes_a_chats_own_mcp_servers():
     # and False starts it again with every server its configuration names
     assert cu.resume_line(own, "U", mcp_config=False) == "claude -n x --resume U"
     assert cu.resume_line("claude -n x", "U", mcp_config=False) == "claude -n x --resume U"
+    # with mcp_strict=False a file joins the configured servers: no --strict-mcp-config, and a chat
+    # started strict loses the flag at its restart
+    assert (cu.resume_line("claude -n x", "U", mcp_config="/m/x.json", mcp_strict=False)
+            == "claude -n x --mcp-config /m/x.json --resume U")
+    assert (cu.resume_line(own, "U", mcp_config="/m/b.json", mcp_strict=False)
+            == "claude --mcp-config /m/b.json -n x --resume U")
     assert cu.permission_mode("❯ \n────") is None
 
 

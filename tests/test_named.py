@@ -32,6 +32,19 @@ def test_commands_give_a_chat_only_the_mcp_servers_in_its_file():
         "claude --strict-mcp-config --mcp-config /m/soma.json -n soma --resume ID"
 
 
+def test_commands_can_give_a_chat_its_file_beside_the_configured_servers():
+    assert (chat.claude_command("soma", None, remote_control=False, mcp_config="/m/soma.json",
+                                mcp_strict=False) == "claude --mcp-config /m/soma.json -n soma")
+    assert (chat.resume_command("soma", "ID", None, remote_control=False, mcp_config="/m/soma.json",
+                                mcp_strict=False) == "claude --mcp-config /m/soma.json --resume ID -n soma")
+    assert chat.claude_command("soma", None, remote_control=False, mcp_strict=False) == "claude -n soma"
+    # and a restart keeps the file without adding --strict-mcp-config
+    from claude_ops import update
+    started = chat.claude_command("soma", None, remote_control=False, mcp_config="/m/soma.json",
+                                  mcp_strict=False)
+    assert update.resume_line(started, "ID") == "claude --mcp-config /m/soma.json -n soma --resume ID"
+
+
 def test_rc_url_is_the_last_bridge_status(tmp_path):
     t = tmp_path / "c.jsonl"
     rows = [{"type": "system", "subtype": "bridge_status", "url": "https://claude.ai/code/first"},
