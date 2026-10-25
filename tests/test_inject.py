@@ -166,6 +166,48 @@ def test_a_long_message_reaches_tmux(tmp_path):
         shutil.rmtree(short, ignore_errors=True)
 
 
+def test_press_sends_one_escape_to_a_tmux_session(tmp_path):
+    """The program in the pane reads one escape byte and nothing else: no Enter, no text."""
+    import os
+    import shutil
+    import tempfile
+    import time
+    if not shutil.which("tmux"):
+        pytest.skip("no tmux")
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}   # a private server, as above
+    short = tempfile.mkdtemp(prefix="co-", dir="/tmp")
+    env["TMUX_TMPDIR"] = short
+    out = tmp_path / "key.bin"
+    subprocess.run(["tmux", "-u", "new-session", "-d", "-s", "claude-k",
+                    f"stty raw -echo; head -c 2 > {out}"], check=True, env=env)
+    try:
+        # the key must arrive after stty, or the terminal keeps it waiting for a whole line
+        for _ in range(50):
+            now = subprocess.run(["tmux", "display-message", "-p", "-t", "claude-k", "#{pane_current_command}"],
+                                 capture_output=True, text=True, env=env).stdout.strip()
+            if now == "head":
+                break
+            time.sleep(0.1)
+        ok, why = inject.press("claude-k", "Escape", env=env)
+        assert ok, why
+        subprocess.run(["tmux", "send-keys", "-t", "claude-k", "-l", "z"], env=env)   # marks the end
+        for _ in range(50):
+            if out.exists() and out.stat().st_size >= 2:
+                break
+            time.sleep(0.1)
+        assert out.read_bytes() == b"\x1bz"
+    finally:
+        subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_press_sends_only_the_keys_it_names():
+    with pytest.raises(ValueError):
+        inject.press("claude-k", "Enter")
+    with pytest.raises(ValueError):
+        inject.press("S1", "Escape", transport="iterm")
+
+
 def test_no_test_reaches_the_real_tmux_server():
     """conftest's guard: $TMUX is unset and TMUX_TMPDIR is private while the suite runs, so a
     `tmux kill-server` in a test can only end a server the test made."""

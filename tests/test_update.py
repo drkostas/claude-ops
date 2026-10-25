@@ -123,6 +123,34 @@ def test_empty_prompt():
     assert not cu.empty_prompt(None)[0]
 
 
+#: the menu a session opens for /remote-control while its Remote Control is on (the link is invented)
+RC_MENU_SCREEN = """⏺ Done, the tests pass.
+
+   This session is available in the Claude mobile app and at https://example.org/s/abc123.
+
+     Disconnect this session
+     Show QR code   Scan with your phone to open this session
+   ❯ Continue
+
+   Enter to select · Esc to continue
+"""
+
+
+def test_the_remote_control_menu_is_seen_and_reads_as_a_question():
+    assert cu.rc_menu(RC_MENU_SCREEN)
+    # its "❯ Continue" is the menu's cursor, not text typed into the input line
+    assert cu.empty_prompt(RC_MENU_SCREEN) == (False, cu.ASKING)
+    closed = ("⏺ Done, the tests pass.\n  /remote-control is active · Continue here, on your phone, "
+              "or at https://example.org/s/abc123\n───\n❯ \n───\n  ⏵⏵ accept edits on")
+    assert not cu.rc_menu(closed) and cu.empty_prompt(closed)[0]
+    # the same words in a conversation are no menu, and neither is another menu that continues
+    talk = "⏺ It offers Disconnect this session, and Esc to continue.\n───\n❯ \n───\n  ⏵⏵ accept edits on"
+    assert not cu.rc_menu(talk) and cu.empty_prompt(talk)[0]
+    other = "Pick one\n❯ First\n  Second\nEnter to select · Esc to continue"
+    assert not cu.rc_menu(other) and cu.empty_prompt(other) == (False, cu.ASKING)
+    assert not cu.rc_menu(None) and not cu.rc_menu("")
+
+
 RULE = "\x1b[38;5;244m" + "─" * 40
 FOOTER = "\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m"
 
