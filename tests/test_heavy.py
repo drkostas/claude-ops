@@ -238,10 +238,30 @@ def test_heavy_queue(monkeypatch):
     heavy("release", "--pid", str(holder_proc.pid)); holder_proc.kill(); holder_proc.wait()
     p.wait(timeout=20)
 
+    def status_until(cond, timeout=30.0, **extra):
+        """status, read again until `cond` holds for it or `timeout` passes. A waiter writes its
+        ticket at its first poll, which a loaded machine reaches later than a fixed sleep allowed."""
+        end = time.time() + timeout
+        while True:
+            st = heavy("status", **extra)[1]
+            if cond(st) or time.time() > end:
+                return st
+            time.sleep(0.2)
+
+    def held_since(what):
+        """When a waiter's own limits began to hold it, as its ticket says; None before it says."""
+        for t in (STATE / "queue").glob("*.json"):
+            try:
+                w = json.loads(t.read_text())
+            except (OSError, ValueError):
+                continue
+            if w.get("what") == what and (w.get("held") or {}).get("at"):
+                return float(w["held"]["at"])
+        return None
+
     # --- ⭐ a waiter held by its own limits does not hold up the others ---------------------------
     big = start("big-chat", "needs 50 GB", "--", "true", HEAVY_MIN_FREE_GB="50")
-    time.sleep(1)
-    rc, st = heavy("status")
+    st = status_until(lambda s: "held by its own limits" in s and "needs 50" in s)
     check("held by its own limits" in st and "needs 50" in st,
           f"status says a waiter is held by its own limits: {st.strip()[-160:]!r}")
     t0 = time.time()
@@ -254,8 +274,11 @@ def test_heavy_queue(monkeypatch):
     # --- a limit out of reach is said once ----------------------------------------------------------
     out_of_reach = start("big-chat", "needs 50 GB", "--", "true", HEAVY_MIN_FREE_GB="50",
                          HEAVY_OWN_LIMIT_NOTE_MIN="0.03", HEAVY_FAKE_MACHINE="10.6 2 50")
-    time.sleep(3.5)                                    # past the 1.8 s note threshold, with polls to spare
-    rc, st = heavy("status")
+    st = status_until(lambda s: "the most memory free in that time 10.6 GB" in s)
+    # the note is said at the first poll 1.8 s (0.03 min) after its limits began to hold it, which
+    # its ticket names: timed from its start instead, a loaded machine had not reached it yet
+    at = held_since("needs 50 GB") or time.time()
+    time.sleep(max(0.0, at + 1.8 + 4.0 - time.time()))
     check("held by its own limits" in st and "the most memory free in that time 10.6 GB" in st,
           f"status shows how long and the most memory free beside the waiter: {st.strip()[-190:]!r}")
     out_of_reach.terminate()
@@ -289,8 +312,7 @@ def test_heavy_queue(monkeypatch):
     check("past its turn of 0.02 min" in st, f"status marks a holder past its turn: {st.splitlines()[1][:140]!r}")
     beside = start("b-chat", "next job", "--", "bash", "-c", f"echo ran-beside; until [ -e {STATE}/stop-beside ]; do sleep 0.2; done",
                        HEAVY_TURN_MIN="0.02")   # runs until the checks below are done, however slow the machine
-    time.sleep(2)
-    rc, st = heavy("status", HEAVY_TURN_MIN="0.02")
+    st = status_until(lambda s: "slot: b-chat: next job" in s, HEAVY_TURN_MIN="0.02")
     check("slot: b-chat: next job" in st and "past its turn, still running: a-chat: emulator session" in st,
           f"⭐ past its turn, the next waiter takes the slot and starts beside it: {st.strip()[-170:]!r}")
     check(session.poll() is None, "and the job past its turn is never stopped for it")
