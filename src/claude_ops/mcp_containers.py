@@ -170,6 +170,10 @@ def read(runner: Runner = subprocess.run, env: Mapping[str, str] | None = None) 
             raise RuntimeError(f"docker inspect failed: {(i.stderr or '').strip()[:200]}")
         containers = run_rm_only(containers, parse_inspect(i.stdout))
     p = runner(["ps", "-Ao", "lstart=,command="], timeout=10, **kw)
+    # a process list that failed is not an empty one: read as "no live client", it would make every
+    # container an orphan, the running sessions' included, and a caller that stops orphans would stop them
+    if p.returncode != 0:
+        raise RuntimeError(f"ps failed: {(p.stderr or '').strip()[:200]}")
     return containers, parse_clients(p.stdout)
 
 
