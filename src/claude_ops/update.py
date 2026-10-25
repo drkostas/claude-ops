@@ -573,7 +573,7 @@ def background_agent(chat_id: str, now: float | None = None, projects: Path = PR
 def resume_line(args: str | None, chat_id: str, mode: str | None = None,
                 remote_control: str | bool | None = None, model: str | None = None,
                 effort: str | None = None, name: str | None = None,
-                mcp_config: str | bool | None = None) -> str:
+                mcp_config: str | bool | None = None, mcp_strict: bool = True) -> str:
     """The command that reopens this conversation with the flags it was started with.
 
     `args` is the process's command line (`ps -o args=`), and `mode` the permission mode it was
@@ -586,7 +586,8 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
 
     A chat started with its own MCP servers (`--strict-mcp-config --mcp-config <file>`) keeps them.
     `mcp_config` changes that: a file gives the chat only the servers in it from this restart on, and
-    False starts it again with every MCP server its configuration names."""
+    False starts it again with every MCP server its configuration names. With `mcp_strict=False` a
+    file gives the chat its servers beside the configured ones, and `--strict-mcp-config` goes."""
     argv = (args or "").split()
     out = ["claude"]
     if argv and Path(argv[0]).name == "claude":
@@ -631,8 +632,10 @@ def resume_line(args: str | None, chat_id: str, mode: str | None = None,
         if "--strict-mcp-config" in out:
             out.remove("--strict-mcp-config")
     elif isinstance(mcp_config, str):
-        if "--strict-mcp-config" not in out:
+        if mcp_strict and "--strict-mcp-config" not in out:
             out.append("--strict-mcp-config")
+        elif not mcp_strict and "--strict-mcp-config" in out:
+            out.remove("--strict-mcp-config")
         put("--mcp-config", mcp_config)
     tail = ["--permission-mode", mode] if mode else []
     return shlex.join(out + tail + ["--resume", chat_id])
