@@ -208,31 +208,56 @@ def unwrap(words: list[str]) -> list[str]:
     return words[i:]
 
 
-def expand(path: str) -> str:
+#: a variable in a word: $NAME or ${NAME}
+VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+#: words that may stand before the assignments of a line that only sets variables
+DECLARE = {"export", "local", "declare", "readonly", "typeset"}
+
+
+def expand(path: str, names: dict | None = None) -> str:
+    """`path` with ~ and its variables expanded: those the line assigned itself first (`names`),
+    then the environment's."""
+    if names:
+        path = VARIABLE.sub(lambda m: names.get(m.group(1) or m.group(2), m.group(0)), path)
     return os.path.expandvars(os.path.expanduser(path))
 
 
-def change_dir(here: str, args: list[str]) -> str:
+def change_dir(here: str, args: list[str], names: dict | None = None) -> str:
     """Where a `cd` leaves the shell. `cd -` and a target that cannot be read leave it where it was."""
     targets = [a for a in args if not a.startswith("-") or a == "-"]
     if not targets:
         return os.path.expanduser("~")
     if targets[0] == "-":
         return here
-    if not any(c in targets[0] for c in "$`*?"):
+    target = expand(targets[0], names) if names else targets[0]
+    if not any(c in target for c in "$`*?"):
         # a plain path is where the shell goes, even when it does not exist yet (`mkdir -p x && cd x`)
-        return os.path.normpath(os.path.join(here, expand(targets[0])))
-    return folder(here, targets[0])
+        return os.path.normpath(os.path.join(here, expand(target)))
+    return folder(here, target)
 
 
-def folder(here: str, target: str) -> str:
+def folder(here: str, target: str, names: dict | None = None) -> str:
     """The folder a `cd` or `-C` names, or `here` when it is not one (a `$(...)`, a variable the
     hook cannot read, a path that does not exist): the shell's own folder is the best guess."""
-    cand = os.path.normpath(os.path.join(here, expand(target)))
+    cand = os.path.normpath(os.path.join(here, expand(target, names)))
     return cand if os.path.isdir(cand) else here
 
 
-def parse_git(args: list[str], here: str) -> dict | None:
+def assignments(words: list[str], names: dict) -> dict | None:
+    """The variables a command that only sets them assigns (`L=~/x`, `export A=1 B=$A`), each
+    expanded with what the line set before; None for any other command. A line such as
+    `L=~/repo; git -C "$L" ...` names its folder this way."""
+    rest = words[1:] if words and words[0] in DECLARE else words
+    if not rest or not all(ASSIGNMENT.match(w) for w in rest):
+        return None
+    out = dict(names)
+    for w in rest:
+        key, value = w.split("=", 1)
+        out[key] = expand(value, out)
+    return out
+
+
+def parse_git(args: list[str], here: str, names: dict | None = None) -> dict | None:
     """One git command: the folder it runs in (after `-C`), the global options to run git the same
     way again, its subcommand and the subcommand's words. None when there is no subcommand."""
     where, passed = here, []
@@ -244,11 +269,11 @@ def parse_git(args: list[str], here: str) -> dict | None:
                 return None
             v = args[i + 1]
             if a == "-C":
-                where = folder(where, v)
+                where = folder(where, v, names)
             elif a == "-c":
                 passed += [a, v]
             else:
-                passed += [a, expand(v)]
+                passed += [a, expand(v, names)]
             i += 2
             continue
         if a not in GIT_GLOBAL_DROPPED:
@@ -261,24 +286,29 @@ def parse_git(args: list[str], here: str) -> dict | None:
 
 def steps(command: str, cwd: str):
     """Each simple command on the line (as parse gives it, its words unwrapped) with the folder it
-    runs in. `cd`, `pushd` and `popd` are followed and not given out."""
-    here, stack = cwd, []
+    runs in, and `names`, the variables the line assigned before it. `cd`, `pushd` and `popd` are
+    followed and not given out, and neither is a command that only sets variables."""
+    here, stack, names = cwd, [], {}
     for cmd in parse(command):
+        set_now = assignments(cmd["words"], names)
+        if set_now is not None:
+            names = set_now
+            continue
         words = unwrap(cmd["words"])
         if not words:
             continue
         name = os.path.basename(words[0])
         if name == "cd":
-            here = change_dir(here, words[1:])
+            here = change_dir(here, words[1:], names)
         elif name == "pushd":
             stack.append(here)
-            here = change_dir(here, words[1:])
+            here = change_dir(here, words[1:], names)
         elif name == "popd":
             here = stack.pop() if stack else here
         else:
             front = cmd["words"][:len(cmd["words"]) - len(words)]
             env = dict(w.split("=", 1) for w in front if ASSIGNMENT.match(w))
-            yield dict(cmd, words=words, env=env), here
+            yield dict(cmd, words=words, env=env, names=dict(names)), here
 
 
 def walk(command: str, cwd: str):
@@ -323,9 +353,10 @@ def git_invocations(command: str, cwd: str) -> list[dict]:
     for cmd, here in steps(command, cwd):
         words = cmd["words"]
         if os.path.basename(words[0]) == "git":
-            inv = parse_git(words[1:], here)
+            inv = parse_git(words[1:], here, cmd.get("names"))
             if inv:
                 inv["stdin"] = cmd["heredoc"]
+                inv["names"] = cmd.get("names") or {}
                 found.append(inv)
     return found
 
