@@ -186,8 +186,13 @@ def listing(*, env: Mapping[str, str] | None = None) -> list[dict]:
     return [{"tmux": n, **v} for n, v in sorted(tmux_sessions(env=env).items()) if n.startswith("claude-")]
 
 
+def _mcp(mcp_config: str | None) -> list[str]:
+    """The flags that give a chat only the MCP servers in `mcp_config`, or none without a file."""
+    return ["--strict-mcp-config", "--mcp-config", mcp_config] if mcp_config else []
+
+
 def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
-                   settings: str | None = None) -> str:
+                   settings: str | None = None, mcp_config: str | None = None) -> str:
     """The command that starts a named chat: `claude -n <name>`, with Remote Control under the same
     name (it works inside tmux), and `--permission-mode <mode>` when a mode is given.
 
@@ -196,8 +201,12 @@ def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
 
     `settings` is a settings file for this chat alone (`--settings <file>`), for example one that
     sends its requests to a local model. It is a flag rather than environment, so it shows in the
-    chat's command line and a restart keeps it (`update.KEEP_FLAGS`)."""
-    parts = ["claude"] + (["--settings", settings] if settings else []) + ["-n", name]
+    chat's command line and a restart keeps it (`update.KEEP_FLAGS`).
+
+    `mcp_config` is a file of MCP servers for this chat alone: the chat starts only those
+    (`--strict-mcp-config --mcp-config <file>`), and a restart keeps both flags."""
+    parts = (["claude"] + (["--settings", settings] if settings else []) + _mcp(mcp_config)
+             + ["-n", name])
     if remote_control:
         parts += ["--remote-control", name]
     if mode:
@@ -207,12 +216,12 @@ def claude_command(name: str, mode: str | None, *, remote_control: bool = True,
 
 def resume_command(name: str, chat_id: str, mode: str | None, *, remote_control: bool = True,
                    settings: str | None = None, model: str | None = None,
-                   effort: str | None = None) -> str:
+                   effort: str | None = None, mcp_config: str | None = None) -> str:
     """The command that reopens conversation `chat_id` under the same name, in the mode given
     (read a running chat's mode with `update.permission_mode` before ending it). `model` and
     `effort` reopen it on what it last ran on (`update.model_of`). With `settings`, the settings
     file decides the model, so neither is added."""
-    parts = (["claude"] + (["--settings", settings] if settings else [])
+    parts = (["claude"] + (["--settings", settings] if settings else []) + _mcp(mcp_config)
              + ["--resume", chat_id, "-n", name])
     if not settings:
         parts += (["--model", model] if model else []) + (["--effort", effort] if effort else [])

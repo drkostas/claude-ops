@@ -20,6 +20,18 @@ def test_commands_carry_the_mode_only_when_given():
     assert chat.resume_command("soma", "ID", None) == "claude --resume ID -n soma --remote-control soma"
 
 
+def test_commands_give_a_chat_only_the_mcp_servers_in_its_file():
+    assert (chat.claude_command("soma", None, remote_control=False, mcp_config="/m/soma.json")
+            == "claude --strict-mcp-config --mcp-config /m/soma.json -n soma")
+    assert (chat.resume_command("soma", "ID", None, remote_control=False, mcp_config="/m/soma.json")
+            == "claude --strict-mcp-config --mcp-config /m/soma.json --resume ID -n soma")
+    # and the restart of such a chat keeps both flags (update.KEEP_FLAGS)
+    from claude_ops import update
+    started = chat.claude_command("soma", None, remote_control=False, mcp_config="/m/soma.json")
+    assert update.resume_line(started, "ID") == \
+        "claude --strict-mcp-config --mcp-config /m/soma.json -n soma --resume ID"
+
+
 def test_rc_url_is_the_last_bridge_status(tmp_path):
     t = tmp_path / "c.jsonl"
     rows = [{"type": "system", "subtype": "bridge_status", "url": "https://claude.ai/code/first"},

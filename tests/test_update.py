@@ -115,6 +115,21 @@ def test_resume_line_and_permission_mode():
             == "claude --settings /s.json -n x --resume U")
     assert cu.resume_line("/opt/homebrew/bin/node something", "U") == "claude --resume U"
     assert cu.permission_mode("x\n  ⏵⏵ bypass permissions on (shift+tab to cycle)") == "bypassPermissions"
+
+
+def test_resume_line_keeps_gives_and_removes_a_chats_own_mcp_servers():
+    own = "claude --strict-mcp-config --mcp-config /m/a.json -n x"
+    # a chat started with its own MCP servers keeps them across a restart
+    assert cu.resume_line(own, "U") == "claude --strict-mcp-config --mcp-config /m/a.json -n x --resume U"
+    # a chat started with every server is given its own file from this restart on
+    assert (cu.resume_line("claude -n x", "U", mcp_config="/m/x.json")
+            == "claude -n x --strict-mcp-config --mcp-config /m/x.json --resume U")
+    # another file replaces the one it had, never beside it
+    assert (cu.resume_line(own, "U", mcp_config="/m/b.json")
+            == "claude --strict-mcp-config --mcp-config /m/b.json -n x --resume U")
+    # and False starts it again with every server its configuration names
+    assert cu.resume_line(own, "U", mcp_config=False) == "claude -n x --resume U"
+    assert cu.resume_line("claude -n x", "U", mcp_config=False) == "claude -n x --resume U"
     assert cu.permission_mode("❯ \n────") is None
 
 
