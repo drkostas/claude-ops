@@ -13,23 +13,35 @@ def check_run(name, status="COMPLETED", conclusion="SUCCESS"):
     return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion}
 
 
-class FakeGh:
-    """gh with a pull request whose checks move through `views`, one per look."""
+BOT_PR = {"title": "chore(deps): bump next from 16.3.8 to 16.4.1 in /web", "body": "",
+          "author": {"login": "app/dependabot", "is_bot": True},
+          "files": [{"path": "web/package.json"}, {"path": "web/package-lock.json"}],
+          "url": "https://github.com/owner/repo/pull/7"}
 
-    def __init__(self, views, merge_code=0):
+
+class FakeGh:
+    """gh with a pull request whose checks move through `views`, one per look. `pr` is what the
+    dependency gate reads; `allowed` what `repo view` says the repository permits."""
+
+    def __init__(self, views, merge_code=0, pr=None, allowed=("merge", "squash", "rebase")):
         self.views, self.calls, self.merge_code, self.merged = list(views), [], merge_code, False
+        self.pr, self.allowed = pr or BOT_PR, allowed
 
     def __call__(self, args):
         self.calls.append(args)
         if args[:2] == ["pr", "merge"]:
             self.merged = self.merge_code == 0
             return run(self.merge_code, err="" if self.merge_code == 0 else "head moved")
+        if args[:2] == ["repo", "view"]:
+            return run(out=json.dumps({"mergeCommitAllowed": "merge" in self.allowed,
+                                       "squashMergeAllowed": "squash" in self.allowed,
+                                       "rebaseMergeAllowed": "rebase" in self.allowed}))
         if self.merged:
             return run(out=json.dumps({"state": "MERGED", "headRefOid": "abc123def4567",
                                        "mergeCommit": {"oid": "fedcba9876543"}}))
         rollup = self.views.pop(0) if len(self.views) > 1 else self.views[0]
         return run(out=json.dumps({"state": "OPEN", "headRefOid": "abc123def4567",
-                                   "statusCheckRollup": rollup}))
+                                   "statusCheckRollup": rollup, **self.pr}))
 
 
 def go(gh, **kw):
@@ -84,3 +96,38 @@ def test_a_refused_merge_is_reported():
 def test_an_unknown_method_is_refused():
     code, _ = go(FakeGh([[check_run("tests")]]), method="fast-forward")
     assert code == 2
+
+
+def test_auto_picks_the_first_method_the_repository_allows():
+    gh = FakeGh([[check_run("tests")]], allowed=("squash", "rebase"))
+    code, said = go(gh, method="auto")
+    assert code == 0 and "(squash)" in said
+    assert "--squash" in [c for c in gh.calls if c[:2] == ["pr", "merge"]][0]
+    code, said = go(FakeGh([[check_run("tests")]], allowed=()), method="auto")
+    assert code == 4 and "no merge method" in said
+
+
+def test_dependency_bump_merges_only_a_bots_update_within_the_level():
+    gh = FakeGh([[check_run("tests")]])
+    code, said = go(gh, dependency_bump="minor")
+    assert code == 0 and gh.calls[0][:3] == ["pr", "view", "7"] and "files" in gh.calls[0][4], \
+        "the gate reads the pull request with its title, author and files first"
+    code, said = go(FakeGh([[check_run("tests")]]), dependency_bump="patch")
+    assert code == 6 and "minor bump: next 16.3.8 to 16.4.1" in said
+    person = dict(BOT_PR, author={"login": "someone", "is_bot": False})
+    gh = FakeGh([[check_run("tests")]], pr=person)
+    code, said = go(gh, dependency_bump="minor")
+    assert code == 6 and "not by a bot" in said and not any(c[:2] == ["pr", "merge"] for c in gh.calls)
+    code_change = dict(BOT_PR, files=BOT_PR["files"] + [{"path": "web/src/app.ts"}])
+    code, said = go(FakeGh([[check_run("tests")]], pr=code_change), dependency_bump="minor")
+    assert code == 6 and "web/src/app.ts" in said
+    gh = FakeGh([[check_run("tests", conclusion="FAILURE")]])
+    code, said = go(gh, dependency_bump="minor")
+    assert code == 3, "the gate passing never skips the checks"
+
+
+def test_pull_request_reads_the_gate_fields():
+    gh = FakeGh([[check_run("tests")]])
+    pr = merge.pull_request("7", "owner/repo", gh=gh)
+    assert pr["title"] == BOT_PR["title"] and gh.calls[0][4] == merge.GATE_FIELDS and gh.calls[0][-1] == "owner/repo"
+    assert merge.dependency_bump_review(pr, "minor").ok

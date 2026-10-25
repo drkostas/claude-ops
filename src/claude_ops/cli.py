@@ -194,7 +194,8 @@ def cmd_rover(a) -> int:
 def cmd_merge(a) -> int:
     from . import merge
     code, said = merge.merge_when_green(a.number, a.repo, method=a.method, timeout_s=a.timeout * 60,
-                                        allow_no_checks=a.allow_no_checks)
+                                        allow_no_checks=a.allow_no_checks,
+                                        dependency_bump=a.dependency_bump)
     print(said, file=sys.stdout if code == 0 else sys.stderr)
     return code
 
@@ -270,10 +271,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("merge", help="merge a pull request only when every check on its head passed")
     s.add_argument("number", help="the pull request number")
     s.add_argument("--repo", help="owner/name (default: the repository of the current folder)")
-    s.add_argument("--method", choices=("merge", "squash", "rebase"), default="merge")
+    s.add_argument("--method", choices=("merge", "squash", "rebase", "auto"), default="merge",
+                   help="auto: the first of merge, squash and rebase the repository allows")
     s.add_argument("--timeout", type=float, default=30, help="minutes to wait for running checks")
     s.add_argument("--allow-no-checks", action="store_true",
                    help="merge a pull request that has no checks at all")
+    s.add_argument("--dependency-bump", choices=("patch", "minor"), default=None,
+                   help="merge only a bot's update of lockfiles and manifests up to this level (exit 6 otherwise)")
     s.set_defaults(func=cmd_merge)
 
     s = sub.add_parser("stall", help="wait on a session's transcript until it finishes, stops on an "
