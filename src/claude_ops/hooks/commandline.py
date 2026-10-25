@@ -7,7 +7,8 @@ bodies set aside and redirections dropped), the folder each one runs in (`cd`, `
 the tracked changes for `-a`, what a `git add` on the same line would stage (untracked files read
 from the working tree, since the add has not run yet when a hook runs), and the paths the commit
 names. `writes` gives the text a line writes into files through here-documents and `echo` or
-`printf` redirected to a file.
+`printf` redirected to a file or piped into `tee`, and `push_plans` with `pushed` give what a
+`git push` would publish: the commits no remote-tracking ref has yet.
 
 Everything here fails soft: a line that cannot be read gives nothing, and a git call that fails,
 or takes longer than GIT_TIMEOUT_S, gives nothing.
@@ -24,15 +25,17 @@ import subprocess
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 #: a redirection operator, as the shell splitter hands it over (its target word is dropped too)
 REDIRECT = re.compile(r"^(\d*[<>]{1,3}&?|&>>?|<&|>&|>\|)$")
+#: a whole word that is a filesystem path (where things go, not what is said about them)
+PATH_WORD = re.compile(r"(?<![^\s'\"=])(?:/|~/|\$HOME/)[^\s'\"]*")
 #: the characters whose runs separate simple commands (a newline is one of them)
 SEPARATORS = set(";&|\n")
 #: a backslash before a newline is a line continuation, which the shell removes (an even run of
 #: backslashes before the newline is not one)
 CONTINUATION = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
 #: a here-document: its body is data, never shell words, so it is set aside before splitting
-HEREDOC = re.compile(r"(<<-?[ \t]*\\?(['\"]?)(\w+)\2[^\n]*\n)(?:.*?\n)?[ \t]*\3[ \t]*(?=\n|$)", re.S)
+HEREDOC = re.compile(r"(<<-?[ \t]*\\?(['\"]?)([^\s'\"<>|&;()]+)\2[^\n]*\n)(?:.*?\n)?\t*\3(?=\n|$)", re.S)
 #: a here-document in parts: the operator, the delimiter, the rest of the line it starts on, the body
-HEREDOC_PARTS = re.compile(r"(<<-?)[ \t]*\\?(['\"]?)(\w+)\2([^\n]*\n)(.*?\n)?[ \t]*\3[ \t]*(?=\n|$)", re.S)
+HEREDOC_PARTS = re.compile(r"(<<-?)[ \t]*\\?(['\"]?)([^\s'\"<>|&;()]+)\2([^\n]*\n)(.*?\n)?\t*\3(?=\n|$)", re.S)
 #: the word that stands for a set-aside here-document body while the line is split
 HEREDOC_MARK = re.compile(r"__heredoc_(\d+)__")
 #: redirections whose target is a file the command writes (a duplication such as `2>&1` is not)
@@ -42,6 +45,17 @@ NOT_FILES = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "-"}
 #: `git ... commit|tag|notes` seen in the text, for a line that could not be read as words
 GIT_PUBLISHING = re.compile(r"\bgit\b[^\n;&|]*\b(commit|tag|notes)\b")
 #: words that may stand before `git` on a command line without changing what it does
+#: programs that run the command after them, with the options of theirs that take a value and how
+#: many plain words of theirs come before the command (`timeout 60 git ...`)
+WRAPPER_PROGRAMS = {
+    "timeout": ({"-s", "--signal", "-k", "--kill-after"}, 1),
+    "gtimeout": ({"-s", "--signal", "-k", "--kill-after"}, 1),
+    "nice": ({"-n", "--adjustment"}, 0),
+    "sudo": ({"-u", "--user", "-g", "--group", "-C", "-h", "--host", "-p", "--prompt", "-U"}, 0),
+    "caffeinate": ({"-t", "-w"}, 0),
+    "stdbuf": ({"-i", "-o", "-e"}, 0),
+    "ionice": ({"-c", "-n", "-p"}, 0),
+}
 WRAPPERS = {"command", "exec", "nohup", "time", "builtin", "{", "}",
             "if", "elif", "then", "else", "while", "until", "do", "!"}
 
@@ -50,7 +64,7 @@ WRAPPERS = {"command", "exec", "nohup", "time", "builtin", "{", "}",
 GIT_TIMEOUT_S = 15
 READ_LIMIT = 1_000_000
 DIFF_LIMIT = 20_000_000
-MAX_FILES = 400
+MAX_FILES = 2000
 
 #: git options before the subcommand that take the next word as their value
 GIT_GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
@@ -86,7 +100,7 @@ def parse(command: str) -> list[dict]:
         bodies.append(m.group(5) or "")
         return f"<< __heredoc_{len(bodies) - 1}__{m.group(4)}"
 
-    command = HEREDOC_PARTS.sub(set_aside, command)
+    command = strip_comments(HEREDOC_PARTS.sub(set_aside, command))
     lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()\n")
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
@@ -96,8 +110,8 @@ def parse(command: str) -> list[dict]:
     except ValueError:
         return []
 
-    def fresh() -> dict:
-        return {"words": [], "writes": [], "heredoc": None}
+    def fresh(piped: bool = False) -> dict:
+        return {"words": [], "writes": [], "heredoc": None, "piped": piped}
 
     out = [fresh()]
     pending: str | None = None                # the redirection whose target word comes next
@@ -112,7 +126,7 @@ def parse(command: str) -> list[dict]:
             continue
         if t and set(t) <= SEPARATORS:
             if out[-1]["words"]:
-                out.append(fresh())
+                out.append(fresh(piped=t == "|"))
         elif REDIRECT.match(t):
             words = out[-1]["words"]
             fd = ""
@@ -122,8 +136,44 @@ def parse(command: str) -> list[dict]:
         elif t in ("(", ")"):
             continue
         else:
+            if "__heredoc_" in t:                # a here-document inside a word: "$(cat <<EOF ...)"
+                t = HEREDOC_MARK.sub(lambda m: bodies[int(m.group(1))], t)
             out[-1]["words"].append(t)
     return [c for c in out if c["words"]]
+
+
+def strip_comments(command: str) -> str:
+    """The command line without its comments: a `#` that starts a word, outside quotes, to the end
+    of its line (the newline stays, so the next line is still a command of its own)."""
+    out: list[str] = []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if quote is None:
+            if c in "'\"":
+                quote = c
+            elif c == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+                end = command.find("\n", i)
+                if end < 0:
+                    break
+                i = end
+                continue
+        elif c == quote:
+            quote = None
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def unescape(text: str) -> str:
+    """Text with the escapes `\\n` and `\\t` written out, as printf, echo -e and $'...' would write
+    them, so a word after one starts a word for a pattern too."""
+    return text.replace("\\n", "\n").replace("\\t", "\t")
 
 
 def simple_commands(command: str) -> list[list[str]]:
@@ -143,6 +193,16 @@ def unwrap(words: list[str]) -> list[str]:
             i += 1
             while i < len(words) and words[i].startswith("-"):
                 i += 2 if words[i] in ("-u", "--unset", "-C", "--chdir") else 1
+        elif w == "rtk":
+            i += 2 if words[i + 1:i + 2] == ["proxy"] else 1
+        elif os.path.basename(w) in WRAPPER_PROGRAMS:
+            with_value, plain = WRAPPER_PROGRAMS[os.path.basename(w)]
+            i += 1
+            while i < len(words) and words[i].startswith("-") and words[i] != "--":
+                i += 2 if words[i] in with_value else 1
+            if i < len(words) and words[i] == "--":
+                i += 1
+            i += plain
         else:
             break
     return words[i:]
@@ -159,6 +219,9 @@ def change_dir(here: str, args: list[str]) -> str:
         return os.path.expanduser("~")
     if targets[0] == "-":
         return here
+    if not any(c in targets[0] for c in "$`*?"):
+        # a plain path is where the shell goes, even when it does not exist yet (`mkdir -p x && cd x`)
+        return os.path.normpath(os.path.join(here, expand(targets[0])))
     return folder(here, targets[0])
 
 
@@ -213,7 +276,9 @@ def steps(command: str, cwd: str):
         elif name == "popd":
             here = stack.pop() if stack else here
         else:
-            yield dict(cmd, words=words), here
+            front = cmd["words"][:len(cmd["words"]) - len(words)]
+            env = dict(w.split("=", 1) for w in front if ASSIGNMENT.match(w))
+            yield dict(cmd, words=words, env=env), here
 
 
 def walk(command: str, cwd: str):
@@ -227,17 +292,23 @@ def writes(command: str, cwd: str) -> list[tuple[str, str]]:
     given to a command whose output goes to a file or to `tee`, and the words of `echo` or `printf`
     redirected to a file. Text a program makes itself is not known here and is not given out."""
     out = []
+    piped_text = None                        # what the command before a `|` printed, when known
     for cmd, here in steps(command, cwd):
         words = cmd["words"]
         prog = os.path.basename(words[0])
         targets = list(cmd["writes"])
         if prog == "tee":
             targets += [w for w in words[1:] if not w.startswith("-")]
-        if cmd["heredoc"] is not None:
+        if prog in ("cat", "tee") and cmd["heredoc"] is not None:
             text = cmd["heredoc"]
         elif prog in ("echo", "printf"):
             text = " ".join(words[1:])
+        elif prog == "tee" and cmd["piped"] and piped_text is not None:
+            text = piped_text
         else:
+            text = None
+        piped_text = text if not targets else None
+        if text is None:
             continue
         for t in targets:
             if t not in NOT_FILES:
@@ -249,10 +320,12 @@ def git_invocations(command: str, cwd: str) -> list[dict]:
     """Every git command on the command line, in order, each as parse_git gives it, run from the
     folder a `cd` earlier on the line left the shell in."""
     found = []
-    for words, here in walk(command, cwd):
+    for cmd, here in steps(command, cwd):
+        words = cmd["words"]
         if os.path.basename(words[0]) == "git":
             inv = parse_git(words[1:], here)
             if inv:
+                inv["stdin"] = cmd["heredoc"]
                 found.append(inv)
     return found
 
@@ -262,7 +335,7 @@ def commit_plan(inv: dict) -> dict | None:
     the pathspecs it names. None when the command is not a commit, or a dry run."""
     if inv["sub"] != "commit":
         return None
-    plan: dict = {"all": False, "paths": []}
+    plan: dict = {"all": False, "paths": [], "include": False}
     args = inv["args"]
     i, rest = 0, False
     while i < len(args):
@@ -273,6 +346,8 @@ def commit_plan(inv: dict) -> dict | None:
             rest = True
         elif a in ("-a", "--all"):
             plan["all"] = True
+        elif a in ("-i", "--include"):
+            plan["include"] = True
         elif a == "--dry-run":
             return None
         elif a in COMMIT_WITH_VALUE:
@@ -289,6 +364,8 @@ def commit_plan(inv: dict) -> dict | None:
                     break                              # a key, when there is one, is attached
                 if letter == "a":
                     plan["all"] = True
+                if letter == "i":
+                    plan["include"] = True
         else:
             plan["paths"].append(a)
         i += 1
@@ -300,7 +377,7 @@ def add_plan(inv: dict) -> dict | None:
     command is not an add, or a dry run."""
     if inv["sub"] != "add":
         return None
-    plan: dict = {"sweeping": False, "paths": []}
+    plan: dict = {"sweeping": False, "paths": [], "force": False}
     args = inv["args"]
     i, rest = 0, False
     while i < len(args):
@@ -313,6 +390,8 @@ def add_plan(inv: dict) -> dict | None:
             return None
         elif a in ADD_SWEEPING:
             plan["sweeping"] = True
+        elif a in ("-f", "--force"):
+            plan["force"] = True
         elif a in ADD_WITH_VALUE:
             i += 1
         elif a.startswith("--") or a == "-":
@@ -322,6 +401,8 @@ def add_plan(inv: dict) -> dict | None:
                 return None
             if "A" in a[1:] or "u" in a[1:]:
                 plan["sweeping"] = True
+            if "f" in a[1:]:
+                plan["force"] = True
         else:
             plan["paths"].append(a)
         i += 1
@@ -403,17 +484,22 @@ def diff_rows(g: Git, *args: str) -> list[Row]:
     return added_lines(out) if out else []
 
 
-def untracked_rows(g: Git, specs: list[str]) -> list[Row]:
+def untracked_files(g: Git, specs: list[str], force: bool = False) -> list[str]:
+    """The untracked files a `git add` of these pathspecs would stage (ignored ones too when it is
+    forced), as paths from the top of the work tree."""
+    listed = g.run("ls-files", "--others", *([] if force else ["--exclude-standard"]),
+                   "--full-name", "-z", "--", *specs)
+    return [p for p in listed.decode(errors="replace").split("\0") if p] if listed else []
+
+
+def untracked_rows(g: Git, specs: list[str], force: bool = False) -> list[Row]:
     """The lines of the untracked files a `git add` of these pathspecs would stage, read from the
     working tree."""
     top = g.toplevel()
-    listed = g.run("ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", *specs)
-    if not top or not listed:
+    if not top:
         return []
     out: list[Row] = []
-    for rel in listed.decode(errors="replace").split("\0")[:MAX_FILES]:
-        if not rel:
-            continue
+    for rel in untracked_files(g, specs, force)[:MAX_FILES]:
         try:
             with open(os.path.join(top, rel), "rb") as fh:
                 text = fh.read(READ_LIMIT).decode(errors="replace")
@@ -457,12 +543,15 @@ def recorded(command: str, cwd: str, repo: str | None = None) -> tuple[list[Row]
         g = Git(inv["dir"], inv["globals"])
         if repo is not None and g.toplevel() != repo:
             continue
-        rows.update(diff_rows(g, "--cached"))
-        paths.update(g.names("--cached"))
+        if not plan["paths"] or plan["include"]:
+            # `git commit <paths>` records only those paths, not the rest of the index
+            rows.update(diff_rows(g, "--cached"))
+            paths.update(g.names("--cached"))
         if plan["all"]:
             rows.update(diff_rows(g, g.base()))
         if plan["paths"]:
             rows.update(diff_rows(g, g.base(), "--", *plan["paths"]))
+            paths.update(g.names(g.base(), "--", *plan["paths"]))
         for ainv, aplan in adds:
             if aplan is None:
                 continue
@@ -472,13 +561,82 @@ def recorded(command: str, cwd: str, repo: str | None = None) -> tuple[list[Row]
             if not same or not specs:
                 continue
             rows.update(diff_rows(ga, ga.base(), "--", *specs))
-            rows.update(untracked_rows(ga, specs))
+            rows.update(untracked_rows(ga, specs, aplan["force"]))
+            paths.update(ga.names(ga.base(), "--", *specs))
+            paths.update(untracked_files(ga, specs, aplan["force"]))
     paths.update(p for p, _, _ in rows)
     return sorted(rows), sorted(paths)
 
 
 #: programs that run a command given to them as a string
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "eval", "xargs", "ssh"}
+
+
+#: `git push` options that take the next word as their value
+PUSH_WITH_VALUE = {"-o", "--push-option", "--repo", "--receive-pack", "--exec", "--signed"}
+
+
+def push_plans(command: str, cwd: str) -> list[dict]:
+    """Each `git push` on the line, as {"git": Git, "remote": name or URL or None, "refs": [...]}:
+    the local refs it sends (HEAD when it names none; --branches for --all). A push that only
+    deletes, and a dry run, send nothing and are left out."""
+    plans = []
+    for inv in git_invocations(command, cwd):
+        if inv["sub"] != "push":
+            continue
+        args, positional, refs, i = inv["args"], [], [], 0
+        sends = True
+        while i < len(args):
+            a = args[i]
+            if a in PUSH_WITH_VALUE:
+                i += 1
+            elif a in ("-d", "--delete", "-n", "--dry-run"):
+                sends = False
+            elif a in ("--all", "--branches", "--mirror"):
+                refs.append("--branches")
+            elif a == "--tags":
+                refs.append("--tags")
+            elif not a.startswith("-"):
+                positional.append(a)
+            i += 1
+        if not sends:
+            continue
+        for spec in positional[1:]:
+            src = spec.lstrip("+").split(":", 1)[0]
+            if src:
+                refs.append(src)
+        plans.append({"git": Git(inv["dir"], inv["globals"]),
+                      "remote": positional[0] if positional else None, "refs": refs or ["HEAD"]})
+    return plans
+
+
+def push_url(plan: dict) -> str:
+    """The URL a push goes to: the remote it names (a URL, or a remote's name), else the current
+    branch's upstream remote, else origin. Empty when git cannot say."""
+    g, remote = plan["git"], plan["remote"]
+    if remote and ("://" in remote or "@" in remote or remote.endswith(".git")):
+        return remote
+    if not remote:
+        up = g.run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        up = up.decode(errors="replace").strip() if up else ""
+        remote = up.split("/", 1)[0] if "/" in up else "origin"
+    out = g.run("remote", "get-url", "--push", remote)
+    return out.decode(errors="replace").strip() if out else ""
+
+
+def pushed(plan: dict) -> tuple[list[Row], list[str], list[str]]:
+    """What a push would publish that no remote has yet: the lines its commits add, the file names
+    they touch and their messages. The commits are those reachable from the refs it sends and
+    from no remote-tracking ref, however they were made (in a script, by cherry-pick or am)."""
+    g, refs = plan["git"], plan["refs"]
+    new = [*refs, "--not", "--remotes"]
+    log = g.run("log", "-p", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0",
+                "--format=", "--src-prefix=a/", "--dst-prefix=b/", *new)
+    names = g.run("log", "--name-only", "--format=", *new)
+    messages = g.run("log", "--format=%B%x00", *new)
+    return (added_lines(log) if log else [],
+            sorted({n for n in names.decode(errors="replace").splitlines() if n}) if names else [],
+            [m.strip() for m in messages.decode(errors="replace").split("\0") if m.strip()] if messages else [])
 
 
 def hidden_commit(command: str) -> bool:

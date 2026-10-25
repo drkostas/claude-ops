@@ -9,15 +9,27 @@ The words are regular expressions in a JSON file the user keeps outside every re
 checks text only when its target repository is public on GitHub (asked with `gh repo view`, and
 cached), and it checks:
 
-- the content of Write, Edit and MultiEdit calls for a file inside a public repository;
-- a `git commit` or `git tag` message (`-m`, `--message`, `-F`, `--file`) and a `gh pr`, `gh issue`
-  or `gh release` title, body or notes (and the body or notes files), on any Bash command line;
+- the content of Write, Edit and MultiEdit calls for a file inside a public repository (not one
+  inside `.git` or one git ignores);
+- a `git commit`, `tag`, `merge` or `notes` message (`-m`, `--message`, `--trailer`, `-F`/`--file`,
+  including `-F -` with a here-document, a file written earlier on the same line, and
+  `"$(cat <<EOF ...)"` or `"$(cat FILE)"`), and the text of a `gh pr`, `gh issue`, `gh release` or
+  `gh repo` command that writes (title, body, notes, subject, description, and their files), a
+  `gh api` call to `repos/OWNER/REPO/...` and its fields, with `-R`, `--repo` or `GH_REPO`;
 - what a `git commit` would record: the staged changes, the tracked changes for `-a`, what a
   `git add` on the same line would stage and the paths the commit names, with the file names
-  (read through `commandline.commit_lines`, which follows `git -C`, `cd` and the like);
-- text a Bash command writes into a file inside a public repository: a here-document given to a
-  command whose output goes to the file or to `tee`, and `echo` or `printf` redirected to it;
-- the text arguments of a GitHub MCP call for a public owner/repo.
+  (read through `commandline`, which follows `git -C`, `cd`, line continuations, here-documents,
+  comments and wrapper programs such as `timeout`);
+- what a `git push` would publish: the lines, file names and messages of the commits no remote has
+  yet, however they were made (in a script, by `cherry-pick`, `am` or `stash pop`);
+- text a Bash command writes into a file inside a public repository: a here-document given to
+  `cat` or `tee` whose output goes to the file, `echo` or `printf` redirected to it or piped into
+  `tee`;
+- the text arguments of a GitHub MCP call that writes to a public owner/repo;
+- and, on a line that publishes to a public repository, the whole command with its path words left
+  out, for what the checks above cannot read (a message built from a variable, a shell given a
+  string). Text a program makes itself (a script, `sed -i`) is only seen once it is committed or
+  pushed.
 
 The configuration (all keys optional; a missing file means no terms, so nothing is refused):
 
@@ -56,8 +68,8 @@ import sys
 import time
 
 from .commandline import (
-    READ_LIMIT, commit_plan, commit_repos, expand, git_invocations, hidden_commit, recorded,
-    steps, writes,
+    PATH_WORD, READ_LIMIT, commit_plan, commit_repos, expand, git_invocations, hidden_commit, push_plans,
+    push_url, pushed, recorded, steps, unescape, writes,
 )
 
 DEFAULT_CONFIG = "~/.config/claude-ops/public-voice.json"
@@ -66,12 +78,28 @@ DEFAULT_CACHE = "~/.cache/claude-ops/public-voice-visibility.json"
 #: how long a repository's visibility is trusted before it is asked again
 TTL_S = 6 * 3600
 #: `gh` options whose value is published text, and those that name a file holding it
-GH_TEXT_FLAGS = {"--title", "-t", "--body", "-b", "--notes", "-n", "--message", "-m"}
+GH_TEXT_FLAGS = {"--title", "-t", "--body", "-b", "--notes", "-n", "--message", "-m", "--subject"}
+#: the `gh` subcommands that publish text; others (checkout, list, view) only read or act locally
+GH_WRITES = {"pr": {"create", "edit", "comment", "review", "merge", "close", "reopen", "ready"},
+             "issue": {"create", "edit", "comment", "close", "reopen", "develop", "transfer"},
+             "release": {"create", "edit", "upload"},
+             "repo": {"create", "edit"}}
+#: `gh repo create|edit` options whose value is shown on the repository's page
+GH_REPO_TEXT_FLAGS = {"--description", "-d", "--homepage", "-h"}
+#: `$(cat FILE)` in a message: the file's text is the message
+CAT_SUBST = re.compile(r"\$\(\s*cat\s+([^\s)]+)\s*\)")
+#: `gh api` options whose value is a field sent to GitHub, and the one that names a request body file
+GH_API_FIELDS = {"-f", "--raw-field", "-F", "--field"}
+#: git commands whose message is published, read the way `git commit` reads it
+MESSAGE_SUBCOMMANDS = ("commit", "tag", "merge", "notes")
 GH_FILE_FLAGS = {"--body-file", "-F", "--notes-file"}
 #: `git commit|tag` options that name a message file
 GIT_FILE_FLAGS = {"-F", "--file"}
-#: keys of a GitHub MCP call that name its target rather than carry text
-GITHUB_TARGET_KEYS = {"owner", "repo", "path", "branch", "sha"}
+#: keys of a GitHub MCP call that name its target rather than carry text (a branch name is
+#: published, so it is text)
+GITHUB_TARGET_KEYS = {"owner", "repo", "path", "sha"}
+#: GitHub MCP tools that only read
+GITHUB_READS = ("get_", "list_", "search_")
 
 
 class Config:
@@ -82,6 +110,8 @@ class Config:
 
         def strs(key: str) -> list[str]:
             v = data.get(key) or []
+            if isinstance(v, str):
+                v = [v]                    # a single term written without its list
             return [s for s in v if isinstance(s, str) and s] if isinstance(v, list) else []
 
         self.terms = strs("terms")
@@ -149,7 +179,7 @@ def offending(text: str, terms: list[str], allow: list[str]) -> str | None:
     """The first text in TEXT that a term matches, after the allowed text is removed, or None."""
     if not text:
         return None
-    clean = text
+    clean = unescape(text)
     for a in allow:
         pat = _pattern(a)
         if pat:
@@ -223,7 +253,11 @@ def is_public(slug: str | None, cfg: Config) -> bool:
 
 # --- what a tool call would publish ---------------------------------------------------------------
 
-def _read(path: str) -> str:
+def _read(path: str, written: dict | None = None) -> str:
+    """A file's text: what an earlier command on the same line writes into it, else what it holds."""
+    path = os.path.normpath(path)
+    if written and path in written:
+        return written[path]
     try:
         with open(path, errors="replace") as f:
             return f.read(READ_LIMIT)
@@ -231,9 +265,16 @@ def _read(path: str) -> str:
         return ""
 
 
-def _message_texts(args: list[str], here: str) -> list[str]:
-    """The message texts of a `git commit` or `git tag`: -m (also bundled, -am, and attached,
-    -mtext), --message, --message=, and the contents of -F/--file."""
+def _message_texts(args: list[str], here: str, stdin: str | None = None,
+                   written: dict | None = None) -> list[str]:
+    """The message texts of a `git commit`, `tag`, `merge` or `notes`: -m (also bundled, -am, and
+    attached, -mtext), --message, --message=, --trailer, and -F/--file, which is a file (written
+    earlier on the line, or on disk) or, as `-`, the here-document given on stdin."""
+    def file_text(name: str) -> str:
+        if name == "-":
+            return stdin or ""
+        return _read(os.path.join(here, expand(name)), written)
+
     out = []
     i = 0
     while i < len(args):
@@ -241,16 +282,16 @@ def _message_texts(args: list[str], here: str) -> list[str]:
         nxt = args[i + 1] if i + 1 < len(args) else None
         if a == "--":
             break
-        if a in ("-m", "--message") and nxt is not None:
+        if a in ("-m", "--message", "--trailer") and nxt is not None:
             out.append(nxt)
             i += 1
-        elif a.startswith("--message="):
+        elif a.startswith(("--message=", "--trailer=")):
             out.append(a.split("=", 1)[1])
         elif a in GIT_FILE_FLAGS and nxt is not None:
-            out.append(_read(os.path.join(here, expand(nxt))))
+            out.append(file_text(nxt))
             i += 1
         elif a.startswith("--file="):
-            out.append(_read(os.path.join(here, expand(a.split("=", 1)[1]))))
+            out.append(file_text(a.split("=", 1)[1]))
         elif a.startswith("-") and not a.startswith("--") and len(a) > 2:
             # bundled short options, as git reads them: -am text, -mtext, -aF file
             for k, letter in enumerate(a[1:], 1):
@@ -260,7 +301,7 @@ def _message_texts(args: list[str], here: str) -> list[str]:
                     else:
                         value = a[k + 1:]
                     if value is not None:
-                        out.append(value if letter == "m" else _read(os.path.join(here, expand(value))))
+                        out.append(value if letter == "m" else file_text(value))
                     break
                 if letter in "CctSu":           # an option whose value follows: no message here
                     break
@@ -268,37 +309,136 @@ def _message_texts(args: list[str], here: str) -> list[str]:
     return out
 
 
+def _with_cat(text: str, here: str, written: dict | None) -> str:
+    """A message with each `$(cat FILE)` followed by the file's text, which is what is sent."""
+    return text + "".join("\n" + _read(os.path.join(here, expand(m.group(1))), written)
+                          for m in CAT_SUBST.finditer(text))
+
+
+def _gh_api(words: list[str], here: str, written: dict) -> tuple[str | None, list[str]]:
+    """The repository a `gh api` call writes to (from its `repos/OWNER/REPO/...` path) and the text
+    it sends, or (None, []) for a read or a call with no repository in its path."""
+    method, slug, texts = None, None, []
+    i = 2
+    while i < len(words):
+        a = words[i]
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        if a in ("-X", "--method") and nxt is not None:
+            method, i = nxt.upper(), i + 1
+        elif a.startswith("--method="):
+            method = a.split("=", 1)[1].upper()
+        elif a in GH_API_FIELDS and nxt is not None:
+            value = nxt.split("=", 1)[1] if "=" in nxt else ""
+            texts.append(_read(os.path.join(here, expand(value[1:])), written)
+                         if a in ("-F", "--field") and value.startswith("@") else value)
+            i += 1
+        elif a == "--input" and nxt is not None:
+            texts.append(_read(os.path.join(here, expand(nxt)), written))
+            i += 1
+        elif not a.startswith("-") and slug is None:
+            m = re.match(r"/?repos/([^/\s]+)/([^/?#\s]+)", a)
+            if m:
+                slug = f"{m.group(1)}/{m.group(2)}"
+        i += 1
+    if slug is None or not texts or method == "GET":
+        return None, []
+    return slug, texts
+
+
+def _gh_words(words: list[str]) -> tuple[list[str], str | None]:
+    """A gh command's words with its `-R/--repo X` taken out wherever it stands (before, between or
+    after the subcommand's words), and X."""
+    repo, out, i = None, [], 0
+    while i < len(words):
+        w = words[i]
+        if w in ("-R", "--repo") and i + 1 < len(words):
+            repo, i = words[i + 1], i + 2
+            continue
+        if w.startswith("--repo="):
+            repo = w.split("=", 1)[1]
+        else:
+            out.append(w)
+        i += 1
+    return out, repo
+
+
+def _gh_target(words: list[str], here: str, env: dict | None = None, repo: str | None = None) -> str:
+    """The repository a gh command names: -R/--repo, GH_REPO in front of it, the OWNER/REPO a
+    `gh repo` command takes (as `public:` when it creates a public one), else the folder it runs in."""
+    for i, a in enumerate(words):
+        if a in ("-R", "--repo") and i + 1 < len(words):
+            return "slug:" + words[i + 1]
+        if a.startswith("--repo="):
+            return "slug:" + a.split("=", 1)[1]
+    if words[1:2] == ["repo"]:
+        named = next((w for w in words[3:] if not w.startswith("-") and "/" in w), None)
+        if named and words[2] == "create" and "--public" in words:
+            return "public:" + named
+        if named:
+            return "slug:" + named
+    if repo:
+        return "slug:" + repo
+    if env and env.get("GH_REPO"):
+        return "slug:" + env["GH_REPO"]
+    return here
+
+
 def published(command: str, cwd: str) -> list[tuple[str, str, str]]:
     """(where, target, text) for every message a git or gh command on the line would publish.
     The target is a folder, or `slug:owner/repo` when the command names its repository."""
+    written = dict(writes(command, cwd))
     found = []
     for inv in git_invocations(command, cwd):
-        if inv["sub"] in ("commit", "tag"):
-            for text in _message_texts(inv["args"], inv["dir"]):
-                found.append((f"the {inv['sub']} message", inv["dir"], text))
+        if inv["sub"] in MESSAGE_SUBCOMMANDS:
+            for text in _message_texts(inv["args"], inv["dir"], inv.get("stdin"), written):
+                found.append((f"the {inv['sub']} message", inv["dir"], _with_cat(text, inv["dir"], written)))
     for cmd, here in steps(command, cwd):
-        words = cmd["words"]
-        if os.path.basename(words[0]) != "gh" or len(words) < 2 or words[1] not in ("pr", "issue", "release"):
+        words, repo = _gh_words(cmd["words"])
+        if os.path.basename(words[0]) != "gh" or len(words) < 2:
             continue
-        repo = None
-        for i, a in enumerate(words):
-            if a in ("-R", "--repo") and i + 1 < len(words):
-                repo = "slug:" + words[i + 1]
-            elif a.startswith("--repo="):
-                repo = "slug:" + a.split("=", 1)[1]
-        target = repo or here
+        if words[1] == "api":
+            slug, texts = _gh_api(words, here, written)
+            found += [("the gh api call", "slug:" + slug, t) for t in texts] if slug else []
+            continue
+        if len(words) < 3 or words[2] not in GH_WRITES.get(words[1], ()):
+            continue
+        target = _gh_target(words, here, cmd.get("env"), repo)
         where = f"the gh {words[1]} text"
+        flags = GH_REPO_TEXT_FLAGS if words[1] == "repo" else GH_TEXT_FLAGS
         for i, a in enumerate(words):
             nxt = words[i + 1] if i + 1 < len(words) else None
-            if a in GH_TEXT_FLAGS and nxt is not None:
+            if a in flags and nxt is not None:
                 found.append((where, target, nxt))
-            elif a in GH_FILE_FLAGS and nxt is not None and nxt != "-":
-                found.append((where, target, _read(os.path.join(here, expand(nxt)))))
-            elif "=" in a and a.split("=", 1)[0] in GH_TEXT_FLAGS:
+            elif a in GH_FILE_FLAGS and nxt is not None:
+                found.append((where, target, (cmd["heredoc"] or "") if nxt == "-"
+                               else _read(os.path.join(here, expand(nxt)), written)))
+            elif "=" in a and a.split("=", 1)[0] in flags:
                 found.append((where, target, a.split("=", 1)[1]))
             elif "=" in a and a.split("=", 1)[0] in GH_FILE_FLAGS:
-                found.append((where, target, _read(os.path.join(here, expand(a.split("=", 1)[1])))))
+                name = a.split("=", 1)[1]
+                found.append((where, target, (cmd["heredoc"] or "") if name == "-"
+                              else _read(os.path.join(here, expand(name)), written)))
     return found
+
+
+def publish_targets(command: str, cwd: str) -> list[str]:
+    """Every repository the line publishes text to (a folder, or `slug:owner/repo`): git commands
+    that record a message, gh commands that write, and the current folder when a commit hides
+    behind a shell given a string."""
+    targets = [inv["dir"] for inv in git_invocations(command, cwd) if inv["sub"] in MESSAGE_SUBCOMMANDS]
+    for cmd, here in steps(command, cwd):
+        words, repo = _gh_words(cmd["words"])
+        if os.path.basename(words[0]) != "gh" or len(words) < 2:
+            continue
+        if words[1] == "api":
+            slug, _ = _gh_api(words, here, {})
+            if slug:
+                targets.append("slug:" + slug)
+        elif len(words) >= 3 and words[2] in GH_WRITES.get(words[1], ()):
+            targets.append(_gh_target(words, here, cmd.get("env"), repo))
+    if hidden_commit(command):
+        targets.append(cwd)
+    return list(dict.fromkeys(targets))
 
 
 def strings(obj) -> list[str]:
@@ -312,16 +452,41 @@ def strings(obj) -> list[str]:
 
 
 def _slug(target: str) -> str | None:
-    return target[5:] if target.startswith("slug:") else slug_of(target)
+    if target.startswith(("slug:", "public:")):
+        return target.split(":", 1)[1]
+    return slug_of(target)
 
 
-def _hit(texts: list[str], slug: str | None, cfg: Config) -> str | None:
+def not_published(path: str) -> bool:
+    """A file that never reaches GitHub from its repository: one inside `.git`, or one git ignores."""
+    path = os.path.abspath(path)
+    if ".git" in path.split(os.sep):
+        return True
+    d = os.path.dirname(path)
+    while d and not os.path.isdir(d):
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+    try:
+        r = subprocess.run(["git", "-C", d, "check-ignore", "-q", path],
+                           capture_output=True, timeout=4)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _hit(texts: list[str], slug: str | None, cfg: Config, path: str | None = None,
+         known_public: bool = False) -> str | None:
     """The first term TEXTS carry when SLUG is a public repository, else None. Visibility is asked
-    only when some term matched, so clean text costs no call to GitHub."""
+    only when some term matched, so clean text costs no call to GitHub. A PATH that is never
+    published (inside .git, or ignored) carries nothing."""
     widest = cfg.terms_for(personal=False)
     if not any(offending(t, widest, cfg.allow) for t in texts if t):
         return None
-    if not is_public(slug, cfg):
+    if path and not_published(path):
+        return None
+    if not known_public and not is_public(slug, cfg):
         return None
     terms = cfg.terms_for(cfg.is_personal(slug))
     for t in texts:
@@ -335,8 +500,8 @@ def _commit_hit(command: str, cwd: str, cfg: Config) -> str | None:
     """A term in what a `git commit` on this line would record into a public repository."""
     tops = commit_repos(command, cwd)
     if not tops and hidden_commit(command):
-        # the words do not show the commit (a wrapper program, a shell given a string), so what is
-        # staged and what -a would take in this folder are read anyway
+        # the words do not show the commit (a shell given a string), so what is staged and what -a
+        # would take in this folder are read anyway
         command = "git commit -a"
         tops = commit_repos(command, cwd)
     widest = cfg.terms_for(personal=False)
@@ -359,6 +524,47 @@ def _commit_hit(command: str, cwd: str, cfg: Config) -> str | None:
     return None
 
 
+def _push_hit(command: str, cwd: str, cfg: Config) -> str | None:
+    """A term in what a `git push` on this line would publish to a public repository: the lines,
+    file names and messages of the commits no remote has yet, however they were made."""
+    widest = cfg.terms_for(personal=False)
+    for plan in push_plans(command, cwd):
+        rows, names, messages = pushed(plan)
+        items = ([(p, n, t.replace("\x00", "")) for p, n, t in rows] + [(p, 0, p) for p in names]
+                 + [("", -1, m) for m in messages])
+        if not any(offending(t, widest, cfg.allow) for _, _, t in items):
+            continue
+        m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(\.git)?/?$", push_url(plan))
+        slug = f"{m.group(1)}/{m.group(2)}" if m else None
+        if not is_public(slug, cfg):
+            continue
+        terms = cfg.terms_for(cfg.is_personal(slug))
+        for path, line, text in items:
+            hit = offending(text, terms, cfg.allow)
+            if hit:
+                where = ("a commit message" if line < 0 else f"{path}:{line}" if line
+                         else f"the file name {path}")
+                return f"{hit!r} in {where}, which this push would publish"
+    return None
+
+
+def _command_hit(command: str, cwd: str, cfg: Config) -> str | None:
+    """A term anywhere in a command line that publishes to a public repository. The checks above
+    name where a term is; this one catches what they cannot read (a message built from a
+    variable, a shell given a string, a file a command changes before the commit). Path words
+    are left out: they say where things go, not what is published."""
+    targets = publish_targets(command, cwd)
+    if not targets:
+        return None
+    text = PATH_WORD.sub(" ", command)
+    for target in targets:
+        hit = _hit([text], _slug(target), cfg, known_public=target.startswith("public:"))
+        if hit:
+            return (f"{hit!r} in the command, which publishes to a public repository (if the term is "
+                    f"only in a step that publishes nothing, run that step in a Bash call of its own)")
+    return None
+
+
 def check(payload: dict, cfg: Config) -> str | None:
     """Why this tool call is refused, or None."""
     if not cfg.terms and not cfg.terms_except_personal and not cfg.term_files:
@@ -369,17 +575,22 @@ def check(payload: dict, cfg: Config) -> str | None:
     if tool == "Bash":
         cmd = str(ti.get("command", ""))
         for where, target, text in published(cmd, cwd):
-            hit = _hit([text], _slug(target), cfg)
+            hit = _hit([text], _slug(target), cfg, known_public=target.startswith("public:"))
             if hit:
                 return f"{hit!r} in {where}"
         for path, text in writes(cmd, cwd):
-            hit = _hit([text], slug_of(os.path.dirname(path)), cfg)
+            hit = _hit([text], slug_of(os.path.dirname(path)), cfg, path)
             if hit:
                 return f"{hit!r} in the text written to {os.path.basename(path)}"
         if any(inv["sub"] == "commit" and commit_plan(inv) is not None
                for inv in git_invocations(cmd, cwd)) or hidden_commit(cmd):
-            return _commit_hit(cmd, cwd, cfg)
-        return None
+            hit = _commit_hit(cmd, cwd, cfg)
+            if hit:
+                return hit
+        hit = _push_hit(cmd, cwd, cfg)
+        if hit:
+            return hit
+        return _command_hit(cmd, cwd, cfg)
     if tool in ("Write", "Edit", "MultiEdit"):
         path = str(ti.get("file_path", ""))
         if tool == "Write":
@@ -388,9 +599,9 @@ def check(payload: dict, cfg: Config) -> str | None:
             texts = [str(ti.get("new_string", ""))]
         else:
             texts = [str(e.get("new_string", "")) for e in ti.get("edits") or [] if isinstance(e, dict)]
-        hit = _hit(texts, slug_of(os.path.dirname(path)), cfg)
+        hit = _hit(texts, slug_of(os.path.dirname(path)), cfg, path)
         return f"{hit!r} in {os.path.basename(path)}" if hit else None
-    if tool.startswith("mcp__github__"):
+    if tool.startswith("mcp__github__") and not tool[len("mcp__github__"):].startswith(GITHUB_READS):
         owner, repo = ti.get("owner"), ti.get("repo")
         if owner and repo:
             texts = [s for k, v in ti.items() if k not in GITHUB_TARGET_KEYS for s in strings(v)]

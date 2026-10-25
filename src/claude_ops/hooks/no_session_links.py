@@ -28,9 +28,11 @@ and the paths the commit itself names. The names of the files count as recorded 
 `git -C <dir>` and the other options that come before the subcommand, a `cd` earlier in the same
 command, line continuations and here-documents, and when a line cannot be read as words but says
 `git commit`, it scans what is staged and what `-a` would take in the current folder anyway. A
-refusal names the file and line, never the id. The hook only sees the command Claude Code runs, so
-a commit made inside a script it starts is not seen. `commit_lines` gives every line such a commit
-would record, for another check to use.
+refusal names the file and line, never the id. A commit made where the hook cannot see it (inside a
+script, by `cherry-pick` or `am`) is read at `git push`, which is refused when a commit no remote has
+yet carries a link, trailer or id in a line, a file name or its message. The command-line reading is
+`commandline`'s, shared with the public-voice hook, and its names (`commit_lines` among them) stay
+importable from here.
 
 The config folder is `~/.claude`, or `CLAUDE_CONFIG_DIR` when set. On anything unexpected (a file
 that cannot be read, a folder git cannot read, a slow git) the call goes through: a broken hook must
@@ -48,7 +50,8 @@ import sys
 from .commandline import (  # noqa: F401 - the parser's names stay importable from here
     ADD_SWEEPING, ADD_WITH_VALUE, ASSIGNMENT, COMMIT_SHORT_ATTACHED, COMMIT_SHORT_REQUIRED,
     COMMIT_WITH_VALUE, CONTINUATION, DIFF_LIMIT, GIT_GLOBAL_DROPPED, GIT_GLOBAL_WITH_VALUE,
-    GIT_PUBLISHING, GIT_TIMEOUT_S, HEREDOC, MAX_FILES, READ_LIMIT, REDIRECT, SEPARATORS, SHELLS,
+    GIT_PUBLISHING, GIT_TIMEOUT_S, HEREDOC, MAX_FILES, PATH_WORD, READ_LIMIT, REDIRECT, SEPARATORS,
+    SHELLS, push_plans, pushed, unescape,
     WRAPPERS, Git, Row, add_plan, added_lines, change_dir, commit_lines, commit_plan, diff_rows,
     expand, folder, git_invocations, hidden_commit, parse_git, recorded, simple_commands,
     untracked_rows, unwrap, walk,
@@ -63,8 +66,6 @@ UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 FILE_FLAGS = {"-F", "--file", "--body-file", "--message-file"}
 #: a gh command that publishes text (a git command that does is found by parsing, below)
 GH_PUBLISHING = re.compile(r"\bgh\s+(pr|issue|release|api)\b")
-#: a whole word that is a filesystem path; a command may name this session's own files by its id
-PATH_WORD = re.compile(r"(?<![^\s'\"=])(?:/|~/|\$HOME/)[^\s'\"]*")
 #: what a refusal shows in place of any uuid in a path
 REDACTED = "<session id>"
 
@@ -100,6 +101,7 @@ def offending(text: str) -> str | None:
     """Why this text may not be written anywhere, or None."""
     if not text:
         return None
+    text = unescape(text)
     if LINK.search(text):
         return "a link to a Claude Code session"
     if TRAILER.search(text):
@@ -114,7 +116,7 @@ def real_session(text: str, paths_ok: bool = False) -> str | None:
         return None
     if paths_ok:
         text = PATH_WORD.sub(" ", text)
-    for u in UUID.findall(text):
+    for u in UUID.findall(unescape(text)):
         if u in session_ids():
             return "the id of a real Claude session"
     return None
@@ -157,6 +159,27 @@ def commit_content(command: str, cwd: str) -> list[Finding]:
         if why:
             out.append((why, path, 0))
     return sorted(out, key=lambda f: (f[1], f[2], f[0]))
+
+
+def push_content(command: str, cwd: str) -> str | None:
+    """Why a `git push` on this line may not run: a commit it would publish, which no remote has
+    yet, carries a session link, trailer or id in a line, a file name or its message. This reads
+    commits however they were made, so one a script made is stopped before it leaves the machine."""
+    for plan in push_plans(command, cwd):
+        rows, names, messages = pushed(plan)
+        for path, line, text in rows:
+            why = why_recorded(text)
+            if why:
+                return f"this push would publish {why} in {UUID.sub(REDACTED, path)}:{line}"
+        for path in names:
+            why = why_not(path, True)
+            if why:
+                return f"this push would publish {why} in {UUID.sub(REDACTED, path)}"
+        for message in messages:
+            why = why_not(message, True)
+            if why:
+                return f"this push would publish {why} in a commit message"
+    return None
 
 
 # --- the tool call ------------------------------------------------------------------------------
@@ -226,7 +249,7 @@ def check(payload: dict) -> str | None:
             where = UUID.sub(REDACTED, f"{path}:{line}" if line else path)
             more = f" (and {len(hits) - 1} more)" if len(hits) > 1 else ""
             return f"this commit would record {why} in {where}{more}"
-        return None
+        return push_content(cmd, cwd)
     if tool in ("Write", "Edit", "MultiEdit") or tool.startswith("mcp__github__"):
         into_repo = tool.startswith("mcp__github__") or in_repo(str(ti.get("file_path", "")))
         for s in strings(ti):

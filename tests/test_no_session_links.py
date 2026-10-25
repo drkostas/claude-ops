@@ -149,19 +149,19 @@ def test_a_trailer_that_carries_the_link_is_reported_as_the_link():
 def test_commit_plan_reads_all_and_pathspecs_past_the_options():
     def plan(*args):
         return nsl.commit_plan({"sub": "commit", "args": list(args)})
-    assert plan("-m", "x") == {"all": False, "paths": []}
-    assert plan("-am", "x") == {"all": True, "paths": []}
-    assert plan("-a", "-m", "x", "--", "f", "g") == {"all": True, "paths": ["f", "g"]}
-    assert plan("-m", "x", "a.txt") == {"all": False, "paths": ["a.txt"]}
-    assert plan("-mtext", "a.txt") == {"all": False, "paths": ["a.txt"]}
-    assert plan("-uall", "-m", "x") == {"all": False, "paths": []}
-    assert plan("-S", "-am", "x") == {"all": True, "paths": []}
-    assert plan("-Skey", "-a", "-m", "x") == {"all": True, "paths": []}
-    assert plan("-u", "-am", "x") == {"all": True, "paths": []}
-    assert plan("-aS", "-m", "x") == {"all": True, "paths": []}
-    assert plan("-C", "HEAD", "-c", "HEAD~1") == {"all": False, "paths": []}
-    assert plan("--author", "a <a@example.org>", "--date", "now", "-m", "x") == {"all": False, "paths": []}
-    assert plan("-i", "a.txt", "-m", "x") == {"all": False, "paths": ["a.txt"]}
+    assert plan("-m", "x") == {"all": False, "paths": [], "include": False}
+    assert plan("-am", "x") == {"all": True, "paths": [], "include": False}
+    assert plan("-a", "-m", "x", "--", "f", "g") == {"all": True, "paths": ["f", "g"], "include": False}
+    assert plan("-m", "x", "a.txt") == {"all": False, "paths": ["a.txt"], "include": False}
+    assert plan("-mtext", "a.txt") == {"all": False, "paths": ["a.txt"], "include": False}
+    assert plan("-uall", "-m", "x") == {"all": False, "paths": [], "include": False}
+    assert plan("-S", "-am", "x") == {"all": True, "paths": [], "include": False}
+    assert plan("-Skey", "-a", "-m", "x") == {"all": True, "paths": [], "include": False}
+    assert plan("-u", "-am", "x") == {"all": True, "paths": [], "include": False}
+    assert plan("-aS", "-m", "x") == {"all": True, "paths": [], "include": False}
+    assert plan("-C", "HEAD", "-c", "HEAD~1") == {"all": False, "paths": [], "include": False}
+    assert plan("--author", "a <a@example.org>", "--date", "now", "-m", "x") == {"all": False, "paths": [], "include": False}
+    assert plan("-i", "a.txt", "-m", "x") == {"all": False, "paths": ["a.txt"], "include": True}
     assert plan("--dry-run", "-m", "x") is None
     assert nsl.commit_plan({"sub": "add", "args": ["f"]}) is None
 
@@ -169,12 +169,14 @@ def test_commit_plan_reads_all_and_pathspecs_past_the_options():
 def test_add_plan_reads_sweeping_forms_and_pathspecs():
     def plan(*args):
         return nsl.add_plan({"sub": "add", "args": list(args)})
-    assert plan("f", "g") == {"sweeping": False, "paths": ["f", "g"]}
-    assert plan(".") == {"sweeping": False, "paths": ["."]}
-    assert plan("-A") == {"sweeping": True, "paths": []}
-    assert plan("-u", "src") == {"sweeping": True, "paths": ["src"]}
-    assert plan("-f", "--", "-weird") == {"sweeping": False, "paths": ["-weird"]}
-    assert plan("--pathspec-from-file", "list.txt") == {"sweeping": False, "paths": []}
+    assert plan("f", "g") == {"sweeping": False, "paths": ["f", "g"], "force": False}
+    assert plan(".") == {"sweeping": False, "paths": ["."], "force": False}
+    assert plan("-A") == {"sweeping": True, "paths": [], "force": False}
+    assert plan("-u", "src") == {"sweeping": True, "paths": ["src"], "force": False}
+    assert plan("-f", "--", "-weird") == {"sweeping": False, "paths": ["-weird"], "force": True}
+    assert plan("--pathspec-from-file", "list.txt") == {"sweeping": False, "paths": [], "force": False}
+    assert plan("-f", "ignored.log") == {"sweeping": False, "paths": ["ignored.log"], "force": True}
+    assert plan("-Af") == {"sweeping": True, "paths": [], "force": True}
     assert plan("-n", "f") is None
     assert plan("--dry-run", "f") is None
 
@@ -402,3 +404,30 @@ def test_the_cli_offers_the_hook(repo, monkeypatch):
     git(repo, "add", "b.txt")
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(bash("git commit -m ok", repo))))
     assert cli.main(["hook", "no-session-links"]) == 2
+
+
+def test_a_push_stops_a_commit_a_script_made(tmp_path):
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    r = tmp_path / "r"
+    r.mkdir()
+    git(r, "init", "-q")
+    git(r, "remote", "add", "origin", str(bare))
+    (r / "a.txt").write_text("one\n")
+    git(r, "add", "a.txt")
+    git(r, "commit", "-qm", "first")
+    git(r, "push", "-q", "-u", "origin", "HEAD")
+    assert nsl.check(bash("git push", r)) is None
+    (r / "diag.txt").write_text("found " + FAKE_ID + "\n")     # a script writes, adds and commits it
+    git(r, "add", "diag.txt")
+    git(r, "commit", "-qm", "diagnostics")
+    why = nsl.check(bash("git push", r))
+    assert why == "this push would publish the id of a real Claude session in diag.txt:1"
+    assert FAKE_ID not in why
+    git(r, "reset", "-q", "--hard", "HEAD~1")
+    git(r, "commit", "-q", "--allow-empty", "-m", "see " + LINK)
+    assert nsl.check(bash("git push", r)) == "this push would publish a link to a Claude Code session in a commit message"
+
+
+def test_an_escape_before_an_id_does_not_hide_it(repo):
+    assert nsl.check(bash("git commit -m $'subject\\n" + FAKE_ID + "'", repo)) is not None

@@ -277,9 +277,9 @@ def test_each_commit_is_checked_against_its_own_repository(cfg, public, private)
 def test_parse_keeps_here_documents_and_write_targets():
     cmds = commandline.parse("cat > a.md <<'EOF'\nline one\nEOF\necho hi 2>&1 1>b.txt 2> err | tee -a c.md")
     assert cmds == [
-        {"words": ["cat"], "writes": ["a.md"], "heredoc": "line one\n"},
-        {"words": ["echo", "hi"], "writes": ["b.txt"], "heredoc": None},
-        {"words": ["tee", "-a", "c.md"], "writes": [], "heredoc": None},
+        {"words": ["cat"], "writes": ["a.md"], "heredoc": "line one\n", "piped": False},
+        {"words": ["echo", "hi"], "writes": ["b.txt"], "heredoc": None, "piped": False},
+        {"words": ["tee", "-a", "c.md"], "writes": [], "heredoc": None, "piped": True},
     ]
     assert commandline.simple_commands("cat > a.md <<'EOF'\nit's data\nEOF\ngit add a.md") == \
         [["cat"], ["git", "add", "a.md"]]
@@ -324,3 +324,137 @@ def test_the_cli_offers_the_hook(cfg, public, monkeypatch):
     monkeypatch.setenv(pv.CONFIG_ENV, cfg.path)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(write(public / "n.md", "quuxcorp"))))
     assert cli.main(["hook", "public-voice"]) == 2
+
+
+# --- shapes found in review ----------------------------------------------------------------------
+
+def remote_repo(tmp_path, name):
+    """A repository whose origin is a bare folder (fetch) and whose push URL names the public slug.
+    The hook only reads that URL; nothing is ever pushed to it."""
+    bare = tmp_path / f"{name}.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    r = make_repo(tmp_path, name, "example-owner/thing")
+    git(r, "remote", "set-url", "origin", str(bare))
+    git(r, "push", "-q", "-u", "origin", "HEAD")
+    git(r, "remote", "set-url", "--push", "origin", "https://github.com/example-owner/thing.git")
+    return r
+
+
+def test_messages_given_the_ways_claude_code_and_people_give_them(cfg, public, tmp_path):
+    std = "git commit -m \"$(cat <<'EOF'\nAdd a thing\n\nmade for zorblax\nEOF\n)\""
+    assert pv.check(bash(std, public), cfg) == "'zorblax' in the commit message"
+    assert pv.check(bash("gh pr create --title t --body \"$(cat <<'EOF'\n- for zorblax\nEOF\n)\"", public), cfg) == \
+        "'zorblax' in the gh pr text"
+    assert pv.check(bash("git commit -F - <<'EOF'\nquuxcorp\nEOF", public), cfg) == "'quuxcorp' in the commit message"
+    assert pv.check(bash("gh pr create --title t --body-file - <<'EOF'\nquuxcorp\nEOF", public), cfg) is not None
+    msg = tmp_path / "m.txt"
+    assert pv.check(bash(f"cat > {msg} <<'EOF'\nzorblax subject\nEOF\ngit commit -F {msg}", public), cfg) == \
+        "'zorblax' in the commit message"
+    (public / "msg.txt").write_text("about quuxcorp\n")
+    assert pv.check(bash('git commit -m "$(cat msg.txt)"', public), cfg) == "'quuxcorp' in the commit message"
+    assert pv.check(bash("git commit --allow-empty -m ok --trailer 'Refs: zorblax'", public), cfg) is not None
+    assert pv.check(bash("git merge --no-ff -m 'merge zorblax' side", public), cfg) == "'zorblax' in the merge message"
+    assert pv.check(bash("git notes add -m zorblax", public), cfg) == "'zorblax' in the notes message"
+    assert pv.check(bash("git commit -m $'subject\\n\\nzorblax body'", public), cfg) is not None
+
+
+def test_wrappers_and_comments(cfg, public):
+    assert pv.check(bash("rtk proxy git commit -m zorblax", public), cfg) == "'zorblax' in the commit message"
+    assert pv.check(bash("timeout 60 git commit -m zorblax", public), cfg) is not None
+    assert pv.check(bash("timeout 30 gh pr create --body zorblax", public), cfg) is not None
+    (public / "a.txt").write_text("one\ntwo\nzorblax\n")              # changed, not staged
+    assert pv.check(bash("timeout 60 git commit -qm ok", public), cfg) is None
+    assert pv.check(bash("echo hi > f.md  # zorblax comes later", public), cfg) is None
+    assert pv.check(bash("git commit -qm ok  # don't forget\ngit status", public), cfg) is None
+
+
+def test_the_command_is_read_when_a_part_of_it_cannot_be(cfg, public):
+    got = pv.check(bash('MSG="for zorblax"; git commit -m "$MSG"', public), cfg)
+    assert got.startswith("'zorblax' in the command, which publishes to a public repository")
+    assert pv.check(bash("bash -c 'git commit -m zorblax'", public), cfg) is not None
+    assert pv.check(bash(f"git -C {public} commit -m 'plain words'", public.parent), cfg) is None
+
+
+def test_more_gh_forms(cfg, public, private):
+    assert pv.check(bash("gh -R example-owner/thing pr create --title t --body zorblax", private), cfg) is not None
+    assert pv.check(bash("gh pr -R example-owner/thing create --title t --body zorblax", private), cfg) is not None
+    assert pv.check(bash("GH_REPO=example-owner/thing gh issue create --body zorblax", private), cfg) is not None
+    assert pv.check(bash("gh api repos/example-owner/thing/issues -f title=t -f body=zorblax", private), cfg) == \
+        "'zorblax' in the gh api call"
+    assert pv.check(bash("gh api -X GET repos/example-owner/thing/issues -f q=zorblax", private), cfg) is None
+    assert pv.check(bash("gh api repos/example-owner/secret/issues -f body=zorblax", public), cfg) is None
+    assert pv.check(bash("gh repo edit example-owner/thing --description 'zorblax tools'", private), cfg) == \
+        "'zorblax' in the gh repo text"
+    assert pv.check(bash("gh repo create example-owner/brand-new --public -d zorblax", private), cfg) is not None
+    assert pv.check(bash("gh repo create example-owner/brand-new --private -d zorblax", private), cfg) is None
+    assert pv.check(bash("gh pr merge 3 --merge --subject zorblax", public), cfg) is not None
+    assert pv.check(bash("gh pr checkout 12 -b zorblax-fix", public), cfg) is None      # a local branch
+    assert pv.check(bash("gh issue list -m zorblax", public), cfg) is None              # a read
+
+
+def test_more_write_forms(cfg, public, tmp_path):
+    assert pv.check(bash("echo zorblax | tee notes.md", public), cfg) == "'zorblax' in the text written to notes.md"
+    assert pv.check(bash("cat <<'EOF' | tee -a notes.md\nquuxcorp\nEOF", public), cfg) is not None
+    assert pv.check(bash("cat > notes.md <<'END-DOC'\nit's for zorblax\nEND-DOC", public), cfg) is not None
+    assert pv.check(bash("psql <<'EOF' > out.txt\nselect 'zorblax';\nEOF", public), cfg) is None
+    assert pv.check(bash("echo zorblax > .git/info/exclude", public), cfg) is None
+    assert pv.check(write(public / ".git" / "hooks" / "pre-commit", "zorblax"), cfg) is None
+    (public / ".gitignore").write_text(".env.local\nnode_modules/\n")
+    assert pv.check(write(public / ".env.local", "TOKEN_FOR=zorblax"), cfg) is None
+    assert pv.check(write(public / "node_modules" / "x" / "index.js", "zorblax"), cfg) is None
+    new = tmp_path / "brand-new-folder"
+    assert pv.check(bash(f"mkdir -p {new} && cd {new} && echo zorblax > notes.md", public), cfg) is None
+
+
+def test_more_commit_forms(cfg, public):
+    (public / ".gitignore").write_text("local.md\n")
+    git(public, "add", ".gitignore")
+    git(public, "commit", "-qm", "ignore")
+    (public / "local.md").write_text("zorblax\n")
+    assert pv.check(bash("git add local.md && git commit -qm ok", public), cfg) is None    # git refuses that add
+    assert pv.check(bash("git add -f local.md && git commit -qm ok", public), cfg) == \
+        "'zorblax' in local.md:1, which this commit would record"
+    (public / "quuxcorp").mkdir()
+    (public / "quuxcorp" / ".gitkeep").write_text("")
+    assert pv.check(bash("git add quuxcorp/.gitkeep && git commit -qm ok", public), cfg) == \
+        "'quuxcorp' in the file name quuxcorp/.gitkeep, which this commit would record"
+    (public / "other.md").write_text("zorblax\n")
+    git(public, "add", "other.md")
+    (public / "a.txt").write_text("one\ntwo\nthree\nfour\n")
+    assert pv.check(bash("git commit -qm ok a.txt", public), cfg) is None      # other.md is not committed
+    assert pv.check(bash("git commit -qm ok -i a.txt", public), cfg) is not None
+
+
+def test_a_push_reads_the_commits_no_remote_has(cfg, tmp_path):
+    r = remote_repo(tmp_path, "pushed")
+    git(r, "commit", "-q", "--allow-empty", "-m", "clean")
+    assert pv.check(bash("git push", r), cfg) is None
+    (r / "gen.md").write_text("generated for zorblax\n")      # as a script would, out of sight
+    git(r, "add", "gen.md")
+    git(r, "commit", "-qm", "generated")
+    assert pv.check(bash("git push", r), cfg) == "'zorblax' in gen.md:1, which this push would publish"
+    assert pv.check(bash("git push origin HEAD:main", r), cfg) is not None
+    assert pv.check(bash("git push --dry-run", r), cfg) is None
+    assert pv.check(bash("git push origin --delete old-branch", r), cfg) is None
+    r2 = remote_repo(tmp_path, "pushed-message")
+    git(r2, "commit", "-q", "--allow-empty", "-m", "about quuxcorp")
+    assert pv.check(bash("git push", r2), cfg) == "'quuxcorp' in a commit message, which this push would publish"
+    r3 = remote_repo(tmp_path, "pushed-private")
+    git(r3, "remote", "set-url", "--push", "origin", "https://github.com/example-owner/secret.git")
+    git(r3, "commit", "-q", "--allow-empty", "-m", "about quuxcorp")
+    assert pv.check(bash("git push", r3), cfg) is None
+
+
+def test_github_calls_that_only_read_and_a_branch_that_is_public(cfg):
+    read = {"tool_name": "mcp__github__get_file_contents",
+            "tool_input": {"owner": "example-owner", "repo": "thing", "ref": "feat/zorblax"}}
+    assert pv.check(read, cfg) is None
+    branch = {"tool_name": "mcp__github__create_branch",
+              "tool_input": {"owner": "example-owner", "repo": "thing", "branch": "zorblax-notes"}}
+    assert pv.check(branch, cfg) == "'zorblax' in the GitHub call"
+
+
+def test_a_single_term_written_without_its_list(tmp_path):
+    (tmp_path / "c.json").write_text(json.dumps({"terms": "zorblax", "allow": "zorblax-public"}))
+    c = pv.load(str(tmp_path / "c.json"))
+    assert c.terms == ["zorblax"] and c.allow == ["zorblax-public"]
