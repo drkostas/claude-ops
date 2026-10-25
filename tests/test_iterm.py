@@ -66,6 +66,17 @@ def test_a_session_or_terminal_names_one_window_or_none():
     assert iterm.window_of_ttys(set(), raw) is None
 
 
+def test_every_window_of_some_terminals_and_unreadable_is_none(monkeypatch):
+    raw = "5\t/dev/ttys001\n5\t/dev/ttys002\n6\t/dev/ttys003\n"
+    assert iterm.windows_of_ttys({"/dev/ttys001", "/dev/ttys003"}, raw) == {5, 6}   # both, not none
+    assert iterm.windows_of_ttys({"/dev/ttys002"}, raw) == {5}
+    assert iterm.windows_of_ttys({"/dev/ttys009"}, raw) == set()   # read, and shown nowhere
+    assert iterm.windows_of_ttys({"/dev/ttys009"}, "") == set()    # no windows at all
+    assert iterm.windows_of_ttys(set(), raw) == set()
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: None)
+    assert iterm.windows_of_ttys({"/dev/ttys001"}) is None         # iTerm2 did not answer
+
+
 def test_session_uuid_and_unsafe_ids_are_refused(monkeypatch):
     assert iterm.session_uuid("w0t1p0:ABC-1") == "ABC-1" and iterm.session_uuid("nope") is None
     monkeypatch.setattr(iterm, "_osa", lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked")))
