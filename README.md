@@ -165,6 +165,17 @@ never an orphan. Each is matched to a live `docker run` client of the same image
 seconds of it; one with no client is an orphan. A container younger than `--min-age` minutes (120)
 is left alone, since its client may still be starting.
 
+## One Tavily server for several keys
+
+Each Tavily API key has its own usage limit. One MCP server per key means one process per key in every chat, and moving to the next server by hand when one says its limit is reached. `claude_ops.tavily` is one MCP server that holds all the keys and moves to the next by itself when Tavily refuses a key for its limit (HTTP 429, 432 or 433) or as invalid (401). It offers the tools of the tavily-mcp package, with the same names and arguments (`tavily_search`, `tavily_extract`, `tavily_crawl`, `tavily_map`, `tavily_research`), and needs nothing beyond the standard library.
+
+```json
+{"mcpServers": {"tavily": {"command": "python3", "args": ["-m", "claude_ops.tavily"],
+                           "env": {"TAVILY_API_KEYS": "tvly-one,tvly-two,tvly-three"}}}}
+```
+
+A refused key rests for an hour (a day when it is invalid or the plan's limit is reached), and the next request starts with the next key. Which keys rest is kept in `~/.local/state/claude-ops/tavily-keys.json` (`CLAUDE_OPS_TAVILY_STATE` names another), as a hash of each key and the time it may be used again, so the servers of several chats skip the same spent key. When every key rests, the tool says so and when the first comes back.
+
 ## An Android device back on adb after a restart
 
 ```bash
