@@ -27,6 +27,11 @@ FENCE = re.compile(r"^\s{0,3}(```|~~~|\\`\\`\\`)")
 #: a short line followed by another is a line its writer meant as its own (a list without markers, one
 #: check per line), and joining those would make the text worse, not better
 MIN_WRAPPED = 45
+#: ⛔ AND NO EDITOR WRAPS THIS LONG. Wrap widths are 72, 80 or 100; a longer line is a paragraph
+#: already on one line (or one this module joined), so the line after it is not its continuation.
+#: Without this a second unwrap joined what the first had left apart, and text unwrap had written was
+#: read as wrapped again (two joined lines of 332 and 434 characters)
+MAX_WRAPPED = 120
 #: a line that starts a block of its own, so it is never joined to the line before
 BLOCK = re.compile(r"^\s*(?:[-*+]\s|\d{1,9}[.)]\s|#{1,6}(?:\s|$)|>|\||<)")
 #: a horizontal rule
@@ -49,8 +54,18 @@ def _stands_alone(stripped: str) -> bool:
 
 
 def unwrap(text: str) -> str:
-    """`text` with the lines of each paragraph and list item joined into one line."""
-    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    """`text` with the lines of each paragraph and list item joined into one line. It is idempotent:
+    `unwrap(unwrap(t)) == unwrap(t)`, so text it wrote is never read as wrapped (is_wrapped)."""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    while True:
+        joined = _unwrap_once(text)
+        if joined == text:
+            return joined
+        text = joined
+
+
+def _unwrap_once(text: str) -> str:
+    lines = text.split("\n")
     out: list[str] = []
     in_fence = False
     joinable = False            # whether the last line out may take the next one
@@ -74,8 +89,8 @@ def unwrap(text: str) -> str:
             out.append(line)            # indented code, after a blank line or a block
             continue
         alone = _stands_alone(stripped)
-        if (joinable and len(before.rstrip()) >= MIN_WRAPPED and not alone and not BLOCK.match(line)
-                and not RULE.match(line)):
+        if (joinable and MIN_WRAPPED <= len(before.rstrip()) <= MAX_WRAPPED and not alone
+                and not BLOCK.match(line) and not RULE.match(line)):
             out[-1] = out[-1].rstrip() + " " + stripped
             joinable = not _hard_break(line)
             continue

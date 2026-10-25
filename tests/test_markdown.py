@@ -78,3 +78,17 @@ def test_an_escaped_fence_is_still_a_code_block():
     out = markdown.unwrap(text)
     assert "wrapped here because it kept going." in out
     assert "the rest of a long request line\nGET /api/things" in out
+
+
+def test_unwrap_is_idempotent_and_a_line_no_editor_wraps_is_not_continued():
+    # two joined runs of a long sentence, as a first unwrap leaves them: neither is a wrapped line
+    first = "For a shared window, the tool " + "lets the user drive it " * 14 + "at confirm,"
+    second = "producing events " + "that say what happened " * 18 + "and nothing else."
+    done = f"Title\n\n{first}\n{second}\n"
+    assert len(first) > markdown.MAX_WRAPPED and not markdown.is_wrapped(done) and markdown.unwrap(done) == done
+    # a long line, a short one, then another: whatever one pass joins, a second pass joins nothing more
+    for text in ("A line that is long enough to have been wrapped by an editor\nshort end,\n"
+                 "and a third line that follows it here.\n",
+                 "Intro line that is long enough to look wrapped at seventy-two\ncolumns\nthen more\n"):
+        once = markdown.unwrap(text)
+        assert markdown.unwrap(once) == once and not markdown.is_wrapped(once), text
