@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import subprocess
 import time
+
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from claude_ops import mcp_containers as mc
@@ -165,6 +167,18 @@ def test_the_environment_given_reaches_every_command():
     assert seen == [{"PATH": "/usr/bin"}] * 3        # docker ps, ps (no containers, so no inspect), docker stop
     mc.read(runner)
     assert seen[-1] is None
+
+
+def test_a_failed_process_list_raises_instead_of_reading_as_no_clients():
+    """A `ps` that fails is not an empty client list: every container would then look orphaned."""
+    def runner(argv, **kw):
+        if argv[0] == "docker" and argv[1] == "ps":
+            return subprocess.CompletedProcess(argv, 0, "abc123def456\t2026-01-01 10:00:00 +0000 UTC\tghcr.io/example/mcp\tdocker-entrypoint\n", "")
+        if argv[0] == "docker":
+            return subprocess.CompletedProcess(argv, 0, "abc123def456\ttrue\t<no value>\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", "ps: unexpected argument")
+    with pytest.raises(RuntimeError, match="ps failed"):
+        mc.read(runner)
 
 
 def test_main_says_when_docker_does_not_answer(capsys):
