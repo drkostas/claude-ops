@@ -21,10 +21,12 @@ The token needs a scope that can read mail (gmail.readonly is enough).
 """
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 
 API = "https://gmail.googleapis.com/gmail/v1/users/me/"
@@ -55,6 +57,65 @@ def _client(token: dict, client_file) -> dict:
         raise ValueError(f"{client_file} holds no client_id and client_secret")
     return {"client_id": inner["client_id"], "client_secret": inner["client_secret"],
             "token_uri": inner.get("token_uri") or TOKEN_URI}
+
+
+def _part_data(part: dict) -> str:
+    """The decoded text of one MIME part's body, or "" when it carries none. Gmail returns body
+    data base64url-encoded without padding, so the padding is restored before decoding."""
+    data = (part.get("body") or {}).get("data")
+    if not data:
+        return ""
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", "replace")
+
+
+def _first_part(payload: dict, mime: str) -> str:
+    """The first part of this MIME type in a payload tree, decoded, walking the tree depth-first;
+    "" when there is none."""
+    if payload.get("mimeType") == mime:
+        text = _part_data(payload)
+        if text:
+            return text
+    for part in payload.get("parts") or []:
+        text = _first_part(part, mime)
+        if text:
+            return text
+    return ""
+
+
+class _Stripper(HTMLParser):
+    """Collect an HTML document's text, skipping script and style and marking tag boundaries with a
+    space so adjacent blocks do not run together; HTMLParser decodes character references itself."""
+
+    def __init__(self):
+        super().__init__()
+        self._skip = 0
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip += 1
+        elif not self._skip:
+            self._text.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style") and self._skip:
+            self._skip -= 1
+        elif not self._skip:
+            self._text.append(" ")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._text.append(data)
+
+    def text(self) -> str:
+        return "".join(self._text)
+
+
+def _strip_tags(html: str) -> str:
+    """An HTML part reduced to its text, runs of whitespace collapsed to single spaces."""
+    stripper = _Stripper()
+    stripper.feed(html)
+    return " ".join(stripper.text().split())
 
 
 class Mailbox:
@@ -119,3 +180,16 @@ class Mailbox:
         got = {h["name"]: h["value"] for h in (out.get("payload") or {}).get("headers", [])}
         return {"id": out.get("id", message_id), "threadId": out.get("threadId"),
                 "labels": out.get("labelIds", []), "snippet": out.get("snippet", ""), "headers": got}
+
+    def body(self, message_id: str) -> str:
+        """The message's text, for a watcher that must read it and not only its headers: the first
+        text/plain part decoded (walking a multipart message), else the text/html part with its
+        tags stripped, else "". It takes the same token path as `message`, asks for the full
+        message, and writes nothing to either file."""
+        out = self._get("messages/" + urllib.parse.quote(message_id, safe=""), [("format", "full")])
+        payload = out.get("payload") or {}
+        plain = _first_part(payload, "text/plain")
+        if plain:
+            return plain
+        html = _first_part(payload, "text/html")
+        return _strip_tags(html) if html else ""
