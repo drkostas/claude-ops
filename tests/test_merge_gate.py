@@ -97,3 +97,8 @@ def test_main_refuses_with_its_signature_and_fails_open(tmp_path, monkeypatch, c
     assert err.startswith("Blocked:") and "Ship it with tools/ship.sh." in err
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert mg.main(["--config", str(f)]) == 0
+
+
+@pytest.mark.parametrize("command", ["claude-ops merge --help", "gh pr merge -h", "gh pr merge 7 --help"])
+def test_asking_for_help_merges_nothing(clones, command):
+    assert bash(command, clones["service"]) is None
