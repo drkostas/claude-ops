@@ -157,6 +157,23 @@ A command a chat starts in the background shares the chat's process group, so it
 does. `detach` starts it as the leader of a new session (macOS has no `setsid` command), with no
 input and its output appended to the log, and prints its pid, which is also its group id.
 
+## Telling a chat before acting on it
+
+```python
+from claude_ops import ladder
+t = ladder.Timing(skip_after=120, interrupt_at=ladder.interrupt_at(start, after=600))
+step = ladder.next_step(ladder.Seen(started=start, now=time.time(), delivered=delivered_at,
+                                    turn_ended=last_turn_end), t, may_interrupt=(True, ""))
+# step.name is "wait", "skip", "interrupt", "act" or "done", and step.why says why
+```
+
+A supervisor that pauses, restarts or stops a chat should tell it first, so the chat can finish or
+park its step. `ladder` is the rule for how far to go. The notice waits in the queue, is pushed past
+it after `skip_after` seconds, the chat is interrupted once if it still works at `interrupt_at`, and
+the action runs once the chat ends a turn after the notice or the interrupt (or after `grace` when
+the key could not be pressed, for example while a person types in that chat). The caller does each
+step and records it.
+
 ## The MCP server containers a chat left behind
 
 ```bash
