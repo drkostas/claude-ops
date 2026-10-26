@@ -98,7 +98,7 @@ def option(words: list[str], *names: str) -> str | None:
 
 def merged_repo(words: list[str], here: str) -> str | None:
     """The repository a simple command merges a pull request in, or None when it merges none."""
-    if not words:
+    if not words or "-h" in words or "--help" in words:   # asking how to merge merges nothing
         return None
     prog = os.path.basename(words[0])
     if prog == "claude-ops" and words[1:2] == ["merge"]:
