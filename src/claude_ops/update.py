@@ -306,7 +306,7 @@ def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
          turn_ended_at: dt.datetime | None, now: dt.datetime,
          prompt_on_screen: bool | None = None, *, quiet_s: float = QUIET_S,
          quiet_unhooked_s: float = QUIET_UNHOOKED_S,
-         commands: Mapping[int, str] | None = None) -> tuple[bool, str]:
+         commands: Mapping[int, str] | None = None, background_ok: bool = False) -> tuple[bool, str]:
     """(is the chat idle, why). Every "no" says what it is waiting for.
 
     `procs` is `config.processes()`, `transcript_at` is `last_activity(...)`, `turn_ended_at`
@@ -314,10 +314,20 @@ def idle(pid: int, procs: dict[int, dict], transcript_at: dt.datetime | None,
     `prompt_on_screen` whether Claude's empty prompt is on its screen (`empty_prompt`), None when
     the caller did not look. `commands` holds the full command line of the chat's shells
     (`command_lines`); with it, a shell that only waits (`waiting_shells`) does not count as a
-    running command, because a restart loses nothing of it."""
+    running command, because a restart loses nothing of it.
+
+    `background_ok` is for a caller that only types a slash command at the prompt, which stops
+    nothing: a shell then holds the chat only while its turn runs. A command the turn started in
+    the foreground exists only until the turn ends, and one started in the background outlives
+    the turn's recorded end, so with a recorded end and the quiet after it, the shells left are
+    background ones. With no recorded end they still hold it, since nothing tells the two apart."""
     shells = shell_children(pid, procs)
     if commands is not None:
         shells = [s for s in shells if s not in waiting_shells(shells, procs, commands)]
+    if shells and background_ok and turn_ended_at is not None and transcript_at is not None \
+            and turn_ended_at >= transcript_at - dt.timedelta(seconds=5) \
+            and (now - transcript_at).total_seconds() >= quiet_s:
+        return True, f"its turn ended, and only commands it left running in the background run ({len(shells)})"
     if shells:
         oldest = min(shells, key=lambda p: procs[p].get("started") or now)
         started = procs[oldest].get("started")
@@ -885,9 +895,13 @@ def question_unreachable(screen: str | None, seconds_since_input: float | None, 
 def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
           turn_ended_at: dt.datetime | None, now: dt.datetime, *,
           projects: Path = PROJECTS, commands: Mapping[int, str] | None = None,
-          question_blocks: bool = True) -> tuple[bool, str]:
+          question_blocks: bool = True, background_ok: bool = False) -> tuple[bool, str]:
     """(may this chat be restarted or typed into now, why). Everything a chat produces is read:
     what is on its screen, its transcript and process (`idle`), and its background agents.
+
+    `background_ok` answers for a slash command typed at the prompt (`/remote-control` after a
+    login change), which stops nothing: commands and agents the chat left running in the
+    background do not hold it then (`idle`), and a restart, which ends them, never passes it.
 
     A question on its screen is named first. While Claude waits for an answer the turn has not
     ended, and `idle` alone said "it is working" for a chat that had waited hours for the person.
@@ -907,10 +921,10 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
     if commands is None:
         commands = command_lines(shell_children(pid, procs))
     ok, why = idle(pid, procs, last_activity(transcript_of(chat_id, projects)), turn_ended_at,
-                   now, prompt_on_screen=prompt[0], commands=commands)
+                   now, prompt_on_screen=prompt[0], commands=commands, background_ok=background_ok)
     if not ok:
         return ok, why
-    agent = background_agent(chat_id, now.timestamp(), projects)
+    agent = None if background_ok else background_agent(chat_id, now.timestamp(), projects)
     if agent:
         return False, f"a background agent it started is still working ({agent})"
     return prompt
