@@ -50,8 +50,8 @@ in the `personal_repositories`, which are about the person and carry their name 
 under `key` in another JSON file, read on each run, so a list another program keeps current needs
 no change here. Matching ignores case. `message` is added to every refusal.
 
-    python -m claude_ops.hooks.public_voice [--config FILE]     # reads the tool call on stdin
-    python -m claude_ops.hooks.public_voice [--config FILE] --terms | --terms-for OWNER/REPO | --allow
+    python3 -P -m claude_ops.hooks.public_voice [--config FILE]     # reads the tool call on stdin
+    python3 -P -m claude_ops.hooks.public_voice [--config FILE] --terms | --terms-for OWNER/REPO | --allow
 
 `--terms` prints every term, `--terms-for` the terms that apply to one repository and `--allow` the
 allow list, one per line, for a CI check that reads the same lists from a secret. The configuration
