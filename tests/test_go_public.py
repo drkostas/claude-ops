@@ -155,6 +155,18 @@ def test_runners_github_will_not_list_stop_it_only_when_it_would_go_public():
     assert "4. could not list its self-hosted runners" in said and out["runners"] is None
 
 
+def test_before_checks_runs_before_the_pull_request_and_only_when_one_is_needed():
+    world = FakeWorld({"README.md": "A tool.\n"}, "")
+    calls = []
+    _go(world, check_only=True, before_checks=lambda repo, public: calls.append((repo, public, len(world.cmds))))
+    made = next(i for i, c in enumerate(world.cmds) if c[:3] == ["gh", "pr", "create"])
+    assert calls and calls[0][:2] == ("example/repo", False) and calls[0][2] < made
+    done = FakeWorld({"README.md": "A tool.\n"}, "", on_main=g.FILES, secrets=g.SECRETS)
+    calls = []
+    _go(done, check_only=True, before_checks=lambda repo, public: calls.append(repo))
+    assert calls == []
+
+
 def test_check_only_leaves_it_private_with_the_check_in_place():
     world = FakeWorld({"README.md": "A tool.\n"}, "")
     _go(world, check_only=True)
