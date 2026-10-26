@@ -12,7 +12,11 @@ is in it has been readable all along. `go` makes it one step, stopping at the fi
   2. set the secrets that hold the terms and the allowed text, piped on stdin, never printed;
   3. copy the workflow and its script from a reference repository through a pull request that must
      pass that check, merged with --merge;
-  4. check that the files are on the default branch and the secrets exist;
+  4. check that the files are on the default branch and the secrets exist, and that no self-hosted
+     runner is registered to the repository: once it is public, a pull request from a fork can run
+     its jobs on one, so the machine behind it would run a stranger's code. `before_public(repo,
+     runners)` may remove them first; a runner still there, or a list GitHub would not give, stops
+     it (an already public repository, or check_only, is only reported on);
   5. make the repository public (skipped with check_only, or when it already is);
   6. call `after(repo)`, for whatever the caller keeps about repository visibility.
 
@@ -118,11 +122,22 @@ def has_secret(repo: str, name: str, run=sh) -> bool:
     return run(["gh", "api", f"repos/{repo}/actions/secrets/{name}"], check=False).returncode == 0
 
 
+def self_hosted_runners(repo: str, run=sh) -> list[str] | None:
+    """The names of the self-hosted runners registered to `repo`, or None when GitHub did not list
+    them (listing them needs admin rights on the repository)."""
+    r = run(["gh", "api", f"repos/{repo}/actions/runners", "--paginate", "--jq", ".runners[].name"],
+            check=False)
+    if r.returncode != 0:
+        return None
+    return [n.strip() for n in r.stdout.splitlines() if n.strip()]
+
+
 def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_only: bool = False,
        files: tuple[str, ...] = FILES, secrets: tuple[str, str] = SECRETS, workflow: str = WORKFLOW,
-       after=None, run=sh, say=print) -> dict:
+       before_public=None, after=None, run=sh, say=print) -> dict:
     """The whole sequence for `repo` (owner/name), with the check copied from `reference`. Returns
-    {"repo", "public", "files_added", "hits"}; raises Refused at the first step that must stop it."""
+    {"repo", "public", "files_added", "hits", "runners"}; raises Refused at the first step that must
+    stop it."""
     info = json.loads(run(["gh", "repo", "view", repo, "--json",
                            "visibility,defaultBranchRef,nameWithOwner"]).stdout)
     branch = info["defaultBranchRef"]["name"]
@@ -168,6 +183,25 @@ def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_o
     if gone or no_secret:
         raise Refused(f"after setting up, still missing: {', '.join(gone + no_secret)}")
     say(f"4. checked: the files are on {branch} and the secrets exist")
+    going = not public and not check_only
+    runners = self_hosted_runners(repo, run)
+    if runners and going and before_public is not None:
+        before_public(repo, runners)
+        runners = self_hosted_runners(repo, run)
+    if runners is None:
+        if going:
+            raise Refused(f"GitHub did not list the self-hosted runners of {repo} (that needs admin "
+                          "rights), so nothing shows that none would run a fork's pull request")
+        say("4. could not list its self-hosted runners")
+    elif runners:
+        found = f"{len(runners)} self-hosted runner(s) registered ({', '.join(runners)})"
+        if going:
+            raise Refused(f"{found}: on a public repository a pull request from a fork can run its "
+                          "jobs on them; remove them first")
+        say(f"4. {found}: " + ("a pull request from a fork can run its jobs on them now" if public
+                               else "they must go before it turns public"))
+    else:
+        say("4. no self-hosted runner is registered")
 
     if not public and not check_only:
         run(["gh", "repo", "edit", repo, "--visibility", "public",
@@ -178,7 +212,7 @@ def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_o
         say(f"5. left {'public' if public else 'private'}, as it was")
     if after is not None:
         after(repo)
-    return {"repo": repo, "public": public, "files_added": bool(missing), "hits": hits}
+    return {"repo": repo, "public": public, "files_added": bool(missing), "hits": hits, "runners": runners}
 
 
 def add_files(repo: str, branch: str, reference: str, *, files: tuple[str, ...] = FILES,
