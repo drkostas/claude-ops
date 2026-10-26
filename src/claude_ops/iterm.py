@@ -355,13 +355,25 @@ def parse_ttys(raw: str | None) -> list[tuple[int, str]]:
     return out
 
 
+def tty_listing(*, env: Mapping[str, str] | None = None) -> str | None:
+    """Every iTerm2 session's terminal with its window, read in one AppleScript call, or None when
+    iTerm2 did not answer within 8 seconds. Pass it as `raw` to window_of_ttys and windows_of_ttys
+    to answer for many terminals from one reading.
+
+    Each of those calls without `raw` walks every window, tab and session again. Asked once per
+    tmux session, that is close to a second each while iTerm2 answers, and the whole 8 seconds
+    each while it does not (a consent prompt can hold its Apple Events for hours), so a loop over
+    eight sessions waited more than a minute before giving up."""
+    return _osa(_TTYS, 8, env=env)
+
+
 def window_of_ttys(ttys: set[str], raw: str | None = None, *,
                    env: Mapping[str, str] | None = None) -> int | None:
     """The one iTerm2 window holding a session on one of these terminals, or None (none, or several:
     never a guess). A terminal is an identity; a window's title names only its front tab."""
     if not ttys:
         return None
-    pairs = parse_ttys(_osa(_TTYS, 8, env=env) if raw is None else raw)
+    pairs = parse_ttys(tty_listing(env=env) if raw is None else raw)
     hits = {w for w, tty in pairs if tty in ttys}
     return hits.pop() if len(hits) == 1 else None
 
@@ -374,7 +386,7 @@ def windows_of_ttys(ttys: set[str], raw: str | None = None, *,
     reads there as shown nowhere, and a caller that then opens a tab for it opens one more each time."""
     if not ttys:
         return set()
-    raw = _osa(_TTYS, 8, env=env) if raw is None else raw
+    raw = tty_listing(env=env) if raw is None else raw
     if raw is None:
         return None
     return {w for w, tty in parse_ttys(raw) if tty in ttys}

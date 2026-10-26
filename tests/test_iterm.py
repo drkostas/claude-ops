@@ -77,6 +77,18 @@ def test_every_window_of_some_terminals_and_unreadable_is_none(monkeypatch):
     assert iterm.windows_of_ttys({"/dev/ttys001"}) is None         # iTerm2 did not answer
 
 
+def test_one_listing_answers_for_many_terminals(monkeypatch):
+    asked = []
+    monkeypatch.setattr(iterm, "_osa", lambda script, timeout=5, **k: asked.append(timeout)
+                        or "5\t/dev/ttys001\n6\t/dev/ttys002\n")
+    raw = iterm.tty_listing()
+    got = [iterm.window_of_ttys({t}, raw) for t in ("/dev/ttys001", "/dev/ttys002", "/dev/ttys009")]
+    assert got == [5, 6, None] and iterm.windows_of_ttys({"/dev/ttys002"}, raw) == {6}
+    assert asked == [8]                                             # one question for all of them
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: None)
+    assert iterm.tty_listing() is None                              # iTerm2 did not answer
+
+
 def test_session_uuid_and_unsafe_ids_are_refused(monkeypatch):
     assert iterm.session_uuid("w0t1p0:ABC-1") == "ABC-1" and iterm.session_uuid("nope") is None
     monkeypatch.setattr(iterm, "_osa", lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked")))
