@@ -1,4 +1,8 @@
 """Telling chats apart in a shared iTerm2 window by tab color."""
+import json
+
+import pytest
+
 from claude_ops import iterm
 
 RED, YELLOW, PURPLE, ORANGE = iterm.PALETTE[:4]
@@ -246,3 +250,77 @@ def test_every_idle_shell_is_listed_with_its_folder(tmp_path):
         "/dev/ttys003": (" 32 S+ -bash\n", "/projects/b"),
     })
     assert iterm.idle_shells(raw, run=fake.run) == [(1, "/dev/ttys002", "/projects/a"), (2, "/dev/ttys003", "/projects/b")]
+
+
+def test_a_key_combination_is_named_as_iterm_names_it():
+    assert iterm.key_string("cmd+f") == "0x66-0x100000-0x3"
+    assert iterm.key_string("ctrl+shift+a") == "0x61-0x60000-0x0"
+    for bad in ("", "cmd+", "cmd+f1", "hyper+f", "cmd+cmd+f", "cmd+left"):
+        with pytest.raises(ValueError):
+            iterm.key_string(bad)
+
+
+def test_bytes_to_send_are_written_as_iterm_reads_them():
+    got = iterm.hex_bindings({"cmd+f": [0x0f, 0x2f]})
+    assert got == {"0x66-0x100000-0x3": {"Action": 11, "Text": "0x0f 0x2f", "Version": 1, "Label": ""}}, \
+        "spaces between the codes: iTerm2 sends only the first of codes split by newlines"
+    with pytest.raises(ValueError):
+        iterm.hex_bindings({"cmd+f": [0x100]})
+    with pytest.raises(ValueError):
+        iterm.hex_bindings({"cmd+f": []})
+
+
+def test_only_the_chat_tabs_get_the_keys_once_and_keep_their_own(monkeypatch):
+    import asyncio
+    import sys
+    import types
+
+    class Session:
+        def __init__(self, tty, keys):
+            self.tty, self.keys, self.set = tty, keys, []
+
+        async def async_get_variable(self, name):
+            return self.tty
+
+        async def async_get_profile(self):
+            return types.SimpleNamespace(key_mappings=self.keys)
+
+        async def async_set_profile_properties(self, lp):
+            self.set.append(lp.keys)
+            self.keys = lp.keys
+
+    class Local:
+        def set_key_mappings(self, value):
+            self.keys = value
+
+    own = {"0xf703-0x300000-0x7c": {"Action": 11, "Text": "0x05", "Version": 1}}
+    chat, shell, done = Session("/dev/ttys1", dict(own)), Session("/dev/ttys2", {}), Session("/dev/ttys3", {})
+    done.keys = dict(iterm.hex_bindings({"cmd+f": [0x0f, 0x2f]}))
+    app = types.SimpleNamespace(terminal_windows=[types.SimpleNamespace(tabs=[
+        types.SimpleNamespace(sessions=[chat]), types.SimpleNamespace(sessions=[shell]),
+        types.SimpleNamespace(sessions=[done])])])
+    fake = types.SimpleNamespace(LocalWriteOnlyProfile=Local,
+                                 run_until_complete=lambda main, retry=False: asyncio.run(main(None)))
+
+    async def get_app(connection):
+        return app
+
+    fake.async_get_app = get_app
+    monkeypatch.setitem(sys.modules, "iterm2", fake)
+    monkeypatch.setattr(iterm, "tmux_by_tty", lambda **k: {"/dev/ttys1": "claude-a", "/dev/ttys3": "claude-b"})
+    assert iterm.bind_chat_keys({"cmd+f": [0x0f, 0x2f]}, apply=False) == ["claude-a"] and not chat.set, \
+        "asked without apply, it names the tab that lacks the keys and changes nothing"
+    assert iterm.bind_chat_keys({"cmd+f": [0x0f, 0x2f]}) == ["claude-a"]
+    assert chat.keys["0x66-0x100000-0x3"]["Text"] == "0x0f 0x2f" and chat.keys["0xf703-0x300000-0x7c"] == own["0xf703-0x300000-0x7c"], \
+        "the tab keeps its own keys"
+    assert not shell.set and not done.set, "a tab that is not a chat's, or has the keys, is left alone"
+    assert iterm.bind_chat_keys({"cmd+f": [0x0f, 0x2f]}) == [], "the second pass changes nothing"
+
+
+def test_selecting_a_terminals_tab_answers_its_window(monkeypatch):
+    asked = []
+    monkeypatch.setattr(iterm, "_osa", lambda script, timeout=5, env=None: asked.append(script) or "10275\n")
+    assert iterm.select_tty("/dev/ttys041") == 10275 and '"/dev/ttys041"' in asked[0] and "select t" in asked[0]
+    assert iterm.select_tty('/dev/ttys041" then quit') is None and len(asked) == 1, "a name that is not a terminal asks nothing"
+    monkeypatch.setattr(iterm, "_osa", lambda *a, **k: "")
+    assert iterm.select_tty("/dev/ttys099") is None
