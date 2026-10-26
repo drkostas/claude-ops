@@ -47,11 +47,16 @@ def test_ask_main_fails_open_and_respects_stop_hook_active(monkeypatch, tmp_path
     t = tmp_path / "t.jsonl"
     t.write_text("".join(json.dumps(r) + "\n" for r in turn(REPORT)))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"transcript_path": str(t)})))
-    assert ask.main() == 2
+    assert ask.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["hookEventName"] == "Stop"
+    assert "Pick red or blue" in out["hookSpecificOutput"]["additionalContext"]
+    assert "decision" not in out  # feedback, never a blocking error
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"transcript_path": str(t), "stop_hook_active": True})))
     assert ask.main() == 0
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert ask.main() == 0
+    assert capsys.readouterr().out == ""
 
 
 def setup_monitor(tmp_path, monkeypatch, threshold=100):

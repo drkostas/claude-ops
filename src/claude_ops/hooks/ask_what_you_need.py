@@ -1,16 +1,20 @@
 """Stop hook. A report section that asks the user for something must be asked with AskUserQuestion.
 
 If your chats end their reports with a section such as "What I need from you", the asks in it are
-easy to miss as prose, and then they come back in the next report. This hook blocks the end of a
-turn when that section says anything other than "Nothing" and no AskUserQuestion was called since
-the user last spoke, and tells Claude why.
+easy to miss as prose, and then they come back in the next report. This hook keeps the turn going
+when that section says anything other than "Nothing" and no AskUserQuestion was called since the
+user last spoke, and tells Claude why.
+
+It answers with `hookSpecificOutput.additionalContext`, Claude Code's channel for feedback that is
+not an error: the conversation continues under the same loop protections as a blocked stop, and
+the terminal shows "Stop hook feedback" instead of a red "Stop hook error".
 
 The heading is configurable with CLAUDE_OPS_ASK_HEADING (default "What I need from you").
 
 It is a Stop hook because the problem is a tool that was NOT called, and the end of the turn is the
 only moment that can be seen. It always fails open: an unexpected input lets the turn end, because
 a hook that crashes would be worse than one missed question. And it cannot loop: when the stop was
-already blocked once (`stop_hook_active`), the second stop goes through.
+already held once (`stop_hook_active`), the second stop goes through.
 """
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ def _is_tool_result(rec: dict) -> bool:
 
 
 def check(records: list[dict], heading: str = HEADING_TEXT) -> str | None:
-    """The block reason for this turn, or None when the turn may end."""
+    """Why this turn may not end yet, or None when it may."""
     start = 0
     for i in range(len(records) - 1, -1, -1):
         if records[i].get("type") == "user" and not _is_tool_result(records[i]):
@@ -78,7 +82,7 @@ def check(records: list[dict], heading: str = HEADING_TEXT) -> str | None:
         return None
     first = " ".join(body.split())[:160]
     return (
-        f"Blocked by the ask-what-you-need hook. Your message has a '{heading}' section that is not "
+        f"From the ask-what-you-need hook. Your message has a '{heading}' section that is not "
         "'Nothing', and you did not call AskUserQuestion this turn:\n\n"
         f"    {first}\n\n"
         "Call AskUserQuestion now, one question per real decision (up to four), each with real "
@@ -98,9 +102,13 @@ def main() -> int:
     except Exception:  # noqa: BLE001 - fail open
         return 0
     if reason:
-        print(reason, file=sys.stderr)
-        return 2
+        print(json.dumps(feedback(reason)))
     return 0
+
+
+def feedback(reason: str) -> dict:
+    """The Stop hook output that keeps the turn going with `reason`, shown as feedback, not an error."""
+    return {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": reason}}
 
 
 if __name__ == "__main__":
