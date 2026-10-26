@@ -22,6 +22,14 @@ is in it has been readable all along. `go` makes it one step, stopping at the fi
   5. make the repository public (skipped with check_only, or when it already is);
   6. call `after(repo)`, for whatever the caller keeps about repository visibility.
 
+Two steps are off unless asked for, so a caller that knows the sequence above sees no change:
+`github=True` makes step 1 also read what people wrote on GitHub itself (`scan_github`), and
+`private_reporting=True` turns on GitHub's private vulnerability reporting after step 5 when the
+repository's SECURITY.md sends reports there (`points_to_reporting`).
+
+`survey` is the scan alone: the files, the commit messages and the GitHub text, read and reported,
+with nothing set, added or changed. Use it to see what a repository would carry into the open.
+
 `refresh` sets the secrets again on every public repository that runs the check, after the lists
 change: the secrets are copies.
 
@@ -48,6 +56,15 @@ SECRETS = ("PRIVATE_TERMS", "PRIVATE_ALLOW")
 #: the workflow's name, as `gh pr checks` reports it
 WORKFLOW = "Private terms"
 BRANCH = "ci/private-terms"
+
+
+#: where GitHub looks for a security policy
+SECURITY_PATHS = ("SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md")
+#: a security policy that sends reports to GitHub's private reporting says one of these
+REPORTING = re.compile(r"security advisor|private vulnerability report|/security/advisories", re.I)
+#: what a person has to do about an edit revision, since the API cannot delete one
+EDIT_STEP = ("an edit revision cannot be deleted through the API: delete it from the edit history "
+             "on that page, signed in as someone who may")
 
 
 class Refused(Exception):
@@ -136,10 +153,12 @@ def self_hosted_runners(repo: str, run=sh) -> list[str] | None:
 
 def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_only: bool = False,
        files: tuple[str, ...] = FILES, secrets: tuple[str, str] = SECRETS, workflow: str = WORKFLOW,
-       before_checks=None, before_public=None, after=None, run=sh, say=print) -> dict:
+       before_checks=None, before_public=None, after=None, github: bool = False,
+       private_reporting: bool = False, run=sh, say=print) -> dict:
     """The whole sequence for `repo` (owner/name), with the check copied from `reference`. Returns
-    {"repo", "public", "files_added", "hits", "runners"}; raises Refused at the first step that must
-    stop it."""
+    {"repo", "public", "files_added", "hits", "runners", "reporting"}; raises Refused at the first
+    step that must stop it. `github` adds the text on GitHub to the scan; `private_reporting` turns
+    on private vulnerability reporting once public, when SECURITY.md points to it."""
     info = json.loads(run(["gh", "repo", "view", repo, "--json",
                            "visibility,defaultBranchRef,nameWithOwner"]).stdout)
     branch = info["defaultBranchRef"]["name"]
@@ -160,6 +179,8 @@ def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_o
         say(f"1. {repo} is already public and too large to clone in ten minutes: not scanned, "
             "the check goes in anyway")
         hits = []
+    if github:
+        hits += scan_github(repo, terms, allow, run)
     if hits and not public:
         raise Refused(f"{len(hits)} place(s) carry a private term; rewrite them for an outside "
                       "reader first:\n  " + "\n  ".join(hits[:50]))
@@ -167,7 +188,8 @@ def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_o
         say(f"1. {repo} is already public, and {len(hits)} place(s) in it carry a private term "
             "(said here, not blocking: the check stops new ones):\n  " + "\n  ".join(hits[:50]))
     else:
-        say(f"1. scanned {repo}: no private terms in its files or commit messages")
+        say(f"1. scanned {repo}: no private terms in its files or commit messages"
+            + (", or in its issues, pull requests, comments, reviews and releases" if github else ""))
 
     for name, value in zip(secrets, ("\n".join(terms), "\n".join(allow))):
         run(["gh", "secret", "set", name, "-R", repo], stdin=value)
@@ -214,9 +236,142 @@ def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_o
         say(f"5. {repo} is public")
     else:
         say(f"5. left {'public' if public else 'private'}, as it was")
+    reporting = None
+    if private_reporting and public and not check_only:
+        reporting = turn_on_reporting(repo, branch, run)
+        say("5. private vulnerability reporting is on" if reporting
+            else "5. private vulnerability reporting left as it was: SECURITY.md does not point to it")
     if after is not None:
         after(repo)
-    return {"repo": repo, "public": public, "files_added": bool(missing), "hits": hits, "runners": runners}
+    return {"repo": repo, "public": public, "files_added": bool(missing), "hits": hits, "runners": runners,
+            "reporting": reporting}
+
+
+def survey(repo: str, *, terms: list[str], allow: list[str], run=sh, say=print) -> dict:
+    """Step 1 alone, and wider: every tracked file, every commit message, and everything written on
+    GitHub for `repo`, reported and never changed. Returns {"repo", "public", "hits"}; nothing is
+    set, added or made public. A hit names its place (and its link, for GitHub text), never the text."""
+    if not terms:
+        raise Refused("no terms were given; nothing could be checked")
+    info = json.loads(run(["gh", "repo", "view", repo, "--json", "visibility"]).stdout)
+    with tempfile.TemporaryDirectory(prefix="go-public-") as tmp:
+        run(["gh", "repo", "clone", repo, tmp, "--", "--quiet"])
+        hits = scan(tmp, terms, allow, run)
+    hits += scan_github(repo, terms, allow, run)
+    say(f"{repo}: {len(hits)} place(s) carry a private term" + (":\n  " + "\n  ".join(hits) if hits else ""))
+    return {"repo": repo, "public": info["visibility"].upper() == "PUBLIC", "hits": hits}
+
+
+def _items(repo: str, path: str, run) -> list[dict]:
+    """Every item of a paginated REST list under repos/`repo`/, one JSON object a line."""
+    out = run(["gh", "api", "--paginate", f"repos/{repo}/{path}", "--jq", ".[] | @json"]).stdout
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def github_texts(repo: str, run=sh) -> list[dict]:
+    """What people wrote on GitHub for `repo`, outside its files and commits: issue and pull request
+    titles and descriptions, their earlier titles, issue and pull request comments, review comments,
+    review summaries, commit comments, release names and notes, and every earlier revision of each
+    text GitHub keeps an edit history for. Each entry is {"place", "url", "text", "edit"}, where
+    "edit" is when an earlier revision was replaced (None for the text as it is now)."""
+    texts: list[dict] = []
+    editable: dict[str, tuple[str, str]] = {}          # node id -> (place, url), for edit history
+
+    def add(place, url, text, node=None):
+        if text:
+            texts.append({"place": place, "url": url, "text": text, "edit": None})
+        if node:
+            editable[node] = (place, url)
+
+    for it in _items(repo, "issues?state=all&per_page=100", run):
+        kind = "pull request" if "pull_request" in it else "issue"
+        place = f"{kind} #{it['number']}"
+        add(f"{place} title", it["html_url"], it.get("title"))
+        add(f"{place} description", it["html_url"], it.get("body"), it.get("node_id"))
+        for ev in _items(repo, f"issues/{it['number']}/timeline?per_page=100", run):
+            if ev.get("event") == "renamed":
+                add(f"{place} earlier title", it["html_url"], (ev.get("rename") or {}).get("from"))
+        if kind == "pull request":
+            for rv in _items(repo, f"pulls/{it['number']}/reviews?per_page=100", run):
+                add(f"{place} review", rv.get("html_url") or it["html_url"], rv.get("body"), rv.get("node_id"))
+    for c in _items(repo, "issues/comments?per_page=100", run):
+        add("comment", c["html_url"], c.get("body"), c.get("node_id"))
+    for c in _items(repo, "pulls/comments?per_page=100", run):
+        add("review comment", c["html_url"], c.get("body"), c.get("node_id"))
+    for c in _items(repo, "comments?per_page=100", run):
+        add("commit comment", c["html_url"], c.get("body"), c.get("node_id"))
+    for r in _items(repo, "releases?per_page=100", run):
+        add(f"release {r.get('tag_name')}", r["html_url"], f"{r.get('name') or ''}\n{r.get('body') or ''}".strip())
+    texts += edit_history(editable, run)
+    return texts
+
+
+#: the kinds of node GitHub keeps an edit history for, as the scan reads them
+EDITABLE = ("Issue", "PullRequest", "IssueComment", "PullRequestReview", "PullRequestReviewComment",
+            "CommitComment")
+EDITS = ("query($ids: [ID!]!) { nodes(ids: $ids) { id "
+         + " ".join(f"... on {k} {{ userContentEdits(first: 100) {{ nodes {{ diff editedAt deletedAt }} }} }}"
+                    for k in EDITABLE)
+         + " } }")
+
+
+def edit_history(editable: dict[str, tuple[str, str]], run=sh) -> list[dict]:
+    """The earlier revisions GitHub keeps of each text, by node id -> (place, url), fifty nodes a
+    query. A revision already deleted has no text and is left out."""
+    out: list[dict] = []
+    ids = list(editable)
+    for i in range(0, len(ids), 50):
+        args = ["gh", "api", "graphql", "-f", f"query={EDITS}"]
+        for node in ids[i:i + 50]:
+            args += ["-f", f"ids[]={node}"]
+        data = json.loads(run(args).stdout).get("data") or {}
+        for node in data.get("nodes") or []:
+            if not node:
+                continue
+            place, url = editable.get(node.get("id"), ("", ""))
+            for e in ((node.get("userContentEdits") or {}).get("nodes") or []):
+                if e and e.get("diff") and not e.get("deletedAt"):
+                    out.append({"place": place, "url": url, "text": e["diff"], "edit": e.get("editedAt")})
+    return out
+
+
+def scan_github(repo: str, terms: list[str], allow: list[str], run=sh) -> list[str]:
+    """Where a term appears in what people wrote on GitHub for `repo` (`github_texts`), each with
+    its link and the term's number, never the text. A hit in an edit revision also says what a
+    person has to do about it, since the API cannot delete one."""
+    tp = [re.compile(t, re.I) for t in terms]
+    ap = [re.compile(a, re.I) for a in allow]
+    hits = []
+    for t in github_texts(repo, run):
+        found = matches(t["text"], tp, ap)
+        if not found:
+            continue
+        where = f"{t['place']} edit revision of {t['edit']}" if t["edit"] else t["place"]
+        hit = f"{where} term {','.join(map(str, found))} {t['url']}"
+        hits.append(f"{hit} ({EDIT_STEP})" if t["edit"] else hit)
+    return hits
+
+
+def points_to_reporting(repo: str, ref: str | None = None, run=sh) -> bool:
+    """Whether `repo`'s security policy sends reports to GitHub's private vulnerability reporting."""
+    for path in SECURITY_PATHS:
+        text = api_file(repo, path, ref, run)
+        if text is not None:
+            return bool(REPORTING.search(text))
+    return False
+
+
+def turn_on_reporting(repo: str, ref: str | None = None, run=sh) -> bool:
+    """Turn on private vulnerability reporting when SECURITY.md points to it, and read it back.
+    Returns whether it is on; a policy that does not point to it leaves the setting alone."""
+    if not points_to_reporting(repo, ref, run):
+        return False
+    run(["gh", "api", "-X", "PUT", f"repos/{repo}/private-vulnerability-reporting"])
+    r = run(["gh", "api", f"repos/{repo}/private-vulnerability-reporting"], check=False)
+    try:
+        return bool(json.loads(r.stdout or "{}").get("enabled"))
+    except ValueError:
+        return False
 
 
 def add_files(repo: str, branch: str, reference: str, *, files: tuple[str, ...] = FILES,
