@@ -143,6 +143,9 @@ def cmd_hook(a) -> int:
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
+    if a.name == "open-question":
+        from .hooks import open_question
+        return open_question.main()
     from .hooks import context_monitor
     return context_monitor.main(["mark"] if a.name == "context-mark" else ["check"])
 
@@ -376,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
-                                    "public-voice", "protected-checkouts", "plain-voice"))
+                                    "public-voice", "protected-checkouts", "plain-voice", "open-question"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("unwrap-github", help="join the broken paragraphs in what you posted on GitHub")
