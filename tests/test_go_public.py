@@ -19,7 +19,8 @@ class FakeWorld:
     every command run are kept, so a test reads what `go` did."""
 
     def __init__(self, files, log, *, on_main=(), secrets=(), visibility="PRIVATE",
-                 checks=(("Private terms", "pass"),), clone_times_out=False, runners=()):
+                 checks=(("Private terms", "pass"),), clone_times_out=False, runners=(),
+                 github=None, contents=None, reporting=False):
         self.files, self.log = files, log
         self.on_main, self.secrets = set(on_main), set(secrets)
         self.visibility, self.cmds, self.stdin = visibility, [], {}
@@ -28,6 +29,10 @@ class FakeWorld:
         self.merged = False
         self.clone_times_out = clone_times_out
         self.runners = list(runners) if runners is not None else None   # None: GitHub will not list them
+        # what people wrote on GitHub: REST path -> list of items, and node id -> edit revisions
+        self.github = github or {}
+        self.contents = contents or {}     # path on the default branch -> its text
+        self.reporting = reporting
 
     def __call__(self, args, *, stdin=None, cwd=None, check=True):
         self.cmds.append(args)
@@ -49,10 +54,23 @@ class FakeWorld:
         elif args[:3] == ["gh", "secret", "set"]:
             self.secrets.add(args[3])
             self.stdin[args[3]] = stdin
+        elif args[:3] == ["gh", "api", "--paginate"]:
+            path = args[3].split("/", 3)[3]
+            out = "\n".join(json.dumps(i) for i in self.github.get(path.split("?")[0], []))
+        elif args[:3] == ["gh", "api", "graphql"]:
+            ids = [a.split("=", 1)[1] for a in args if a.startswith("ids[]=")]
+            nodes = [{"id": i, "userContentEdits": {"nodes": self.github.get(i, [])}} for i in ids]
+            out = json.dumps({"data": {"nodes": nodes}})
+        elif args[:2] == ["gh", "api"] and args[-1].endswith("/private-vulnerability-reporting"):
+            if "PUT" in args:
+                self.reporting = True
+            out = json.dumps({"enabled": self.reporting})
         elif args[:2] == ["gh", "api"] and "/contents/" in args[-1] and "-X" not in args:
             repo, path = args[-1].split("/contents/")
             repo, path = repo.removeprefix("repos/"), path.split("?")[0]
-            if repo == REFERENCE:
+            if repo != REFERENCE and path in self.contents:
+                out = json.dumps({"content": base64.b64encode(self.contents[path].encode()).decode()})
+            elif repo == REFERENCE:
                 out = json.dumps({"content": base64.b64encode(REFERENCE_TEXT[path].encode()).decode()})
             elif path in self.on_main:
                 out = json.dumps({"content": base64.b64encode(b"x").decode()})
@@ -237,3 +255,92 @@ def test_sh_kills_the_whole_group_on_a_timeout(tmp_path):
     time.sleep(0.2)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+PR = {"number": 3, "pull_request": {}, "html_url": "https://github.com/example/repo/pull/3",
+      "title": "A fix", "body": "Plain words.", "node_id": "PR_3"}
+TALK = {
+    "issues": [PR, {"number": 4, "html_url": "https://github.com/example/repo/issues/4",
+                    "title": "Crash with projectx", "body": "", "node_id": "I_4"}],
+    "issues/3/timeline": [{"event": "renamed", "rename": {"from": "acme fix"}}],
+    "issues/4/timeline": [],
+    "pulls/3/reviews": [{"html_url": "https://github.com/example/repo/pull/3#review-1", "body": "ok",
+                         "node_id": "R_1"}],
+    "issues/comments": [{"html_url": "https://github.com/example/repo/pull/3#c-1", "body": "fine",
+                         "node_id": "C_1"}],
+    "pulls/comments": [],
+    "comments": [],
+    "releases": [{"tag_name": "v1.0.0", "name": "v1.0.0", "body": "Thanks to acme.",
+                  "html_url": "https://github.com/example/repo/releases/tag/v1.0.0"}],
+    "PR_3": [{"diff": "First draft for projectx.", "editedAt": "2026-01-02T03:04:05Z", "deletedAt": None},
+             {"diff": None, "editedAt": "2026-01-01T00:00:00Z", "deletedAt": "2026-01-03T00:00:00Z"}],
+}
+
+
+def test_survey_reads_files_commits_and_github_text_and_changes_nothing():
+    world = FakeWorld({"README.md": "Built for projectx.\n"}, "aaa111\0first\x01", github=TALK)
+    said = []
+    out = g.survey("example/repo", terms=TERMS, allow=ALLOW, run=world, say=said.append)
+    hits = out["hits"]
+    assert "README.md:1 term 1" in hits
+    assert "issue #4 title term 1 https://github.com/example/repo/issues/4" in hits
+    assert "pull request #3 earlier title term 2 https://github.com/example/repo/pull/3" in hits
+    assert "release v1.0.0 term 2 https://github.com/example/repo/releases/tag/v1.0.0" in hits
+    edit = [h for h in hits if "edit revision" in h]
+    assert len(edit) == 1 and edit[0].startswith("pull request #3 description edit revision of 2026-01-02")
+    assert "cannot be deleted through the API" in edit[0]   # a person's step, said with its link
+    text = " ".join(hits + said)
+    assert "projectx" not in text and "acme" not in text and "First draft" not in text
+    changed = [c for c in world.cmds if c[:3] in (["gh", "secret", "set"], ["gh", "repo", "edit"],
+                                                  ["gh", "pr", "create"]) or "-X" in c]
+    assert changed == [] and world.visibility == "PRIVATE" and out["public"] is False
+
+
+def test_github_text_is_scanned_only_when_asked_and_then_stops_a_private_repository():
+    quiet = FakeWorld({"README.md": "A tool.\n"}, "", github=TALK)
+    _go(quiet, check_only=True)
+    assert not any(c[:3] == ["gh", "api", "--paginate"] for c in quiet.cmds)
+    loud = FakeWorld({"README.md": "A tool.\n"}, "", github=TALK)
+    with pytest.raises(g.Refused) as e:
+        _go(loud, github=True)
+    assert "issue #4 title term 1" in str(e.value) and "projectx" not in str(e.value)
+    assert loud.visibility == "PRIVATE" and not any(c[:3] == ["gh", "secret", "set"] for c in loud.cmds)
+
+
+def test_clean_github_text_is_said_in_step_one():
+    world = FakeWorld({"README.md": "A tool.\n"}, "", github={"issues": [PR], "issues/3/timeline": [],
+                                                              "pulls/3/reviews": []})
+    out, said = _go(world, github=True)
+    assert "issues, pull requests, comments, reviews and releases" in said[0] and out["public"]
+
+
+def test_private_reporting_is_turned_on_when_security_md_points_to_it():
+    policy = "Please report it as a private security advisory on GitHub, not as a public issue.\n"
+    world = FakeWorld({"README.md": "A tool.\n"}, "", contents={"SECURITY.md": policy})
+    out, said = _go(world, private_reporting=True)
+    assert out["reporting"] is True and world.reporting and "5. private vulnerability reporting is on" in said
+    elsewhere = FakeWorld({"README.md": "A tool.\n"}, "", contents={".github/SECURITY.md": policy})
+    assert _go(elsewhere, private_reporting=True)[0]["reporting"] is True
+
+
+def test_private_reporting_is_left_alone_without_a_pointer_with_check_only_or_unasked():
+    mail = FakeWorld({"README.md": "A tool.\n"}, "", contents={"SECURITY.md": "Write to security@example.org.\n"})
+    out, said = _go(mail, private_reporting=True)
+    assert out["reporting"] is False and not mail.reporting and "does not point to it" in said[-1]
+    policy = {"SECURITY.md": "Use GitHub's private vulnerability reporting.\n"}
+    kept = FakeWorld({"README.md": "A tool.\n"}, "", contents=policy)
+    out, _ = _go(kept, private_reporting=True, check_only=True)
+    assert out["reporting"] is None and not kept.reporting
+    plain = FakeWorld({"README.md": "A tool.\n"}, "", contents=policy)
+    out, _ = _go(plain)
+    assert out["reporting"] is None and not plain.reporting
+    assert not any("private-vulnerability-reporting" in " ".join(c) for c in plain.cmds)
+
+
+def test_edit_history_asks_fifty_nodes_a_query():
+    world = FakeWorld({}, "", github={f"N_{i}": [{"diff": "x", "editedAt": "t", "deletedAt": None}]
+                                      for i in range(120)})
+    got = g.edit_history({f"N_{i}": ("comment", f"u{i}") for i in range(120)}, run=world)
+    asked = [c for c in world.cmds if c[:3] == ["gh", "api", "graphql"]]
+    assert [sum(a.startswith("ids[]=") for a in c) for c in asked] == [50, 50, 20]
+    assert len(got) == 120 and got[0] == {"place": "comment", "url": "u0", "text": "x", "edit": "t"}
