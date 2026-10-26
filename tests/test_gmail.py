@@ -131,3 +131,40 @@ def test_no_answer_raises_with_status_0(tmp_path):
     with pytest.raises(GmailError) as e:
         Mailbox(t, c, fetch=Google([urllib.error.URLError("timed out")])).search("x")
     assert e.value.status == 0
+
+
+def _b64(text):
+    """As Gmail returns body data: base64url, and without padding."""
+    import base64
+    return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+
+
+def test_body_walks_nested_multipart_for_the_first_text_plain_verbatim(tmp_path):
+    t, c = files(tmp_path)
+    payload = {"mimeType": "multipart/mixed", "parts": [
+        {"mimeType": "multipart/alternative", "parts": [
+            {"mimeType": "text/plain", "body": {"data": _b64("line one\nline two by someone\n")}},
+            {"mimeType": "text/html", "body": {"data": _b64("<p>line one</p>")}},
+        ]},
+        {"mimeType": "application/pdf", "body": {"attachmentId": "a1"}},
+    ]}
+    g = Google([{"payload": payload}])
+    assert Mailbox(t, c, fetch=g).body("m1") == "line one\nline two by someone\n"
+    assert query_of(g.requests[1])["format"] == ["full"]  # the full message, not metadata
+
+
+def test_body_falls_back_to_html_with_tags_stripped(tmp_path):
+    t, c = files(tmp_path)
+    html = ("<html><head><style>.a{color:red}</style></head><body>"
+            "<p>Hi&nbsp;there</p><script>x=1</script><p>bye</p></body></html>")
+    g = Google([{"payload": {"mimeType": "text/html", "body": {"data": _b64(html)}}}])
+    assert Mailbox(t, c, fetch=g).body("m2") == "Hi there bye"
+
+
+def test_body_is_empty_when_there_is_no_text_part(tmp_path):
+    t, c = files(tmp_path)
+    payload = {"mimeType": "multipart/mixed", "parts": [
+        {"mimeType": "application/pdf", "body": {"attachmentId": "a1"}},
+    ]}
+    g = Google([{"payload": payload}])
+    assert Mailbox(t, c, fetch=g).body("m3") == ""
