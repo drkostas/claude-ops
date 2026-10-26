@@ -236,3 +236,13 @@ def test_the_windows_holding_an_idle_shell_in_a_folder_are_found(tmp_path):
 def test_an_unreadable_iterm_is_none_never_no_windows(monkeypatch):
     monkeypatch.setattr(iterm, "tty_listing", lambda env=None: None)
     assert iterm.shell_windows("/tmp") is None
+
+
+def test_every_idle_shell_is_listed_with_its_folder(tmp_path):
+    raw = "1\t/dev/ttys001\n1\t/dev/ttys002\n2\t/dev/ttys003\n"
+    fake = Terminals({
+        "/dev/ttys001": (" 11 Ss+ /opt/homebrew/bin/tmux\n", None),
+        "/dev/ttys002": (" 21 Ss /usr/bin/login\n 22 S+ -zsh\n", "/projects/a"),
+        "/dev/ttys003": (" 32 S+ -bash\n", "/projects/b"),
+    })
+    assert iterm.idle_shells(raw, run=fake.run) == [(1, "/dev/ttys002", "/projects/a"), (2, "/dev/ttys003", "/projects/b")]
