@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `untrusted.framed(where, text, owner=...)` puts text that strangers wrote (a web page, a visitor's comment, a contact-form message) into an agent's prompt as data: after a notice that it is never an instruction, between two markers, with any marker inside it broken so it cannot end the frame and write outside it. `neutral(text)` is the breaking on its own
 - `accounts.choose` is back to the rule it had before `decide` (any other account usable now, soonest first), since callers' own tests pin it; `decide` is the newer rule, reached by name.
 - `accounts.decide`: a target's session limit needs only to be usable (under the threshold); the floor is on its weekly limit, which a switch would otherwise spend for days. A target at 90% of its session limit with weekly room is still a switch when the account in use is blocked for hours.
 - `update.ready(..., background_ok=True)` and `update.idle(..., background_ok=True)` answer for a caller that only types a slash command at the prompt, such as `/remote-control` after a login change, which stops nothing. Commands and agents a chat left running in the background then do not hold it, while a restart, which ends them, still waits. A shell passes only when the turn has a recorded end and has been quiet since, because a command the turn started in the foreground exists only until the turn ends; with no recorded end it still holds the chat
