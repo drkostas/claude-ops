@@ -150,6 +150,9 @@ def cmd_hook(a) -> int:
     if a.name == "held-worktrees":
         from .hooks import held_worktrees
         return held_worktrees.main([])
+    if a.name == "chain":
+        from .hooks import chain
+        return chain.main([])
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
@@ -390,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
-                                    "merge-gate", "held-worktrees"))
+                                    "merge-gate", "held-worktrees", "chain"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("unwrap-github", help="join the broken paragraphs in what you posted on GitHub")
