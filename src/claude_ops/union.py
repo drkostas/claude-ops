@@ -198,10 +198,14 @@ def _stage(wt: Path, n: int, f: str, env=None) -> str | None:
 def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tuple = (),
                 env=None) -> int:
     """Settle every conflicted file in a stopped rebase in `wt` and stage it. 0 when every one
-    settled, 1 (nothing written) when any is refused. `env` is passed to every git command."""
+    settled, 1 when any is refused. Each file is settled on its own: one that settles is written and
+    staged, one that is refused is left exactly as git left it (markers and all, not staged) and named
+    with its reason, so whoever finishes the rebase settles only those. `env` is passed to every git
+    command."""
     files = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"],
                            capture_output=True, text=True, check=True, env=env).stdout.split()
-    settled = {}
+    settled: dict[str, str] = {}
+    refused: list[str] = []
     for f in files:
         try:
             if f in sets:
@@ -226,16 +230,20 @@ def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tu
                     if twice:
                         raise Refused(f"keeping both sides defines {', '.join(twice)} twice")
         except Refused as e:
-            print(f"{f}: {e}", file=sys.stderr)
-            return 1
-    for f, text in settled.items():          # nothing is written unless every file settles
+            settled.pop(f, None)
+            refused.append(f)
+            print(f"{f}: refused, left as git left it: {e}", file=sys.stderr)
+    for f, text in settled.items():
         (wt / f).write_text(text)
         if MARKER_LINE.search((wt / f).read_text()):    # read back: what is staged is what is on disk
-            print(f"{f}: conflict markers left after writing it", file=sys.stderr)
-            return 1
+            print(f"{f}: refused, conflict markers left after writing it", file=sys.stderr)
+            refused.append(f)
+            continue
         subprocess.run(["git", "-C", str(wt), "add", "--", f], check=True, env=env)
         print(f"kept both sides in {f}")
-    return 0
+    if refused:
+        print(f"settle by hand: {' '.join(refused)} (each still holds its conflict markers)", file=sys.stderr)
+    return 1 if refused else 0
 
 
 def main(argv: list[str] | None = None) -> int:
