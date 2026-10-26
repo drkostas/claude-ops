@@ -287,6 +287,15 @@ with lock(Path("/tmp/repo-watch.lock")) as got:
 - A source that fails several runs in a row (an expired token, for example) sends one alert into the chat instead of going quiet.
 - The lock stops two runs from sending the same thing.
 
+For a mailbox, `claude_ops.gmail.Mailbox` answers the search with the token file and OAuth client file a Google sign-in leaves on disk, so the job needs no browser and no Google client library:
+
+```python
+from claude_ops.gmail import Mailbox
+
+box = Mailbox("/path/to/token.json", "/path/to/credentials.json")
+fetch = lambda: [m["id"] for m in box.search('from:billing@example.org newer_than:14d')]
+```
+
 The `chat-watcher` skill explains the full pattern to Claude, including the launchd file.
 
 ## Know when a session finished or stalled
