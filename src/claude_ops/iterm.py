@@ -421,18 +421,17 @@ def cwd_of(pid: int, *, run=subprocess.run, env: Mapping[str, str] | None = None
     return next((line[1:] for line in (r.stdout or "").splitlines() if line.startswith("n")), None)
 
 
-def shell_windows(folder: str, raw: str | None = None, *, run=subprocess.run,
-                  env: Mapping[str, str] | None = None) -> dict[int, list[str]] | None:
-    """Every iTerm2 window holding a session whose foreground is only its shell, working in `folder`
-    or a folder inside it: {window id: [terminal, ...]}, in the listing's order. Such a session is
-    what a chat or a program leaves behind in a project's window when it ends, and that window is
-    where a new session for the same folder belongs. None when iTerm2 could not be read; pass the
-    listing as `raw` (tty_listing) to answer from one reading."""
+def idle_shells(raw: str | None = None, *, run=subprocess.run,
+                env: Mapping[str, str] | None = None) -> list[tuple[int, str, str]] | None:
+    """Every iTerm2 session whose foreground is only its shell, as (window id, terminal, the shell's
+    working folder), in the listing's order. A session a chat or a program left when it ended reads
+    this way, so the folders here are the projects whose windows are open with nothing running.
+    None when iTerm2 could not be read; pass the listing as `raw` (tty_listing) to answer from one
+    reading."""
     raw = tty_listing(env=env) if raw is None else raw
     if raw is None:
         return None
-    want = os.path.realpath(folder)
-    out: dict[int, list[str]] = {}
+    out: list[tuple[int, str, str]] = []
     for window, tty in parse_ttys(raw):
         try:
             ps = run(["ps", "-t", tty.removeprefix("/dev/"), "-o", "pid=,stat=,comm="],
@@ -441,7 +440,25 @@ def shell_windows(folder: str, raw: str | None = None, *, run=subprocess.run,
             continue
         pid = shell_pid(ps.stdout or "")
         cwd = cwd_of(pid, run=run, env=env) if pid is not None else None
-        if cwd and (os.path.realpath(cwd) == want or os.path.realpath(cwd).startswith(want + os.sep)):
+        if cwd:
+            out.append((window, tty, cwd))
+    return out
+
+
+def shell_windows(folder: str, raw: str | None = None, *, run=subprocess.run,
+                  env: Mapping[str, str] | None = None) -> dict[int, list[str]] | None:
+    """Every iTerm2 window holding a session whose foreground is only its shell, working in `folder`
+    or a folder inside it: {window id: [terminal, ...]}, in the listing's order. Such a session is
+    what a chat or a program leaves behind in a project's window when it ends, and that window is
+    where a new session for the same folder belongs. None when iTerm2 could not be read (idle_shells)."""
+    shells = idle_shells(raw, run=run, env=env)
+    if shells is None:
+        return None
+    want = os.path.realpath(folder)
+    out: dict[int, list[str]] = {}
+    for window, tty, cwd in shells:
+        here = os.path.realpath(cwd)
+        if here == want or here.startswith(want + os.sep):
             out.setdefault(window, []).append(tty)
     return out
 
