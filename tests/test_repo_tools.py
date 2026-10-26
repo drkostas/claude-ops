@@ -56,14 +56,20 @@ def test_union_keeps_both_added_entries_upstream_first(tmp_path):
     assert git(d, "rebase", "--continue", ok=False).returncode == 0
 
 
-def test_union_refuses_a_changed_line_and_writes_nothing(tmp_path):
+def test_union_settles_what_it_can_and_leaves_each_refused_file_as_git_left_it(tmp_path, capsys):
     code = "def f():\n    return 1\n"
     d = rebasing(tmp_path, {"a.py": code, "b.py": REASONS},
                  {"a.py": code.replace("1", "2"), "b.py": REASONS.replace('"first",\n', '"first",\n    "m": 1,\n')},
                  {"a.py": code.replace("1", "3"), "b.py": REASONS.replace('"first",\n', '"first",\n    "b": 2,\n')})
-    before = {f: (d / f).read_text() for f in ("a.py", "b.py")}
+    before = (d / "a.py").read_text()
     assert union.settle_tree(d, env=ENV) == 1
-    assert {f: (d / f).read_text() for f in before} == before
+    err = capsys.readouterr().err
+    assert (d / "a.py").read_text() == before and "<<<<<<<" in before
+    assert "a.py: refused" in err and "settle by hand: a.py" in err
+    b = (d / "b.py").read_text()
+    assert "<<<<<<<" not in b and b.index('"m"') < b.index('"b"')
+    unmerged = git(d, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert unmerged == ["a.py"]
 
 
 def test_union_refuses_a_name_defined_twice(tmp_path, capsys):
