@@ -102,11 +102,9 @@ def test_choose_switches_only_to_an_account_usable_sooner():
     assert ac.choose("north", {"north": session_full, "south": weekly_gone}, NOW) is None
     weekly_soon = {"session": (0.0, NOW + H), "weekly": (100.0, NOW + H)}
     assert ac.choose("north", {"north": session_full, "south": weekly_soon}, NOW) is None
-    # at the reset the other account has room again, but the session block in use ends within the
-    # hour, so the chats wait for it instead of every chat moving (decide, 2026-10-26)
-    assert ac.choose("north", {"north": session_full, "south": weekly_soon}, NOW + H) is None
-    far = {"session": (98.5, NOW + 3 * H), "weekly": (40.0, NOW + 100 * H)}
-    assert ac.choose("north", {"north": far, "south": weekly_soon}, NOW + H) == "south"
+    assert ac.choose("north", {"north": session_full, "south": weekly_soon}, NOW + H) == "south"
+    # decide, the newer rule, waits out a session block that ends within the hour instead
+    assert ac.decide("north", {"north": session_full, "south": weekly_soon}, NOW + H).action == "pause"
 
 
 def test_choose_on_the_error_before_the_threshold_and_never_on_unknown():
@@ -385,7 +383,7 @@ def test_decide_waits_out_a_short_session_block_instead_of_spending_the_other_we
     d = ac.decide("north", {"north": north, "south": south}, NOW)
     assert (d.action, d.account, d.until) == ("pause", "north", NOW + dt.timedelta(minutes=43))
     assert "within the hour" in d.reason
-    assert ac.choose("north", {"north": north, "south": south}, NOW) is None
+    assert ac.choose("north", {"north": north, "south": south}, NOW) == "south"   # choose keeps the old rule
 
 
 def test_decide_switches_to_room_and_prefers_the_most_weekly_room():
