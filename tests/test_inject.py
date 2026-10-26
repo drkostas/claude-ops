@@ -215,3 +215,26 @@ def test_no_test_reaches_the_real_tmux_server():
     import tempfile
     assert "TMUX" not in os.environ
     assert os.environ.get("TMUX_TMPDIR", "").startswith("/tmp/co-")
+
+
+class _Ran:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode, self.stdout = returncode, stdout
+
+
+def test_input_age_is_the_newest_key_of_any_client_of_the_session():
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        return _Ran(0, "1000\n1090\n")
+
+    assert inject.input_age("claude-x", now=1100.0, run=run) == 10.0
+    assert seen[0][-4:] == ["-t", "claude-x", "-F", "#{client_activity}"]
+    assert inject.input_age("claude-x", now=1050.0, run=run) == 0.0  # a clock behind tmux reads as just now
+
+
+def test_input_age_is_unknown_without_an_attached_client_or_an_answer():
+    assert inject.input_age("claude-x", now=1.0, run=lambda cmd, **kw: _Ran(0, "")) is None
+    assert inject.input_age("claude-x", now=1.0, run=lambda cmd, **kw: _Ran(1, "")) is None
+    assert inject.input_age("claude-x", now=1.0, run=lambda cmd, **kw: _Ran(0, "garbage\n")) is None

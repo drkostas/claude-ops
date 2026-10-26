@@ -142,6 +142,8 @@ Four things decide whether a send works.
    `inject` reads the screen first and answers `not-ready` (exit code 5) for anything else, so a
    watcher keeps the message and tries again. The suggested next prompt Claude Code draws dim in
    an empty input line is not typed text, and `update.plain_screen` drops it from a tmux capture.
+   A key typed after that reading and before the paste still joins it, so in tmux also wait while
+   `inject.input_age(session)` is a few seconds: someone who just touched the pane types next.
 
 More rules.
 
