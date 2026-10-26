@@ -591,3 +591,110 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
     return ("success" if kept >= held else "partial"), {
         "message": f"iTerm2 restarted; its session server holds {kept} of {held} terminals",
         "terminals_before": held, "terminals_after": kept}
+
+
+# --------------------------------------------------------------------------- one tab, its profile, its keys
+
+_SELECT = '''tell application "iTerm2"
+repeat with w in (get windows)
+try
+repeat with t in (get tabs of w)
+repeat with s in (get sessions of t)
+if (tty of s) is "{tty}" then
+select t
+select s
+return (id of w) as text
+end if
+end repeat
+end repeat
+end try
+end repeat
+end tell
+return ""'''
+
+
+def select_tty(tty: str, *, env: Mapping[str, str] | None = None) -> int | None:
+    """Make the tab and the session on this terminal the current ones of their window, and answer
+    the window's id (bring the window itself forward with the window manager). None when no session
+    is on it, or iTerm2 did not answer."""
+    import re   # noqa: PLC0415
+    if not re.fullmatch(r"/dev/tty[a-z0-9]+", tty or ""):
+        return None
+    out = (_osa(_SELECT.replace("{tty}", tty), 8, env=env) or "").strip()
+    return int(out) if out.isdigit() else None
+
+
+#: macOS's key codes on a US (ANSI) keyboard for the keys a binding here can name
+_KEYCODES = {**dict(zip("asdfhgzxcv", range(10))), "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
+             "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26,
+             "8": 28, "0": 29, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45,
+             "m": 46}
+_MODS = {"cmd": 0x100000, "ctrl": 0x40000, "alt": 0x80000, "opt": 0x80000, "shift": 0x20000}
+
+
+def key_string(combo: str) -> str:
+    """("cmd+f") -> how iTerm2 names that key in a key map: the character, the modifier flags and
+    the key code ("0x66-0x100000-0x3"). Letters and digits, with cmd, ctrl, alt (or opt) and shift.
+    Anything else raises ValueError."""
+    *mods, key = [p.strip().lower() for p in (combo or "").split("+")]
+    if key not in _KEYCODES or any(m not in _MODS for m in mods) or len(set(mods)) != len(mods):
+        raise ValueError(f"not a key combination this can name: {combo!r}")
+    flags = 0
+    for m in mods:
+        flags |= _MODS[m]
+    return f"0x{ord(key):x}-0x{flags:x}-0x{_KEYCODES[key]:x}"
+
+
+def hex_bindings(send_hex: Mapping[str, Sequence[int]]) -> dict[str, dict]:
+    """{combination: bytes} as key map entries that send those bytes ("cmd+f": [0x0f, 0x2f] makes
+    Cmd+F send Ctrl+O and then "/"). iTerm2 splits a binding's hex codes on spaces only, so a newline
+    between them sends the first byte alone."""
+    out = {}
+    for combo, codes in send_hex.items():
+        if not codes or any(not 0 <= int(c) <= 0xff for c in codes):
+            raise ValueError(f"{combo}: bytes from 0x00 to 0xff")
+        out[key_string(combo)] = {"Action": 11, "Text": " ".join(f"0x{int(c):02x}" for c in codes),
+                                  "Version": 1, "Label": ""}
+    return out
+
+
+def bind_chat_keys(send_hex: Mapping[str, Sequence[int]], *, prefix: str = "claude-", tmux: str = "tmux",
+                   apply: bool = True, env: Mapping[str, str] | None = None) -> list[str] | None:
+    """Give every iTerm2 tab that shows a tmux session named with `prefix` these key bindings
+    (hex_bindings), as that session's own setting, so only those tabs have them and the profile and
+    the session's other settings stay. Answers the tmux sessions whose tab changed; a tab that has the
+    bindings already is left alone. With `apply` False nothing is changed and the answer is the
+    sessions whose tab lacks them. None when iTerm2's API did not answer or the `iterm2` package is
+    missing.
+
+    A program in fullscreen (the alternate screen) keeps its history to itself, so iTerm2's Cmd+F
+    finds only what is on the screen; a binding that sends the program's own search keys instead is
+    the use this was written for."""
+    try:
+        import iterm2   # noqa: PLC0415
+    except ImportError:
+        return None
+    want = hex_bindings(send_hex)
+    names = tmux_by_tty(tmux=tmux, env=env)
+    changed: list[str] = []
+
+    async def main(connection):
+        app = await iterm2.async_get_app(connection)
+        for w in app.terminal_windows:
+            for t in w.tabs:
+                for s in t.sessions:
+                    name = names.get(await s.async_get_variable("tty") or "")
+                    if not name or not name.startswith(prefix):
+                        continue
+                    have = dict((await s.async_get_profile()).key_mappings or {})
+                    if all(have.get(k) == v for k, v in want.items()):
+                        continue
+                    if not apply:
+                        changed.append(name)
+                        continue
+                    lp = iterm2.LocalWriteOnlyProfile()
+                    lp.set_key_mappings({**have, **want})
+                    await s.async_set_profile_properties(lp)
+                    changed.append(name)
+
+    return changed if _run(iterm2, main) else None
