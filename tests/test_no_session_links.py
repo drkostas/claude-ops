@@ -431,3 +431,12 @@ def test_a_push_stops_a_commit_a_script_made(tmp_path):
 
 def test_an_escape_before_an_id_does_not_hide_it(repo):
     assert nsl.check(bash("git commit -m $'subject\\n" + FAKE_ID + "'", repo)) is not None
+
+
+def test_redact_removes_links_trailers_and_real_ids_only():
+    text = f"see {LINK}\n{TRAILER}\nchat {FAKE_ID} item {OTHER_ID}"
+    out = nsl.redact(text)
+    assert LINK not in out and TRAILER not in out and FAKE_ID not in out
+    assert OTHER_ID in out                       # not a transcript on this machine, so kept
+    assert out.count(nsl.REDACTED) == 3
+    assert nsl.redact("") == "" and nsl.redact("plain words") == "plain words"
