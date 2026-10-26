@@ -181,6 +181,25 @@ def send_tmux(name: str, text: str, enter: bool, *, env: Mapping[str, str] | Non
     return r.returncode == 0, r.stderr.strip()[:300]
 
 
+def input_age(name: str, *, now: float | None = None, env: Mapping[str, str] | None = None,
+              run=subprocess.run) -> float | None:
+    """Seconds since a key last reached tmux session `name` from any client attached to it (tmux's
+    `client_activity`, which a key, a mouse event or a focus change sets), or None when no client is
+    attached or tmux cannot say.
+
+    A sender that pastes only onto an empty input line reads the screen first, and a key typed
+    between that reading and the paste joins the pasted text. Waiting while this is a few seconds
+    closes most of that gap, because a person who has just touched the pane is likely to type next."""
+    r = run([TMUX, "-u", "list-clients", "-t", name, "-F", "#{client_activity}"],
+            capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        return None
+    times = [int(t) for t in (r.stdout or "").split() if t.isdigit()]
+    if not times:
+        return None
+    return max(0.0, (time.time() if now is None else now) - max(times))
+
+
 #: the keys `press` sends, by their tmux names
 KEYS = ("Escape",)
 
