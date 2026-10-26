@@ -131,6 +131,10 @@ class FakeGitHub:
         self.issues.get(self.items[v["item"]], {}).get("values", {}).pop(v["field"], None)
         return {"clearProjectV2ItemFieldValue": {"projectV2Item": {"id": v["item"]}}}
 
+    def updateProjectV2(self, v):
+        self.project.update({k: v[k] for k in ("public", "shortDescription") if k in v})
+        return {"updateProjectV2": {"projectV2": {"id": v["id"]}}}
+
     def deleteProjectV2Item(self, v):
         self.items.pop(v["item"])
         return {"deleteProjectV2Item": {"deletedItemId": v["item"]}}
@@ -313,3 +317,17 @@ def test_an_issue_a_workflow_already_added_is_found_not_added_twice():
     child = b.put("k1", title="t", body="b", parent=parent["node"], fields={"State": "Open"})
     assert child["item"] == "T-auto"
     assert list(gh.items.values()).count(child["node"]) == 1
+
+
+def test_visibility_and_description_are_set_only_when_they_differ():
+    gh = FakeGitHub()
+    b = board(gh, public=True, description="Issues of the tools")
+    b.ensure()
+    assert gh.project["public"] is True and gh.project["shortDescription"] == "Issues of the tools"
+    assert gh.ops.count("updateProjectV2") == 1
+    board(gh, public=True, description="Issues of the tools").ensure()
+    assert gh.ops.count("updateProjectV2") == 1          # already so: no write
+    board(gh).ensure()
+    assert gh.ops.count("updateProjectV2") == 1          # None leaves both as they are
+    board(gh, public=False).ensure()
+    assert gh.project["public"] is False and gh.ops.count("updateProjectV2") == 2
