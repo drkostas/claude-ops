@@ -9,7 +9,8 @@ library:
 - `Sorter.sort` says what kind of mail it is and which of the user's projects it names, from its
   headers and text. The kinds and the project names are configuration: the user lists the senders
   of each kind and the names (with aliases) of each project, so nothing here knows any one person's
-  repositories.
+  repositories. Mail that names a project from no configured sender is "person" when typed and
+  "mention" when sent by a program.
 - The notice readers (`neon_usage`, `vercel_deploy_failed`, `gitguardian_incidents`) turn a
   platform's own notice mail into the fact it states, such as "project X has used 80% of its monthly
   compute", so a watcher can record the fact instead of the mail.
@@ -87,8 +88,9 @@ def is_bulk(labels) -> bool:
 
 @dataclass
 class Sorted:
-    """What `Sorter.sort` found. `kind` is one of the configured kinds, "person", or None (nothing
-    for a project reader: no project named, mail that already has a reader, or the user's own).
+    """What `Sorter.sort` found. `kind` is one of the configured kinds, "person", "mention", or None
+    (nothing for a project reader: no project named, mail that already has a reader, or the user's
+    own).
     `names` are the projects the message names, in the order configured. `why` says which rule
     decided."""
     kind: str | None
@@ -105,7 +107,8 @@ class Sorter:
     name it (its package name, an old spelling); the project's own name always counts. `has_reader`
     lists senders some other watcher already reads, so their mail is left alone. `own` lists the
     user's own addresses, whose mail is never sorted. A message from a sender of no kind that names
-    a project, from a sender that is not automated, is a person writing about it.
+    a project is a person writing about it ("person"), or "mention" when it was sent by a program
+    (a newsletter, or a person's message sent through a mailing service, which look the same).
 
     A kind's mail is kept even when it names no project (a quota warning names a platform project,
     not a repository); a person's mail only when it names one."""
@@ -143,7 +146,9 @@ class Sorter:
         if not names:
             return Sorted(None, sender=sender, why="it names no project")
         if is_automated(headers):
-            return Sorted(None, names, sender, "an automated sender of no configured kind")
+            # a person's pitch sent through a mailing service carries the same headers as a
+            # newsletter, so naming a project is kept apart as a mention rather than dropped
+            return Sorted("mention", names, sender, "automated mail that names a project")
         return Sorted("person", names, sender, "a person who names a project")
 
 

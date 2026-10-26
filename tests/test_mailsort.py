@@ -36,8 +36,15 @@ def test_left_alone():
     assert SORTER.sort({"From": "GitHub <notifications@github.com>", "Subject": "widget"}).kind is None
     assert SORTER.sort({"From": "watcher@example.net", "Subject": "widget"}).kind is None
     assert SORTER.sort({"From": "ana@example.com", "Subject": "lunch?"}).kind is None
-    news = {"From": "Weekly <news@example.com>", "Subject": "widget news"}
+    news = {"From": "Weekly <news@example.com>", "Subject": "lunch news"}
     assert SORTER.sort(news).kind is None
+
+
+def test_automated_mail_naming_a_project_is_a_mention():
+    pitch = {"From": "Bo <bo@mail.example.net>", "Subject": "widget commit 0a1b2c3",
+             "List-Unsubscribe": "<https://mail.example.net/u>"}
+    got = SORTER.sort(pitch, "I read your commit")
+    assert (got.kind, got.names) == ("mention", ["widget"])
 
 
 def test_is_automated():
