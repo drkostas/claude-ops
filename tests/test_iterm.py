@@ -180,3 +180,59 @@ def test_an_api_that_does_not_answer_reads_none_and_does_not_end_the_program(mon
     monkeypatch.setattr(iterm, "tmux_by_tty", lambda **k: {})
     assert iterm.chat_tabs() is None
     assert iterm.set_tab_color("w0t0p0:ABC", (1.0, 0.0, 0.0)) is False
+
+
+def test_a_terminal_whose_foreground_is_only_its_shell_names_the_shell():
+    assert iterm.shell_pid(" 1000 Ss   /usr/bin/login\n 1093 S+   -zsh\n") == 1093
+    assert iterm.shell_pid(" 7 S+ /bin/bash\n") == 7
+    assert iterm.shell_pid(" 7280 Ss+  /opt/homebrew/bin/tmux\n") is None, "a program runs there"
+    assert iterm.shell_pid(" 10 Ss -zsh\n 11 S+ vim\n") is None, "the shell is not in front"
+    assert iterm.shell_pid(" 10 S+ -zsh\n 11 S+ less\n") is None, "a pipeline is not an idle shell"
+    assert iterm.shell_pid("") is None and iterm.shell_pid(" 1000 Ss /usr/bin/login\n") is None
+
+
+class Terminals:
+    """ps and lsof answers for a few terminals: tty -> (ps text, the shell's folder)."""
+
+    def __init__(self, ttys):
+        self.ttys = ttys
+
+    def run(self, cmd, **_k):
+        class R:
+            stdout, returncode = "", 0
+        r = R()
+        if cmd[0] == "ps":
+            r.stdout = self.ttys.get("/dev/" + cmd[2], ("", None))[0]
+        elif cmd[0].endswith("lsof"):
+            pid = cmd[cmd.index("-p") + 1]
+            for ps, cwd in self.ttys.values():
+                if f" {pid} " in f" {ps} " and cwd:
+                    r.stdout = f"p{pid}\nfcwd\nn{cwd}\n"
+        return r
+
+
+def test_the_windows_holding_an_idle_shell_in_a_folder_are_found(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    near = tmp_path / "proj-two"
+    near.mkdir()
+    raw = "\n".join(f"{w}\t{t}" for w, t in [(1, "/dev/ttys001"), (1, "/dev/ttys002"), (2, "/dev/ttys003"),
+                                            (3, "/dev/ttys004"), (4, "/dev/ttys005"), (5, "/dev/ttys006")])
+    fake = Terminals({
+        "/dev/ttys001": (" 11 Ss+ /opt/homebrew/bin/tmux\n", None),          # a tmux client: not a shell
+        "/dev/ttys002": (" 21 Ss /usr/bin/login\n 22 S+ -zsh\n", str(proj)),  # an idle shell in the folder
+        "/dev/ttys003": (" 32 S+ -zsh\n", str(proj / "sub")),                 # one in a folder inside it
+        "/dev/ttys004": (" 42 S+ -zsh\n", str(other)),                        # another folder
+        "/dev/ttys005": (" 52 S+ -zsh\n", str(near)),                         # a name that only starts the same
+        "/dev/ttys006": (" 61 Ss -zsh\n 62 S+ vim\n", str(proj)),             # the folder, but busy
+    })
+    assert iterm.shell_windows(str(proj), raw, run=fake.run) == {1: ["/dev/ttys002"], 2: ["/dev/ttys003"]}
+    assert iterm.shell_windows(str(other), raw, run=fake.run) == {3: ["/dev/ttys004"]}
+    assert iterm.shell_windows(str(tmp_path / "nowhere"), raw, run=fake.run) == {}
+
+
+def test_an_unreadable_iterm_is_none_never_no_windows(monkeypatch):
+    monkeypatch.setattr(iterm, "tty_listing", lambda env=None: None)
+    assert iterm.shell_windows("/tmp") is None

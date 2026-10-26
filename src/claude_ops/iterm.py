@@ -10,13 +10,15 @@ color it had before when that color is free in its window, and new colors come f
 `iterm2` package, installed with the `iterm` extra, and the API switched on in iTerm2's settings).
 
 The rest finds and tidies iTerm2's windows through AppleScript: which window shows a session, a
-terminal or a tmux pane, its frame, and the empty frames iTerm2 can leave behind. Every listing
+terminal or a tmux pane, which windows hold an idle shell in a folder (where a new session for that
+folder belongs), its frame, and the empty frames iTerm2 can leave behind. Every listing
 reads each window inside its own `try`, because a window iTerm2 closed can stay in its scripting
 model unreadable, and one such window failed every listing that did not. A listing that could not
 be taken is None, never "no windows".
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 
@@ -390,6 +392,58 @@ def windows_of_ttys(ttys: set[str], raw: str | None = None, *,
     if raw is None:
         return None
     return {w for w, tty in parse_ttys(raw) if tty in ttys}
+
+
+#: the programs a terminal runs when nothing runs but its shell
+SHELLS = frozenset({"zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh"})
+
+
+def shell_pid(ps_text: str) -> int | None:
+    """Pure. The shell's pid when it is all that runs in a terminal's foreground, from
+    `ps -t <tty> -o pid=,stat=,comm=` (a foreground process has `+` in its state), else None. A
+    login shell is listed as `-zsh`; a terminal running a program, or a pipeline, has another
+    foreground process and answers None."""
+    fore = [parts for parts in (line.split(None, 2) for line in (ps_text or "").splitlines())
+            if len(parts) == 3 and "+" in parts[1]]
+    if len(fore) != 1 or not fore[0][0].isdigit():
+        return None
+    name = fore[0][2].strip().rsplit("/", 1)[-1].lstrip("-")
+    return int(fore[0][0]) if name in SHELLS else None
+
+
+def cwd_of(pid: int, *, run=subprocess.run, env: Mapping[str, str] | None = None) -> str | None:
+    """The working folder of a process, read with lsof, or None when it cannot be read."""
+    try:
+        r = run(["/usr/sbin/lsof", "-a", "-d", "cwd", "-p", str(int(pid)), "-Fn"],
+                capture_output=True, text=True, timeout=5, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return next((line[1:] for line in (r.stdout or "").splitlines() if line.startswith("n")), None)
+
+
+def shell_windows(folder: str, raw: str | None = None, *, run=subprocess.run,
+                  env: Mapping[str, str] | None = None) -> dict[int, list[str]] | None:
+    """Every iTerm2 window holding a session whose foreground is only its shell, working in `folder`
+    or a folder inside it: {window id: [terminal, ...]}, in the listing's order. Such a session is
+    what a chat or a program leaves behind in a project's window when it ends, and that window is
+    where a new session for the same folder belongs. None when iTerm2 could not be read; pass the
+    listing as `raw` (tty_listing) to answer from one reading."""
+    raw = tty_listing(env=env) if raw is None else raw
+    if raw is None:
+        return None
+    want = os.path.realpath(folder)
+    out: dict[int, list[str]] = {}
+    for window, tty in parse_ttys(raw):
+        try:
+            ps = run(["ps", "-t", tty.removeprefix("/dev/"), "-o", "pid=,stat=,comm="],
+                     capture_output=True, text=True, timeout=5, env=env)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        pid = shell_pid(ps.stdout or "")
+        cwd = cwd_of(pid, run=run, env=env) if pid is not None else None
+        if cwd and (os.path.realpath(cwd) == want or os.path.realpath(cwd).startswith(want + os.sep)):
+            out.setdefault(window, []).append(tty)
+    return out
 
 
 def tmux_client_ttys(session: str, *, tmux: str = "tmux", env: Mapping[str, str] | None = None) -> set[str]:
