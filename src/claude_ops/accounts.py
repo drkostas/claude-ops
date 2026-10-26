@@ -225,8 +225,9 @@ def usable_at(u: dict | None, now: dt.datetime, threshold: float = THRESHOLD) ->
     return max(full)
 
 
-#: an account is switched to only while both its limits are under this share: one near its weekly
-#: limit would be spent by the switch and then locked for days
+#: an account is switched to only while its weekly limit is under this share: one near its weekly
+#: limit would be spent by the switch and then locked for days. Its session limit needs only to be
+#: usable (under the threshold), since that limit resets within hours either way
 FLOOR = 90.0
 #: a block on the session limit alone that resets within this is waited out, not switched away from:
 #: a switch moves every chat, and an hour's pause costs less than that
@@ -249,14 +250,20 @@ def _share(pct: float, resets: dt.datetime | None, now: dt.datetime) -> float:
     return 0.0 if resets is not None and resets <= now else pct
 
 
-def _room(u: dict, now: dt.datetime, floor: float) -> bool:
-    return all(_share(pct, r, now) < floor for pct, r in u.values())
+def _bar(name: str, floor: float, threshold: float) -> float:
+    """What a limit must be under for the account to count as having room: the floor on the weekly
+    limit, the threshold on the session one."""
+    return floor if name == "weekly" else threshold
 
 
-def _room_at(u: dict, now: dt.datetime, floor: float) -> dt.datetime | None:
-    """When the account has room on both limits: now, or the latest reset among the limits at or
-    over `floor`; None when such a reset is unknown."""
-    full = [r for pct, r in u.values() if _share(pct, r, now) >= floor]
+def _room(u: dict, now: dt.datetime, floor: float, threshold: float) -> bool:
+    return all(_share(pct, r, now) < _bar(name, floor, threshold) for name, (pct, r) in u.items())
+
+
+def _room_at(u: dict, now: dt.datetime, floor: float, threshold: float) -> dt.datetime | None:
+    """When the account has room: now, or the latest reset among the limits at or over their bar;
+    None when such a reset is unknown."""
+    full = [r for name, (pct, r) in u.items() if _share(pct, r, now) >= _bar(name, floor, threshold)]
     if not full:
         return now
     return None if any(r is None for r in full) else max(full)
@@ -274,8 +281,8 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     or the limit's name, "session" or "weekly", when the stop said which).
 
     Then, in this order: a block on the session limit alone that resets within `short_wait` is
-    waited out (pause); an account with room on both limits (under `floor`) is switched to, the one
-    with the most weekly room first; with none, the wait is for the earliest time any account has
+    waited out (pause); an account with room (its weekly limit under `floor`, its session limit
+    under `threshold`) is switched to, the one with the most weekly room first; with none, the wait is for the earliest time any account has
     room again, and that account is the one to switch to then. An account whose usage is unknown
     is never switched to, and one in use whose usage is unknown is left alone unless a chat hit
     its limit."""
@@ -290,7 +297,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
         return Decision("stay", reason=f"{current} has room")
     blocked = ", ".join(f"{k} limit" for k in spent)
     others = {n: u for n, u in usages.items() if n != current and u is not None}
-    room = sorted((n for n, u in others.items() if _room(u, now, floor)),
+    room = sorted((n for n, u in others.items() if _room(u, now, floor, threshold)),
                   key=lambda n: (_share(*others[n]["weekly"], now), _share(*others[n]["session"], now)))
     session_only = set(spent) == {"session"}
     reset = spent.get("session")
@@ -308,7 +315,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     if own is not None:
         waits[current] = own
     for n, u in others.items():
-        at = _room_at(u, now, floor)
+        at = _room_at(u, now, floor, threshold)
         if at is not None:
             waits[n] = at
     if not waits:

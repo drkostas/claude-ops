@@ -423,3 +423,14 @@ def test_decide_on_a_limit_hit_and_on_unknown_usage():
     assert ac.decide("a", {"a": fine, "b": fine}, NOW, hit="weekly").account == "b"
     assert ac.decide("a", {"a": None, "b": fine}, NOW).action == "stay"
     assert ac.decide("a", {"a": fine, "b": None}, NOW, hit="weekly").action == "pause"   # unknown is never chosen
+
+
+def test_decide_takes_a_target_whose_session_limit_is_merely_usable():
+    # the weekly floor is the rule; a target's session limit resets within hours either way, so one at
+    # 90% of it with weekly room is still a switch when the account in use is blocked for hours
+    north = {"session": (99.0, NOW + 4 * H), "weekly": (85.0, NOW + 100 * H)}
+    south = {"session": (90.0, NOW + 3 * H), "weekly": (40.0, NOW + 100 * H)}
+    d = ac.decide("north", {"north": north, "south": south}, NOW)
+    assert (d.action, d.account) == ("switch", "south")
+    spent = {"session": (98.5, NOW + 3 * H), "weekly": (40.0, NOW + 100 * H)}
+    assert ac.decide("north", {"north": north, "south": spent}, NOW).action == "pause"
