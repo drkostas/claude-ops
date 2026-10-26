@@ -84,6 +84,14 @@ DONE = DIR / "done"
 DONE_KEEP = 200
 
 
+def _session() -> str | None:
+    """The Claude Code session that started this job, when one did (Claude Code sets
+    CLAUDE_CODE_SESSION_ID for the commands it runs). It is kept beside the chat name in the ticket,
+    the slot and the done record, so a reader can tell which conversation a job belongs to when the
+    name it was given is a project's, not a chat's."""
+    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
 def _num(name: str, default: float) -> float:
     return float(os.environ.get(name, default))
 
@@ -252,7 +260,7 @@ def _ticket(chat: str, what: str, holder_pid: int) -> Path:
     QUEUE.mkdir(parents=True, exist_ok=True)
     t = QUEUE / f"{time.time_ns():020d}.{os.getpid()}.json"
     t.write_text(json.dumps({"chat": chat, "what": what, "waiter": os.getpid(),
-                             "pid": holder_pid, "since": time.strftime("%H:%M")}))
+                             "pid": holder_pid, "since": time.strftime("%H:%M"), "session": _session()}))
     return t
 
 
@@ -326,7 +334,7 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
                     continue
                 (SLOT / "who.json").write_text(json.dumps(
                     {"chat": chat, "what": what, "pid": holder_pid, "since": time.strftime("%H:%M"),
-                     "at": time.time()}))
+                     "at": time.time(), "session": _session()}))
                 LAST.mkdir(parents=True, exist_ok=True)
                 (LAST / chat).touch()
                 return True
@@ -403,7 +411,8 @@ def remember(chat: str, what: str, rc: int, peak: float, minutes: float, ended: 
     for old in sorted(DONE.glob("*.json"), key=lambda x: x.stat().st_mtime)[:-DONE_KEEP]:
         old.unlink(missing_ok=True)
     took = {"chat": chat, "what": what, "rc": rc, "peak_gb": peak, "minutes": round(minutes, 1),
-            "ended": ended, "at": time.strftime("%Y-%m-%d %H:%M"), "end": round(time.time(), 2)}
+            "ended": ended, "at": time.strftime("%Y-%m-%d %H:%M"), "end": round(time.time(), 2),
+            "session": _session()}
     took["how"] = failed_how(took)
     (DONE / f"{os.getpid()}.json").write_text(json.dumps(took))
     return DONE / f"{os.getpid()}.json"
@@ -441,8 +450,9 @@ def done_jobs(folder: Path | None = None) -> list[dict]:
 
 def streaks(records: list[dict], at_least: int = REPEAT_FAILS) -> list[dict]:
     """Pure. The jobs (one chat, one `what`) whose latest runs all failed the same way, at least
-    `at_least` times in a row, newest first: {chat, what, how, count, first, last}, with `first` and
-    `last` the end times of the first and last of those runs. A success, or a failure of another
+    `at_least` times in a row, newest first: {chat, what, how, count, first, last, session}, with
+    `first` and `last` the end times of the first and last of those runs, and `session` the Claude
+    Code session that started the last one (None when none did). A success, or a failure of another
     kind, ends a run of failures."""
     by: dict[tuple[str, str], list[dict]] = {}
     for r in sorted(records, key=lambda r: float(r["end"])):
@@ -459,7 +469,8 @@ def streaks(records: list[dict], at_least: int = REPEAT_FAILS) -> list[dict]:
             n += 1
         if n >= at_least:
             out.append({"chat": chat, "what": what, "how": how, "count": n,
-                        "first": float(rs[-n]["end"]), "last": float(rs[-1]["end"])})
+                        "first": float(rs[-n]["end"]), "last": float(rs[-1]["end"]),
+                        "session": rs[-1].get("session")})
     return sorted(out, key=lambda s: -s["last"])
 
 
