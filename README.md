@@ -300,6 +300,19 @@ fetch = lambda: [m["id"] for m in box.search('from:billing@example.org newer_tha
 
 The `chat-watcher` skill explains the full pattern to Claude, including the launchd file.
 
+## Run something at a weekday time in a time zone
+
+`claude_ops.cron` reads a cron schedule in a named zone, so a loop that already runs every minute
+can decide itself what is due instead of keeping one launchd plist or crontab line per job.
+
+```python
+from claude_ops import cron
+when = cron.due("0 10 * * sat", last_run, now, zone="Europe/Berlin")   # None, or the time it names
+```
+
+The wall time stays the same across a clock change: Saturday 10:00 in Berlin is 09:00 UTC in
+winter and 08:00 UTC in summer. `cron.parse` raises ValueError for a schedule that is not one.
+
 ## Know when a session finished or stalled
 
 A background agent or a chat you handed work to can stop moving without saying so. A tool call that never returns and a usage limit both look like work in progress. `claude-ops stall` waits on the session's transcript and exits when something happened.
