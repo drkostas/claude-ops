@@ -162,6 +162,7 @@ def test_config_and_main(tmp_path, monkeypatch, capsys, hooks):
 
 def test_the_cli_runs_it():
     src = os.path.dirname(os.path.dirname(os.path.dirname(chain.__file__)))   # this checkout's src/
-    p = subprocess.run([sys.executable, "-P", "-m", "claude_ops.hooks.chain", "--config", "/nonexistent.json"],
+    safe = ["-P"] if sys.version_info >= (3, 11) else []   # -P (no script folder on the path) is 3.11's
+    p = subprocess.run([sys.executable, *safe, "-m", "claude_ops.hooks.chain", "--config", "/nonexistent.json"],
                        input=call(), capture_output=True, text=True, env={**os.environ, "PYTHONPATH": src})
     assert p.returncode == 0 and p.stdout == ""
