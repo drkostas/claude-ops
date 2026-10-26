@@ -26,7 +26,9 @@ HOOKS = {
                    {"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
                     "hooks": [{"type": "command", "command": "claude-ops hook protected-checkouts"}]},
                    {"matcher": "Bash|mcp__github__.*",
-                    "hooks": [{"type": "command", "command": "claude-ops hook plain-voice"}]}],
+                    "hooks": [{"type": "command", "command": "claude-ops hook plain-voice"}]},
+                   {"matcher": "Bash|mcp__github__merge_pull_request",
+                    "hooks": [{"type": "command", "command": "claude-ops hook merge-gate"}]}],
 }
 
 
@@ -140,6 +142,9 @@ def cmd_hook(a) -> int:
     if a.name == "plain-voice":
         from .hooks import plain_voice
         return plain_voice.main([])
+    if a.name == "merge-gate":
+        from .hooks import merge_gate
+        return merge_gate.main([])
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
@@ -379,7 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
-                                    "public-voice", "protected-checkouts", "plain-voice", "open-question"))
+                                    "public-voice", "protected-checkouts", "plain-voice", "open-question",
+                                    "merge-gate"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("unwrap-github", help="join the broken paragraphs in what you posted on GitHub")
