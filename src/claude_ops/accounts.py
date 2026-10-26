@@ -328,11 +328,24 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
                     f"{what} at {_clock(at)}")
 
 
-def choose(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hit: "bool | str" = False,
+def choose(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hit: bool = False,
            threshold: float = THRESHOLD) -> str | None:
-    """The account `decide` switches to now, or None (stay, or pause for a reset)."""
-    d = decide(current, usages, now, hit=hit, threshold=threshold)
-    return d.account if d.action == "switch" else None
+    """The account to switch to now, or None, by the rule before `decide`: the one in use is spent
+    when it is at the threshold or a chat hit its limit (`hit`), and any other account usable now is
+    taken, the one usable soonest first. `decide` is the newer rule (a weekly floor, a wait for a
+    near reset); this one stays as it was for callers that have not moved to it, since a caller's
+    own tests pin it."""
+    mine = usable_at(usages.get(current), now, threshold)
+    if not hit and (mine is None or mine <= now):
+        return None                  # usable, or unknown: nothing says it is spent
+    best = None
+    for name, u in usages.items():
+        if name == current:
+            continue
+        at = usable_at(u, now, threshold)
+        if at is not None and at <= now and (best is None or at < best[1]):
+            best = (name, at)
+    return best[0] if best else None
 
 
 def limit_hit(transcript: Path, scan: int = 400) -> dict | None:
