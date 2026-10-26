@@ -19,7 +19,7 @@ class FakeWorld:
     every command run are kept, so a test reads what `go` did."""
 
     def __init__(self, files, log, *, on_main=(), secrets=(), visibility="PRIVATE",
-                 checks=(("Private terms", "pass"),), clone_times_out=False):
+                 checks=(("Private terms", "pass"),), clone_times_out=False, runners=()):
         self.files, self.log = files, log
         self.on_main, self.secrets = set(on_main), set(secrets)
         self.visibility, self.cmds, self.stdin = visibility, [], {}
@@ -27,6 +27,7 @@ class FakeWorld:
         self.checks = [{"workflow": w, "bucket": b} for w, b in checks]
         self.merged = False
         self.clone_times_out = clone_times_out
+        self.runners = list(runners) if runners is not None else None   # None: GitHub will not list them
 
     def __call__(self, args, *, stdin=None, cwd=None, check=True):
         self.cmds.append(args)
@@ -57,6 +58,8 @@ class FakeWorld:
                 out = json.dumps({"content": base64.b64encode(b"x").decode()})
             else:
                 rc, out = 1, "gh: Not Found (HTTP 404)"
+        elif args[:2] == ["gh", "api"] and args[2].endswith("/actions/runners"):
+            rc, out = (1, "gh: Must have admin rights (HTTP 403)") if self.runners is None else (0, "\n".join(self.runners))
         elif args[:2] == ["gh", "api"] and "/actions/secrets/" in args[-1]:
             rc = 0 if args[-1].rsplit("/", 1)[-1] in self.secrets else 1
         elif args[:2] == ["gh", "api"] and args[-1].endswith("/git/ref/heads/main"):
@@ -111,6 +114,45 @@ def test_a_clean_repository_gets_the_secrets_then_the_check_then_goes_public():
     kinds = [c[:3] for c in world.cmds]
     assert kinds.index(["gh", "pr", "create"]) > kinds.index(["gh", "secret", "set"])
     assert world.visibility == "PUBLIC" and out["public"] and after == ["example/repo"]
+
+
+def test_a_registered_self_hosted_runner_stops_it_before_it_goes_public():
+    world = FakeWorld({"README.md": "A tool.\n"}, "", runners=["build-box"])
+    with pytest.raises(g.Refused, match=r"1 self-hosted runner\(s\) registered \(build-box\).*fork"):
+        _go(world)
+    assert world.visibility == "PRIVATE" and not any(c[:3] == ["gh", "repo", "edit"] for c in world.cmds)
+
+
+def test_before_public_may_remove_the_runners_and_a_runner_left_still_stops_it():
+    world = FakeWorld({"README.md": "A tool.\n"}, "", runners=["build-box"])
+    asked = []
+    out, said = _go(world, before_public=lambda repo, names: (asked.append((repo, names)), world.runners.clear()))
+    assert asked == [("example/repo", ["build-box"])] and world.visibility == "PUBLIC" and out["runners"] == []
+    assert "4. no self-hosted runner is registered" in said
+    world = FakeWorld({"README.md": "A tool.\n"}, "", runners=["build-box"])
+    with pytest.raises(g.Refused, match="remove them first"):
+        _go(world, before_public=lambda repo, names: None)
+    assert world.visibility == "PRIVATE"
+
+
+def test_runners_are_only_reported_with_check_only_or_when_already_public():
+    world = FakeWorld({"README.md": "A tool.\n"}, "", runners=["build-box"])
+    calls = []
+    out, said = _go(world, check_only=True, before_public=lambda *a: calls.append(a))
+    assert world.visibility == "PRIVATE" and calls == [] and out["runners"] == ["build-box"]
+    assert any("they must go before it turns public" in s for s in said)
+    world = FakeWorld({"README.md": "A tool.\n"}, "", visibility="PUBLIC", runners=["build-box"])
+    out, said = _go(world)
+    assert any("a pull request from a fork can run its jobs on them now" in s for s in said)
+
+
+def test_runners_github_will_not_list_stop_it_only_when_it_would_go_public():
+    world = FakeWorld({"README.md": "A tool.\n"}, "", runners=None)
+    with pytest.raises(g.Refused, match="did not list the self-hosted runners"):
+        _go(world)
+    assert world.visibility == "PRIVATE"
+    out, said = _go(FakeWorld({"README.md": "A tool.\n"}, "", runners=None), check_only=True)
+    assert "4. could not list its self-hosted runners" in said and out["runners"] is None
 
 
 def test_check_only_leaves_it_private_with_the_check_in_place():
