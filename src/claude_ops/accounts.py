@@ -19,6 +19,7 @@ running Claude Code processes rewrite it).
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 import json
 import os
 import re
@@ -224,22 +225,107 @@ def usable_at(u: dict | None, now: dt.datetime, threshold: float = THRESHOLD) ->
     return max(full)
 
 
-def choose(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hit: bool = False,
+#: an account is switched to only while both its limits are under this share: one near its weekly
+#: limit would be spent by the switch and then locked for days
+FLOOR = 90.0
+#: a block on the session limit alone that resets within this is waited out, not switched away from:
+#: a switch moves every chat, and an hour's pause costs less than that
+SHORT_WAIT = dt.timedelta(minutes=60)
+
+
+@dataclass(frozen=True)
+class Decision:
+    """What to do about the account in use. `action` is "stay", "switch" (to `account`) or "pause"
+    (until `until`, the reset waited for; `account` is then the one whose reset it is, the one to
+    switch to at that time when it is not the one in use). `reason` says why in one line."""
+    action: str
+    account: str | None = None
+    until: dt.datetime | None = None
+    reason: str = ""
+
+
+def _share(pct: float, resets: dt.datetime | None, now: dt.datetime) -> float:
+    """A limit's share now: a reset that has passed empties it, whatever the last reading said."""
+    return 0.0 if resets is not None and resets <= now else pct
+
+
+def _room(u: dict, now: dt.datetime, floor: float) -> bool:
+    return all(_share(pct, r, now) < floor for pct, r in u.values())
+
+
+def _room_at(u: dict, now: dt.datetime, floor: float) -> dt.datetime | None:
+    """When the account has room on both limits: now, or the latest reset among the limits at or
+    over `floor`; None when such a reset is unknown."""
+    full = [r for pct, r in u.values() if _share(pct, r, now) >= floor]
+    if not full:
+        return now
+    return None if any(r is None for r in full) else max(full)
+
+
+def _clock(at: dt.datetime | None) -> str:
+    return at.strftime("%H:%M") if at else "an unknown time"
+
+
+def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hit: "bool | str" = False,
+           threshold: float = THRESHOLD, floor: float = FLOOR,
+           short_wait: dt.timedelta = SHORT_WAIT) -> Decision:
+    """The action for the account in use, decided against every account's usage, never from its own
+    alone. It is spent when a limit of its is at `threshold`, or a chat hit its limit (`hit`: True,
+    or the limit's name, "session" or "weekly", when the stop said which).
+
+    Then, in this order: a block on the session limit alone that resets within `short_wait` is
+    waited out (pause); an account with room on both limits (under `floor`) is switched to, the one
+    with the most weekly room first; with none, the wait is for the earliest time any account has
+    room again, and that account is the one to switch to then. An account whose usage is unknown
+    is never switched to, and one in use whose usage is unknown is left alone unless a chat hit
+    its limit."""
+    mine = usages.get(current)
+    if mine is None and not hit:
+        return Decision("stay", reason=f"{current}'s usage is unknown")
+    spent = {name: r for name, (pct, r) in (mine or {}).items() if _share(pct, r, now) >= threshold}
+    if hit and not spent:
+        kind = hit if hit in ("session", "weekly") else "session"
+        spent = {kind: ((mine or {}).get(kind) or (None, None))[1]}
+    if not spent:
+        return Decision("stay", reason=f"{current} has room")
+    blocked = ", ".join(f"{k} limit" for k in spent)
+    others = {n: u for n, u in usages.items() if n != current and u is not None}
+    room = sorted((n for n, u in others.items() if _room(u, now, floor)),
+                  key=lambda n: (_share(*others[n]["weekly"], now), _share(*others[n]["session"], now)))
+    session_only = set(spent) == {"session"}
+    reset = spent.get("session")
+    if session_only and reset is not None and reset <= now + short_wait:
+        return Decision("pause", current, reset,
+                        f"{current}'s session limit resets at {_clock(reset)}, within the hour")
+    if room:
+        u = others[room[0]]
+        return Decision("switch", room[0], None,
+                        f"{current} is at its {blocked}; {room[0]} has room ({u['session'][0]:.0f}% session, "
+                        f"{u['weekly'][0]:.0f}% weekly)")
+    # nowhere has room: wait for the earliest time an account has it, the one in use included
+    waits = {}
+    own = reset if session_only else max((r for r in spent.values() if r is not None), default=None)
+    if own is not None:
+        waits[current] = own
+    for n, u in others.items():
+        at = _room_at(u, now, floor)
+        if at is not None:
+            waits[n] = at
+    if not waits:
+        return Decision("pause", current, None, f"{current} is at its {blocked}, and no reset time is known")
+    name = min(waits, key=waits.get)
+    at = waits[name]
+    what = "the same account" if name == current else f"{name}, to switch to then"
+    return Decision("pause", name, at,
+                    f"{current} is at its {blocked} and no account has room; the earliest reset is "
+                    f"{what} at {_clock(at)}")
+
+
+def choose(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hit: "bool | str" = False,
            threshold: float = THRESHOLD) -> str | None:
-    """The account to switch to now, or None. The one in use is spent when it is at the threshold or
-    a chat hit its limit (`hit`). Switch only to an account usable now, so only when it is usable
-    sooner; an account whose usage is unknown is never chosen."""
-    mine = usable_at(usages.get(current), now, threshold)
-    if not hit and (mine is None or mine <= now):
-        return None                  # usable, or unknown: nothing says it is spent
-    best = None
-    for name, u in usages.items():
-        if name == current:
-            continue
-        at = usable_at(u, now, threshold)
-        if at is not None and at <= now and (best is None or at < best[1]):
-            best = (name, at)
-    return best[0] if best else None
+    """The account `decide` switches to now, or None (stay, or pause for a reset)."""
+    d = decide(current, usages, now, hit=hit, threshold=threshold)
+    return d.account if d.action == "switch" else None
 
 
 def limit_hit(transcript: Path, scan: int = 400) -> dict | None:

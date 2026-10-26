@@ -99,10 +99,14 @@ def test_usable_at():
 def test_choose_switches_only_to_an_account_usable_sooner():
     weekly_gone = {"session": (0.0, NOW + H), "weekly": (100.0, NOW + 72 * H)}
     session_full = {"session": (98.5, NOW + 2 * H), "weekly": (40.0, NOW + 100 * H)}
-    assert ac.choose("facterino", {"facterino": session_full, "kgeorgio": weekly_gone}, NOW) is None
+    assert ac.choose("north", {"north": session_full, "south": weekly_gone}, NOW) is None
     weekly_soon = {"session": (0.0, NOW + H), "weekly": (100.0, NOW + H)}
-    assert ac.choose("facterino", {"facterino": session_full, "kgeorgio": weekly_soon}, NOW) is None
-    assert ac.choose("facterino", {"facterino": session_full, "kgeorgio": weekly_soon}, NOW + H) == "kgeorgio"
+    assert ac.choose("north", {"north": session_full, "south": weekly_soon}, NOW) is None
+    # at the reset the other account has room again, but the session block in use ends within the
+    # hour, so the chats wait for it instead of every chat moving (decide, 2026-10-26)
+    assert ac.choose("north", {"north": session_full, "south": weekly_soon}, NOW + H) is None
+    far = {"session": (98.5, NOW + 3 * H), "weekly": (40.0, NOW + 100 * H)}
+    assert ac.choose("north", {"north": far, "south": weekly_soon}, NOW + H) == "south"
 
 
 def test_choose_on_the_error_before_the_threshold_and_never_on_unknown():
@@ -371,3 +375,51 @@ def test_retry_after_reads_seconds_or_an_http_date():
     assert ac.retry_after_seconds("Sun, 18 Oct 2026 11:00:00 GMT", now=NOW) == 0     # a date in the past
     assert ac.retry_after_seconds(None) is None and ac.retry_after_seconds("") is None
     assert ac.retry_after_seconds("soon") is None
+
+
+def test_decide_waits_out_a_short_session_block_instead_of_spending_the_other_weekly():
+    # the readings of one afternoon: in use at 98% of its session limit, 43 minutes from its reset,
+    # with weekly room; the other at 6% session and 97% weekly, which a switch would spend for days
+    north = {"session": (98.0, NOW + dt.timedelta(minutes=43)), "weekly": (48.0, NOW + 60 * H)}
+    south = {"session": (6.0, NOW + 4 * H), "weekly": (97.0, NOW + 70 * H)}
+    d = ac.decide("north", {"north": north, "south": south}, NOW)
+    assert (d.action, d.account, d.until) == ("pause", "north", NOW + dt.timedelta(minutes=43))
+    assert "within the hour" in d.reason
+    assert ac.choose("north", {"north": north, "south": south}, NOW) is None
+
+
+def test_decide_switches_to_room_and_prefers_the_most_weekly_room():
+    north = {"session": (98.0, NOW + 3 * H), "weekly": (48.0, NOW + 60 * H)}
+    south = {"session": (6.0, NOW + 4 * H), "weekly": (40.0, NOW + 70 * H)}
+    east = {"session": (10.0, NOW + 4 * H), "weekly": (20.0, NOW + 70 * H)}
+    near = {"session": (6.0, NOW + 4 * H), "weekly": (92.0, NOW + 70 * H)}
+    d = ac.decide("north", {"north": north, "south": south, "east": east}, NOW)
+    assert (d.action, d.account) == ("switch", "east") and "has room" in d.reason
+    assert ac.decide("north", {"north": north, "near": near, "south": south}, NOW).account == "south"
+    assert ac.choose("north", {"north": north, "south": south}, NOW) == "south"
+
+
+def test_decide_waits_for_the_soonest_weekly_reset_when_every_account_is_near_it():
+    north = {"session": (30.0, NOW + 3 * H), "weekly": (98.0, NOW + 72 * H)}
+    south = {"session": (6.0, NOW + 4 * H), "weekly": (96.0, NOW + 20 * H)}
+    d = ac.decide("north", {"north": north, "south": south}, NOW)
+    assert (d.action, d.account, d.until) == ("pause", "south", NOW + 20 * H)
+    assert "to switch to then" in d.reason
+    # and when the account in use resets first, the wait is on it
+    south_late = {"session": (6.0, NOW + 4 * H), "weekly": (96.0, NOW + 90 * H)}
+    d = ac.decide("north", {"north": north, "south": south_late}, NOW)
+    assert (d.action, d.account, d.until) == ("pause", "north", NOW + 72 * H)
+
+
+def test_decide_on_a_limit_hit_and_on_unknown_usage():
+    fine = {"session": (60.0, NOW + 3 * H), "weekly": (40.0, NOW + 100 * H)}
+    assert ac.decide("a", {"a": fine, "b": fine}, NOW).action == "stay"
+    # the limit was hit before a reading showed it: a session block three hours from its reset
+    # is left for the other account, one that ends within the hour is waited out
+    assert ac.decide("a", {"a": fine, "b": fine}, NOW, hit="session").account == "b"
+    soon = {"session": (60.0, NOW + dt.timedelta(minutes=30)), "weekly": (40.0, NOW + 100 * H)}
+    hit = ac.decide("a", {"a": soon, "b": fine}, NOW, hit="session")
+    assert (hit.action, hit.until) == ("pause", NOW + dt.timedelta(minutes=30))
+    assert ac.decide("a", {"a": fine, "b": fine}, NOW, hit="weekly").account == "b"
+    assert ac.decide("a", {"a": None, "b": fine}, NOW).action == "stay"
+    assert ac.decide("a", {"a": fine, "b": None}, NOW, hit="weekly").action == "pause"   # unknown is never chosen
