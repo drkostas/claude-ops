@@ -28,7 +28,9 @@ HOOKS = {
                    {"matcher": "Bash|mcp__github__.*",
                     "hooks": [{"type": "command", "command": "claude-ops hook plain-voice"}]},
                    {"matcher": "Bash|mcp__github__merge_pull_request",
-                    "hooks": [{"type": "command", "command": "claude-ops hook merge-gate"}]}],
+                    "hooks": [{"type": "command", "command": "claude-ops hook merge-gate"}]},
+                   {"matcher": "Bash",
+                    "hooks": [{"type": "command", "command": "claude-ops hook held-worktrees"}]}],
 }
 
 
@@ -145,6 +147,9 @@ def cmd_hook(a) -> int:
     if a.name == "merge-gate":
         from .hooks import merge_gate
         return merge_gate.main([])
+    if a.name == "held-worktrees":
+        from .hooks import held_worktrees
+        return held_worktrees.main([])
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
@@ -385,7 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
-                                    "merge-gate"))
+                                    "merge-gate", "held-worktrees"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("unwrap-github", help="join the broken paragraphs in what you posted on GitHub")
