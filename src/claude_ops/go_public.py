@@ -11,7 +11,9 @@ is in it has been readable all along. `go` makes it one step, stopping at the fi
      that is already public is only reported on, and the check still goes in;
   2. set the secrets that hold the terms and the allowed text, piped on stdin, never printed;
   3. copy the workflow and its script from a reference repository through a pull request that must
-     pass that check, merged with --merge;
+     pass that check, merged with --merge. `before_checks(repo, public)` is called first, for
+     whatever the check needs in order to run at all (a self-hosted runner, for a private repository
+     whose hosted Actions minutes have run out);
   4. check that the files are on the default branch and the secrets exist, and that no self-hosted
      runner is registered to the repository: once it is public, a pull request from a fork can run
      its jobs on one, so the machine behind it would run a stranger's code. `before_public(repo,
@@ -134,7 +136,7 @@ def self_hosted_runners(repo: str, run=sh) -> list[str] | None:
 
 def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_only: bool = False,
        files: tuple[str, ...] = FILES, secrets: tuple[str, str] = SECRETS, workflow: str = WORKFLOW,
-       before_public=None, after=None, run=sh, say=print) -> dict:
+       before_checks=None, before_public=None, after=None, run=sh, say=print) -> dict:
     """The whole sequence for `repo` (owner/name), with the check copied from `reference`. Returns
     {"repo", "public", "files_added", "hits", "runners"}; raises Refused at the first step that must
     stop it."""
@@ -172,6 +174,8 @@ def go(repo: str, *, terms: list[str], allow: list[str], reference: str, check_o
     say(f"2. set {', '.join(secrets)}")
 
     missing = [p for p in files if api_file(repo, p, branch, run) is None]
+    if missing and before_checks is not None:
+        before_checks(repo, public)
     if missing:
         add_files(repo, branch, reference, files=files, workflow=workflow, run=run)
         say(f"3. added {', '.join(files)} through a merged pull request")
