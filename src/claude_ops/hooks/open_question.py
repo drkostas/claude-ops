@@ -20,11 +20,11 @@ PostToolUse hook removed its file.
 
     "hooks": {
       "PreToolUse":  [{"matcher": "AskUserQuestion", "hooks": [{"type": "command",
-                       "command": "python3 -m claude_ops.hooks.open_question"}]}],
+                       "command": "python3 -P -m claude_ops.hooks.open_question"}]}],
       "PostToolUse": [{"matcher": "AskUserQuestion", "hooks": [{"type": "command",
-                       "command": "python3 -m claude_ops.hooks.open_question"}]}],
+                       "command": "python3 -P -m claude_ops.hooks.open_question"}]}],
       "SessionStart": [{"matcher": "", "hooks": [{"type": "command",
-                       "command": "python3 -m claude_ops.hooks.open_question"}]}]
+                       "command": "python3 -P -m claude_ops.hooks.open_question"}]}]
     }
 
 The folder is `CLAUDE_OPS_QUESTIONS`, else `~/.local/state/claude-ops/questions`. The hook prints

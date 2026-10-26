@@ -31,7 +31,7 @@ The file is `--config`, else `CLAUDE_OPS_PROTECTED_CHECKOUTS_CONFIG`, else
 `~/.config/claude-ops/protected-checkouts.json`. With no patterns nothing is refused. On anything
 unexpected the call goes through: a broken hook must never stop work.
 
-    python -m claude_ops.hooks.protected_checkouts [--pattern REGEX ...] [--config FILE]
+    python3 -P -m claude_ops.hooks.protected_checkouts [--pattern REGEX ...] [--config FILE]
 """
 from __future__ import annotations
 

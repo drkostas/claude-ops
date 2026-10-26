@@ -25,7 +25,7 @@ checked: git shows them as they were written. The configuration is `--config`, e
 line-break check runs. On anything unexpected the call goes through: a broken hook must never stop
 work.
 
-    python -m claude_ops.hooks.plain_voice [--config FILE]     # reads the tool call on stdin
+    python3 -P -m claude_ops.hooks.plain_voice [--config FILE]     # reads the tool call on stdin
 """
 from __future__ import annotations
 
