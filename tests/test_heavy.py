@@ -98,6 +98,32 @@ def test_heavy_queue(monkeypatch):
     check(h.streaks(list(reversed(cap)))[0]["count"] == 3, "the records may come in any order")
     check(h.failed_how(rec("m", 1, 124, "its --max-hold of 5 min")) == "ended at its --max-hold"
           and h.failed_how(rec("m", 1, 0)) is None, "a --max-hold end is its own kind, a success is none")
+
+    # --- ⭐ the session that started a job is kept beside the name it was given ----------------------
+    # A script may pass a project's name rather than a chat's; a reader then tells the conversation
+    # from CLAUDE_CODE_SESSION_ID, which the job's records carry (an invented id here)
+    sid = "0d0e0f10-1111-4222-8333-444455556666"
+    held = start("a-project", "deploy build", "--", "sleep", "30", CLAUDE_CODE_SESSION_ID=sid)
+    who, end = STATE / "slot" / "who.json", time.time() + 20
+    while not who.exists() and time.time() < end:
+        time.sleep(0.1)
+    try:
+        slot_rec = json.loads(who.read_text())
+    except (OSError, ValueError):
+        slot_rec = {}
+    held.kill(); held.wait()
+    check(slot_rec.get("chat") == "a-project" and slot_rec.get("session") == sid,
+          f"⭐ the slot names the session that started the job beside the name it was given: {slot_rec}")
+    rc, out = heavy("a-project", "deploy check", "--", "true", CLAUDE_CODE_SESSION_ID=sid)
+    recs = [json.loads(f.read_text()) for f in sorted((STATE / "done").glob("*.json"), key=lambda f: f.stat().st_mtime)]
+    mine = [r for r in recs if r.get("what") == "deploy check"]
+    check(mine and mine[-1].get("session") == sid, f"and so does its done record: {mine[-1:]}")
+    rc, out = heavy("a-project", "no session", "--", "true")
+    mine = [json.loads(f.read_text()) for f in (STATE / "done").glob("*.json")]
+    mine = [r for r in mine if r.get("what") == "no session"]
+    check(mine and mine[-1].get("session") is None, "a job no Claude Code session started records none")
+    got = h.streaks([{**r, "session": f"s{r['end']}"} for r in cap])
+    check(got and got[0]["session"] == "s3", f"a run of failures names the session of its last run: {got}")
     check([n for n in range(1, 30) if h.worth_saying(n)] == [3, 6, 12, 24],
           "it is said at the third failure and each time the count doubles")
     told2 = STATE / "told-again.txt"
