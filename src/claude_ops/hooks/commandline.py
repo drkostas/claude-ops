@@ -335,7 +335,9 @@ def walk(command: str, cwd: str):
 def writes(command: str, cwd: str) -> list[tuple[str, str]]:
     """(file, text) for the text the line writes into files, as absolute paths: a here-document
     given to a command whose output goes to a file or to `tee`, and the words of `echo` or `printf`
-    redirected to a file. Text a program makes itself is not known here and is not given out."""
+    redirected to a file. Text a program makes itself is not known here and is not given out. A
+    target's variables are expanded with those the line assigned (`D=/tmp/x && cat > $D/f`), so the
+    file is judged where it really goes, not as a path under the current folder."""
     out = []
     piped_text = None                        # what the command before a `|` printed, when known
     for cmd, here in steps(command, cwd):
@@ -357,7 +359,7 @@ def writes(command: str, cwd: str) -> list[tuple[str, str]]:
             continue
         for t in targets:
             if t not in NOT_FILES:
-                out.append((os.path.normpath(os.path.join(here, expand(t))), text))
+                out.append((os.path.normpath(os.path.join(here, expand(t, cmd.get("names")))), text))
     return out
 
 

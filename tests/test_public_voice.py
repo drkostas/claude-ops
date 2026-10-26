@@ -220,6 +220,23 @@ def test_text_a_command_writes_into_a_public_file(cfg, public, private):
     assert pv.check(bash("cat > README.md <<'EOF'\nnothing private\nEOF", public), cfg) is None
 
 
+def test_a_file_outside_every_repository_written_from_a_public_one(cfg, public, tmp_path):
+    # a scratch file named through a variable the line assigned is judged where it goes, not as a
+    # file under the public repository the command runs in
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    line = f"S={scratch} && cat > $S/run.mjs <<'EOF'\nconst who = 'zorblax';\nEOF"
+    assert pv.check(bash(line, public), cfg) is None
+    assert pv.check(bash(f"cd {public} && export S={scratch}; echo zorblax > \"$S/out.txt\"", tmp_path), cfg) is None
+    assert pv.check(bash(f"S={scratch}; tee $S/t.txt <<EOF\nquuxcorp\nEOF", public), cfg) is None
+    assert pv.check(write(scratch / "run.mjs", "const who = 'zorblax';"), cfg) is None
+    # the same variable naming a folder inside the public repository is still refused
+    assert pv.check(bash(f"S={public}/docs && cat > $S/n.md <<'EOF'\nzorblax\nEOF", tmp_path), cfg) == \
+        "'zorblax' in the text written to n.md"
+    # and a variable the line did not assign is still read as a path under the current folder
+    assert pv.check(bash("cat > $UNSET_IN_THIS_TEST/n.md <<'EOF'\nzorblax\nEOF", public), cfg) is not None
+
+
 # --- what a commit would record ------------------------------------------------------------------
 
 def test_what_a_commit_records_in_a_public_repository(cfg, public):
@@ -290,6 +307,11 @@ def test_writes_resolves_targets_from_the_folder_the_command_runs_in(tmp_path):
     got = commandline.writes(f"cd {tmp_path}/sub && cat <<EOF > x.md\nhello\nEOF\necho bye >> /dev/null", "/")
     assert got == [(str(tmp_path / "sub" / "x.md"), "hello\n")]
     assert commandline.writes("ls > list.txt", str(tmp_path)) == []
+    # a target named through a variable the line assigned goes where the variable points
+    got = commandline.writes(f"D={tmp_path}/sub && cat > $D/y.md <<EOF\nhi\nEOF", "/elsewhere")
+    assert got == [(str(tmp_path / "sub" / "y.md"), "hi\n")]
+    got = commandline.writes(f"export D={tmp_path}; echo hi | tee \"$D/t.txt\"; echo yo > ${{D}}/e.txt", "/")
+    assert got == [(str(tmp_path / "t.txt"), "hi"), (str(tmp_path / "e.txt"), "yo")]
 
 
 def test_commit_repos_and_commit_lines_for_one_repository(cfg, public, private):
