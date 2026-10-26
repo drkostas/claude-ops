@@ -79,15 +79,19 @@ class Board:
 
     `selects` maps each single-select field to the options it starts with (a value not among them
     is added the first time a record uses it). `texts` names the text fields. A field that already
-    exists on the project is used as it is.
+    exists on the project is used as it is. `public` makes the project public (True) or private
+    (False), and `description` sets its short description; None leaves either as it is. A new
+    project starts private.
     """
 
     def __init__(self, repo: str, title: str, *, selects: dict[str, list[str]] | None = None,
                  texts: tuple[str, ...] = (), budget: int = 60, pause: float = 1.0,
+                 public: bool | None = None, description: str | None = None,
                  gh=None, env: dict | None = None, sleep=time.sleep):
         self.owner, self.name = repo.split("/", 1)
         self.repo, self.title = repo, title
         self.selects, self.texts = dict(selects or {}), tuple(texts)
+        self.public, self.description = public, description
         self.budget, self.pause, self.sleep = budget, pause, sleep
         self.writes = 0
         self._gh = gh or (lambda args, stdin=None: _gh(args, stdin, env))
@@ -136,7 +140,8 @@ class Board:
                  repository(owner: $owner, name: $name) {
                    id
                    owner { id ... on ProjectV2Owner {
-                     projectsV2(first: 20, query: $title) { nodes { id number title url } } } } } }""",
+                     projectsV2(first: 20, query: $title) {
+                       nodes { id number title url public shortDescription } } } } } }""",
             {"owner": self.owner, "name": self.name, "title": self.title})
         repo = data.get("repository") or {}
         if not repo:
@@ -150,10 +155,11 @@ class Board:
             made = self.graphql(
                 """mutation($owner: ID!, $title: String!, $repo: ID!) {
                      createProjectV2(input: {ownerId: $owner, title: $title, repositoryId: $repo}) {
-                       projectV2 { id number title url } } }""",
+                       projectV2 { id number title url public shortDescription } } }""",
                 {"owner": repo["owner"]["id"], "title": self.title, "repo": self.repository_id},
                 write=True)
             self.project = made["createProjectV2"]["projectV2"]
+        self._settle_project()
         self._read_fields()
         for name, options in self.selects.items():
             if name not in self.fields:
@@ -162,6 +168,23 @@ class Board:
             if name not in self.fields:
                 self._create_field(name, "TEXT")
         return self.project
+
+    def _settle_project(self) -> None:
+        """Make the project's visibility and short description what was asked, when they differ."""
+        change = {}
+        if self.public is not None and bool(self.project.get("public")) != self.public:
+            change["public"] = self.public
+        if self.description is not None and (self.project.get("shortDescription") or "") != self.description:
+            change["shortDescription"] = self.description
+        if not change:
+            return
+        sets = ", ".join(f"{k}: ${k}" for k in change)
+        types = ", ".join(f"${k}: {'Boolean' if k == 'public' else 'String'}" for k in change)
+        self.graphql(
+            f"""mutation($id: ID!, {types}) {{ updateProjectV2(input: {{projectId: $id, {sets}}}) {{
+                  projectV2 {{ id }} }} }}""",
+            {"id": self.project["id"], **change}, write=True)
+        self.project.update(change)
 
     def _read_fields(self) -> None:
         data = self.graphql(
