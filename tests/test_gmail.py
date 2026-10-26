@@ -108,13 +108,20 @@ def test_one_access_token_per_mailbox(tmp_path):
 
 def test_message_gives_the_named_headers_by_name(tmp_path):
     t, c = files(tmp_path)
-    g = Google([{"id": "a", "threadId": "ta", "labelIds": ["INBOX"], "snippet": "Hello",
+    g = Google([{"id": "a", "threadId": "ta", "labelIds": ["INBOX"], "internalDate": "1730000000000",
+                 "snippet": "Hello",
                  "payload": {"headers": [{"name": "Subject", "value": "Hi"}, {"name": "Reply-To", "value": "x@example.org"}]}}])
     m = Mailbox(t, c, fetch=g).message("a", headers=("Subject", "Reply-To"))
-    assert m == {"id": "a", "threadId": "ta", "labels": ["INBOX"], "snippet": "Hello",
-                 "headers": {"Subject": "Hi", "Reply-To": "x@example.org"}}
+    assert m == {"id": "a", "threadId": "ta", "labels": ["INBOX"], "internalDate": "1730000000000",
+                 "snippet": "Hello", "headers": {"Subject": "Hi", "Reply-To": "x@example.org"}}
     q = query_of(g.requests[1])
     assert q["format"] == ["metadata"] and q["metadataHeaders"] == ["Subject", "Reply-To"]
+
+
+def test_message_internaldate_is_none_when_absent(tmp_path):
+    t, c = files(tmp_path)
+    g = Google([{"id": "a", "payload": {"headers": []}}])
+    assert Mailbox(t, c, fetch=g).message("a")["internalDate"] is None
 
 
 def test_a_refusal_raises_with_its_status(tmp_path):

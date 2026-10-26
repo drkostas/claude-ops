@@ -296,7 +296,7 @@ box = Mailbox("/path/to/token.json", "/path/to/credentials.json")
 fetch = lambda: [m["id"] for m in box.search('from:billing@example.org newer_than:14d')]
 ```
 
-`box.message(id)` then gives a match's headers, labels and snippet, and `box.body(id)` the message text itself, the first text/plain part, or the HTML part with its tags stripped, for a watcher that has to read the body and not only match on it.
+`box.message(id)` then gives a match's headers, labels, snippet and internalDate (Gmail's arrival time, for a watcher that checkpoints by when a message arrived), and `box.body(id)` the message text itself, the first text/plain part, or the HTML part with its tags stripped, for a watcher that has to read the body and not only match on it.
 
 The `chat-watcher` skill explains the full pattern to Claude, including the launchd file.
 
