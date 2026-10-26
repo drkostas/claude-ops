@@ -174,12 +174,16 @@ class Mailbox:
         return found[:max_results]
 
     def message(self, message_id: str, headers=HEADERS) -> dict:
-        """One message's headers (only those named, by name), snippet, labels and thread, without its body."""
+        """One message's id, thread, labels, internalDate, snippet and the named headers by name,
+        without its body (see `body`). internalDate is Gmail's own arrival time as a string of epoch
+        milliseconds, for a watcher that checkpoints by when a message arrived rather than by the
+        Date header a sender sets; it is None when the response omits it."""
         params = [("format", "metadata")] + [("metadataHeaders", h) for h in headers]
         out = self._get("messages/" + urllib.parse.quote(message_id, safe=""), params)
         got = {h["name"]: h["value"] for h in (out.get("payload") or {}).get("headers", [])}
         return {"id": out.get("id", message_id), "threadId": out.get("threadId"),
-                "labels": out.get("labelIds", []), "snippet": out.get("snippet", ""), "headers": got}
+                "labels": out.get("labelIds", []), "internalDate": out.get("internalDate"),
+                "snippet": out.get("snippet", ""), "headers": got}
 
     def body(self, message_id: str) -> str:
         """The message's text, for a watcher that must read it and not only its headers: the first
