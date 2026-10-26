@@ -29,6 +29,27 @@ def test_idle():
     assert cu.idle(100, MCP_ONLY, ago(70), None, NOW, quiet_unhooked_s=60)[0]
 
 
+def test_a_slash_command_waits_for_the_turn_and_not_for_commands_left_in_the_background():
+    ok, why = cu.idle(100, WITH_CMD, ago(120), ago(110), NOW, background_ok=True)
+    assert ok and "background" in why
+    assert not cu.idle(100, WITH_CMD, ago(120), ago(110), NOW)[0]                       # a restart still waits
+    assert not cu.idle(100, WITH_CMD, ago(60), ago(600), NOW, background_ok=True)[0]    # written since: it works
+    assert not cu.idle(100, WITH_CMD, ago(10), ago(9), NOW, background_ok=True)[0]      # its turn just ended
+    assert not cu.idle(100, WITH_CMD, ago(900), None, NOW, background_ok=True)[0]       # no recorded end
+
+
+def test_ready_for_a_slash_command_is_not_held_by_a_background_agent(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cu, "idle", lambda *a, **k: (seen.update(k) or True, "its turn ended"))
+    monkeypatch.setattr(cu, "background_agent", lambda *a, **k: "agent-1")
+    monkeypatch.setattr(cu, "last_activity", lambda *a, **k: None)
+    monkeypatch.setattr(cu, "transcript_of", lambda *a, **k: None)
+    screen = "───\n❯ \n───\n  ⏵⏵ accept edits on"
+    assert cu.ready(100, MCP_ONLY, "c", screen, ago(110), NOW, commands={}, background_ok=True)[0]
+    assert seen.get("background_ok") is True
+    assert not cu.ready(100, MCP_ONLY, "c", screen, ago(110), NOW, commands={})[0]      # an agent holds a restart
+
+
 def test_a_turn_that_ended_in_an_error_does_not_read_as_working_for_ever():
     # an API error ends the turn without a Stop hook, so the transcript is newer than the last
     # recorded end of turn (portal-local-gguf, 2026-10-11)
