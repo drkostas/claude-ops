@@ -869,9 +869,14 @@ def question_unreachable(screen: str | None, seconds_since_input: float | None, 
                          away_s: float = AWAY_S) -> bool:
     """A question on a session's screen that nobody can answer: its screen says it lost its login
     or its Remote Control (`signed_out`), so no phone reaches it, and nobody has used this computer
-    for `away_s`. Waiting for an answer then waits for ever, while a restart into the same
-    conversation brings Remote Control back and loses only the dialog (what was asked stays in the
-    transcript, so it can be asked again). Unknown input time means somebody may be there."""
+    for `away_s`. Waiting for an answer then waits for ever, and only a restart into the same
+    conversation brings Remote Control back. Unknown input time means somebody may be there.
+
+    A restart through the open dialog loses what was asked. Claude Code writes a tool call to the
+    transcript only once the call has returned, so while the dialog is open its questions, and the
+    reply above them, are on the screen only. Close the dialog first (one Esc returns the call, and
+    the questions are then in the transcript), keep the questions where a person can answer them,
+    and restart after that."""
     if seconds_since_input is None or seconds_since_input < away_s:
         return False
     return signed_out(screen) is not None
@@ -888,7 +893,8 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
     ended, and `idle` alone said "it is working" for a chat that had waited hours for the person.
     Restarting it would lose the question, so it waits either way,
     but the reason has to say who it is waiting for. The one exception is `question_blocks=False`,
-    for a question the caller found nobody can answer (`question_unreachable`)."""
+    for a question the caller found nobody can answer (`question_unreachable`) and has already
+    closed and kept elsewhere, since an open dialog is not in the transcript."""
     prompt = empty_prompt(screen)
     if not prompt[0] and prompt[1].startswith(LIMITED):
         return prompt
