@@ -122,6 +122,18 @@ def real_session(text: str, paths_ok: bool = False) -> str | None:
     return None
 
 
+def redact(text: str) -> str:
+    """The text with every session link, Claude-Session trailer and id of a real transcript replaced
+    by REDACTED, for a program that copies text it did not write (messages, notes, logs) into a
+    repository, an issue or a pull request, where the hook never sees it."""
+    if not text:
+        return text
+    text = LINK.sub(REDACTED, text)
+    text = TRAILER.sub(REDACTED, text)
+    ids = session_ids()
+    return UUID.sub(lambda m: REDACTED if m.group(0) in ids else m.group(0), text)
+
+
 def why_not(text: str, into_repo: bool) -> str | None:
     """Both checks on one text: what may be written nowhere, and what may not reach a repository."""
     return offending(text) or (real_session(text) if into_repo else None)
