@@ -229,11 +229,17 @@ def test_heavy_queue(monkeypatch):
     rc2, st = heavy("status")
     check(rc == 0 and f"ci-runner: CI job (pid {worker.pid}" in st, "a CI job holds the slot for its worker")
     p = start("t", "behind-ci", "--", "true")
-    time.sleep(1)
-    check(p.poll() is None, "and a job waits behind it")
+    # its ticket in the queue, not a second on the clock: under load the waiter took longer than a
+    # second to start, so "it has not finished" was no proof that it waited (a deploy gate, 2026-10-27)
+    check(soon(lambda: waiting() == 1) and p.poll() is None, "and a job waits behind it")
     heavy("release", "--pid", str(worker.pid))
-    p.wait(timeout=20)
-    check(p.returncode == 0, "release gives the slot back, and the next job runs")
+    try:
+        said = p.communicate(timeout=60)[0]
+    except subprocess.TimeoutExpired:
+        p.kill()
+        said = p.communicate()[0]
+    check(p.returncode == 0, f"release gives the slot back, and the next job runs "
+                             f"(rc={p.returncode}: {said.strip()[-200:]!r})")
 
     rc, out = heavy("hold", "ci-runner", "CI job", "--pid", str(worker.pid))
     worker.kill(); worker.wait()
