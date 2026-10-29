@@ -184,3 +184,44 @@ def test_last_said_reads_back_in_chunks(tmp_path):
     got = messages.last_said(p, chunk=4096)
     assert got["text"] == "The answer." and got["line"] == 1
     assert messages.last_said(p, chunk=4096, limit=4096) is None
+
+
+def _box(ts, call_id, question):
+    return {"type": "assistant", "timestamp": ts, "sessionId": "s1",
+            "message": {"content": [{"type": "text", "text": "One question before I send it."},
+                                    {"type": "tool_use", "id": call_id, "name": "AskUserQuestion",
+                                     "input": {"questions": [{"question": question}]}}]}}
+
+
+def _result(ts, call_id, text, error=False):
+    return {"type": "user", "timestamp": ts, "sessionId": "s1",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": call_id, "content": text,
+                                     **({"is_error": True} if error else {})}]}}
+
+
+def test_said_since_person_is_the_text_after_the_last_message():
+    rows = [_a("2026-01-05T09:00:00Z", "An older answer."),
+            _u("2026-01-05T10:00:00Z", "write the release note"),
+            _a("2026-01-05T10:01:00Z", "Here is the draft:\n\nVersion 2 adds dark mode."),
+            _tool("2026-01-05T10:02:00Z", "Bash", "build it"),
+            _result("2026-01-05T10:02:30Z", "t1", "built"),
+            _u("2026-01-05T10:03:00Z", "[watcher] the build is green"),
+            _q("2026-01-05T10:03:10Z", "also mention the fix"),
+            {**_a("2026-01-05T10:03:20Z", "a side chain's words"), "isSidechain": True},
+            _box("2026-01-05T10:04:00Z", "b1", "Send the draft above?")]
+    # a program's message, a queued message and a side chain do not end what was said
+    assert messages.said_since_person(rows) == [
+        "Here is the draft:\n\nVersion 2 adds dark mode.", "One question before I send it."]
+
+
+def test_said_since_person_starts_after_an_answered_box_but_not_a_declined_one():
+    asked = [_u("2026-01-05T10:00:00Z", "tidy the notes"), _box("2026-01-05T10:01:00Z", "b1", "Which folder?")]
+    answered = asked + [_result("2026-01-05T10:02:00Z", "b1", 'The user answered: "Which folder?"="docs"'),
+                        _a("2026-01-05T10:03:00Z", "Moved them to docs.")]
+    assert messages.said_since_person(answered) == ["Moved them to docs."]
+    declined = asked + [_result("2026-01-05T10:02:00Z", "b1", "The user doesn't want to proceed", error=True),
+                        _a("2026-01-05T10:03:00Z", "I will wait.")]
+    assert messages.said_since_person(declined) == ["One question before I send it.", "I will wait."]
+    assert messages.said_since_person([_a("2026-01-05T10:00:00Z", "Started by a schedule.")]) == [
+        "Started by a schedule."]
+    assert messages.said_since_person([]) == []
