@@ -142,6 +142,45 @@ def show_in_iterm(tmux_name: str, *, env: Mapping[str, str] | None = None) -> tu
     return True, "shown in iTerm2"
 
 
+def server_running(*, env: Mapping[str, str] | None = None, run=subprocess.run) -> bool:
+    """Whether a tmux server runs (`tmux ls` answers)."""
+    return run([TMUX, "-u", "ls"], capture_output=True, text=True, env=env).returncode == 0
+
+
+#: AppleScript that opens an iTerm2 window running the command given as its one argument
+_ITERM_RUN = ['on run argv', 'tell application "iTerm2" to create window with default profile command (item 1 of argv)',
+              'end run']
+
+
+def start_server_through_iterm(name: str, cwd: Path, *, wait: float = 20.0, env: Mapping[str, str] | None = None,
+                               run=subprocess.run, sleep=time.sleep) -> tuple[bool, str]:
+    """Create tmux session `name` in `cwd` as the first session of a new tmux server, started by an
+    iTerm2 window's command, for use when no server runs (server_running).
+
+    Everything in a tmux server runs in the context of whatever started it (server_context). A
+    server started by a background job or a script makes tmux the program that asks macOS for each
+    app its panes drive, one consent prompt per app, and its panes cannot script iTerm2. Started by
+    iTerm2, its Apple Events are iTerm2's. The window runs the one command (`new-session -d` returns
+    at once) and closes. The command reaches iTerm2 as an argument, never inside the script.
+
+    (True, how) once the session exists; (False, why) when a server runs already (it is never
+    touched), iTerm2 would not run the command, or the session did not appear within `wait` s."""
+    if server_running(env=env, run=run):
+        return False, "a tmux server runs already; start the session in it as usual"
+    command = shlex.join([TMUX, "-u", "new-session", "-d", "-s", name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="])
+    r = run(["osascript", *[a for line in _ITERM_RUN for a in ("-e", line)], command],
+            capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        return False, f"iTerm2 did not run the command: {(r.stderr or '').strip()[:200]}"
+    waited = 0.0
+    while run([TMUX, "-u", "has-session", "-t", name], capture_output=True, text=True, env=env).returncode != 0:
+        if waited >= wait:
+            return False, f"iTerm2 ran the command, but no session {name} appeared within {wait:.0f} s"
+        sleep(0.5)
+        waited += 0.5
+    return True, "started through iTerm2, so the server runs in iTerm2's context"
+
+
 def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, show: bool = True, wait: int = 30, log=print, env: Mapping[str, str] | None = None) -> dict:
     tmux_name = f"claude-{name}"
     if tmux_name in tmux_sessions(env=env):
@@ -149,7 +188,11 @@ def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, sho
     cwd = cwd.expanduser().resolve()
     cwd.mkdir(parents=True, exist_ok=True)
     before = transcripts(cwd)
-    subprocess.run([TMUX, "-u", "new-session", "-d", "-s", tmux_name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="], check=True, env=env)
+    started, how = (False, "") if server_running(env=env) else start_server_through_iterm(tmux_name, cwd, env=env)
+    if not started:
+        if how:
+            log(f"the tmux server was not started through iTerm2 ({how}); starting it here")
+        subprocess.run([TMUX, "-u", "new-session", "-d", "-s", tmux_name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="], check=True, env=env)
     shown = show_in_iterm(tmux_name, env=env) if show else (False, "not shown")
     command = f"claude -n {name} {claude_args}".strip()
     subprocess.run([TMUX, "-u", "send-keys", "-t", tmux_name, command, "Enter"], check=True, env=env)
