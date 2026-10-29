@@ -17,6 +17,13 @@ branch "as its worktree has it" keeps. Reading (log, show, status, diff, fetch) 
 The holders are a folder of files, each named after a process id, each listing the worktree folders
 that process holds, one per line. A file whose process is gone holds nothing, so a tool that died
 leaves no lock behind. The tool writes its file when it starts holding and removes it when it ends.
+
+A process id is used again once its process ends, so a holder that was killed can leave a file that a
+new, unrelated process seems to keep alive. A tool may write `<pid>.started` beside the file, holding
+the process's start time as `ps -o lstart= -p <pid>` prints it. Then the file holds only while that pid
+still runs with that start time. A file with no `.started` beside it is judged by its pid alone, as
+before. The start time is read only for a command that would rewrite a held worktree, so the hook
+costs nothing more for every other call.
 The folder and an extra message come from `--holders` and `--message`, else from a JSON file:
 
     {
@@ -34,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 
 from . import commandline
@@ -80,22 +88,55 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def held(holders: str | None) -> dict[str, int]:
-    """{worktree folder (resolved): the pid of a live process that holds it}."""
-    out: dict[str, int] = {}
+def _started(pid: int) -> str | None:
+    """The start time of process `pid` as `ps -o lstart=` prints it, or None when it cannot be read."""
+    try:
+        r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                           timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (r.stdout or "").strip() or None if r.returncode == 0 else None
+
+
+def same_process(holders: str | None, pid: int, started=_started) -> bool:
+    """Whether `pid` is still the process that wrote its holder file: True when no `<pid>.started` is
+    beside the file (a holder written before start times were kept), or when it matches what `ps`
+    prints now. A start time that cannot be read now counts as the same process, so the hook never
+    lets a rewrite through on a reading it could not make."""
+    if not holders:
+        return True
+    try:
+        with open(os.path.join(holders, f"{pid}.started")) as f:
+            want = f.read().strip()
+    except OSError:
+        return True
+    if not want:
+        return True
+    now = started(pid)
+    return now is None or " ".join(now.split()) == " ".join(want.split())
+
+
+def holding(holders: str | None) -> dict[str, list[int]]:
+    """{worktree folder (resolved): the pids of every live process whose file lists it}, in pid order."""
+    out: dict[str, list[int]] = {}
     if not holders or not os.path.isdir(holders):
         return out
-    for name in os.listdir(holders):
+    for name in sorted(os.listdir(holders), key=lambda n: (len(n), n)):
         if not name.isdigit() or not _alive(int(name)):
             continue
         try:
             with open(os.path.join(holders, name)) as f:
                 for line in f:
                     if line.strip():
-                        out[os.path.realpath(os.path.expanduser(line.strip()))] = int(name)
+                        out.setdefault(os.path.realpath(os.path.expanduser(line.strip())), []).append(int(name))
         except OSError:
             continue
     return out
+
+
+def held(holders: str | None) -> dict[str, int]:
+    """{worktree folder (resolved): the pid of a live process that holds it}."""
+    return {folder: pids[0] for folder, pids in holding(holders).items()}
 
 
 def _holder(where: str, folders: dict[str, int]) -> tuple[str, int] | None:
@@ -118,8 +159,10 @@ def _rewrites(sub: str, args: list[str]) -> bool:
     return sub in REWRITES
 
 
-def check(payload: dict, folders: dict[str, int]) -> str | None:
-    """Why the call is refused, or None."""
+def check(payload: dict, folders: dict[str, int], holders: str | None = None,
+          started=_started) -> str | None:
+    """Why the call is refused, or None. With `holders`, a hit's holder must still be the process that
+    wrote its file (same_process), else its folders hold nothing."""
     if not folders or payload.get("tool_name") != "Bash":
         return None
     cwd = payload.get("cwd") or os.getcwd()
@@ -132,6 +175,10 @@ def check(payload: dict, folders: dict[str, int]) -> str | None:
         if not _rewrites(inv["sub"], inv["args"]):
             continue
         hit = _holder(where, folders)
+        if hit and holders:
+            # every file that lists the folder counts, and a pid another process took holds nothing
+            live = [p for p in holding(holders).get(hit[0], [hit[1]]) if same_process(holders, p, started)]
+            hit = (hit[0], live[0]) if live else None
         if hit:
             return (f"`git {inv['sub']}{' --amend' if inv['sub'] == 'commit' else ''}` in {hit[0]}, "
                     f"which process {hit[1]} holds")
@@ -142,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         holders, message = config(list(sys.argv[1:] if argv is None else argv))
         payload = json.load(sys.stdin)
-        why = check(payload, held(holders))
+        why = check(payload, held(holders), holders)
     except Exception:  # noqa: BLE001 - a broken hook must never stop work
         return 0
     if why:
