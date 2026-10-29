@@ -439,7 +439,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "tracebacks": ("tracebacks", "Python tracebacks in log files, new since an offset, grouped"),
          "changelog": ("changelog", "the pull requests merged between two commits, oldest first"),
          "mcp-park": ("mcp_park", "move MCP servers between the configuration and a parked file, or keep only some"),
-         "instructions": ("instruction_history", "what changed in the instruction files a chat loaded, from kept copies")}
+         "instructions": ("instruction_history", "what changed in the instruction files a chat loaded, from kept copies"),
+         "pr-changes": ("pr_changes", "what the open pull requests change, by file and function, against a text")}
 
 
 def main(argv: list[str] | None = None) -> int:
