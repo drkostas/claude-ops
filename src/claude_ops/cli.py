@@ -257,6 +257,13 @@ def cmd_merge(a) -> int:
     return code
 
 
+def cmd_sqlite_check(a) -> int:
+    from . import sqlite_health
+    argv = [a.container, a.path, "--engine", a.engine] + (["--since", a.since] if a.since else []) \
+        + (["--json"] if a.json else [])
+    return sqlite_health.main(argv)
+
+
 def cmd_mcp_containers(a) -> int:
     from . import mcp_containers
     argv = (["--stop"] if a.stop else []) + ["--min-age", str(a.min_age)] + (["--json"] if a.json else [])
@@ -390,6 +397,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--max", type=int, default=200)
     s.set_defaults(func=cmd_restore)
+
+    s = sub.add_parser("sqlite-check", help="whether an SQLite database inside a container is intact")
+    s.add_argument("container")
+    s.add_argument("path", help="the database file's path inside the container")
+    s.add_argument("--since", metavar="DURATION", help="also count the damage lines in the log over this time")
+    s.add_argument("--engine", default="docker")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_sqlite_check)
 
     s = sub.add_parser("mcp-containers", help="list or stop the MCP server containers no live chat runs")
     s.add_argument("--stop", action="store_true", help="stop the orphans (docker stop)")
