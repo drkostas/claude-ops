@@ -155,6 +155,9 @@ def cmd_hook(a) -> int:
     if a.name == "conflict-markers":
         from .hooks import conflict_markers
         return conflict_markers.main([])
+    if a.name == "mail-guard":
+        from .hooks import mail_guard
+        return mail_guard.main([])
     if a.name == "chain":
         from .hooks import chain
         return chain.main([])
@@ -398,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
-                                    "merge-gate", "held-worktrees", "conflict-markers", "chain"))
+                                    "merge-gate", "held-worktrees", "conflict-markers", "mail-guard", "chain"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("unwrap-github", help="join the broken paragraphs in what you posted on GitHub")
