@@ -593,6 +593,28 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
         "terminals_before": held, "terminals_after": kept}
 
 
+def start_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
+              env: Mapping[str, str] | None = None) -> tuple[str, dict]:
+    """Open iTerm2 when it is not running, and wait until it answers.
+
+    For an iTerm2 that something else ended (a crash, a signal to every process of the user): nothing
+    is stopped, so nothing can be lost, and a running iTerm2 is left as it is ("skipped"). Returns
+    (outcome, detail): "success" once it answers, "skipped" when it was running, "failure" when it
+    could not be opened or did not answer within `answer_wait` seconds; detail carries "message"."""
+    p = procs or Processes(env)
+    if p.app():
+        return "skipped", {"message": "iTerm2 is running; nothing was started"}
+    if not p.open():
+        return "failure", {"message": "iTerm2 could not be opened"}
+    waited = 0.0
+    while not p.answers():
+        if waited >= answer_wait:
+            return "failure", {"message": f"iTerm2 opened but did not answer within {answer_wait:.0f} s"}
+        p.sleep(3)
+        waited += 3
+    return "success", {"message": "iTerm2 was not running, and it is open and answering"}
+
+
 # --------------------------------------------------------------------------- one tab, its profile, its keys
 
 _SELECT = '''tell application "iTerm2"
