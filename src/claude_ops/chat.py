@@ -28,6 +28,10 @@ from .inject import TMUX, tmux_sessions
 
 PROJECTS = Path.home() / ".claude" / "projects"
 
+#: the words Claude Code's usage-limit question is found by. It is not a start-up question: the
+#: chat waits there until a person or a program answers it, and option 2 spends money
+USAGE_LIMIT = "wait for limit to reset"
+
 BLOCKED_ON = [
     ("trust this folder", "Claude Code is asking whether to trust this folder.",
      "run again with --trust, or answer it: tmux attach -t {name}"),
@@ -35,7 +39,7 @@ BLOCKED_ON = [
      "tmux attach -t {name} and choose"),
     ("select login method", "Claude Code is not signed in.", "tmux attach -t {name} and sign in"),
     ("browser didn't open", "Claude Code is waiting for a sign-in in the browser.", "tmux attach -t {name} and finish it"),
-    ("wait for limit to reset", "Claude Code has reached the account's usage limit and asks whether to wait for the reset or add funds.",
+    (USAGE_LIMIT, "Claude Code has reached the account's usage limit and asks whether to wait for the reset or add funds.",
      "1 waits for the reset and costs nothing, 2 adds funds, a payment for the user to decide: tmux attach -t {name}"),
 ]
 
@@ -69,8 +73,8 @@ def input_box(text: str) -> bool:
                for i in range(1, len(lines) - 1))
 
 
-def diagnose(text: str, name: str) -> tuple[str, str] | None:
-    """What a start-up question on the screen is, and how to answer it; None when there is none.
+def question(text: str) -> str | None:
+    """The words of the question a screen is waiting on (one of BLOCKED_ON's), or None when there is none.
 
     Only the bottom of the screen counts, and never while the input box is there: a conversation
     that mentions "trust this folder" read as a chat stuck on the trust prompt. When the words of
@@ -81,11 +85,20 @@ def diagnose(text: str, name: str) -> tuple[str, str] | None:
         return None
     lines = [ln.lower() for ln in text.splitlines() if ln.strip()][-QUESTION_LINES:]
     found = None
-    for needle, what, fix in BLOCKED_ON:
+    for needle, _what, _fix in BLOCKED_ON:
         at = max((i for i, ln in enumerate(lines) if needle in ln), default=-1)
         if at >= 0 and (found is None or at > found[0]):
-            found = (at, what, fix)
-    return (found[1], found[2].format(name=name)) if found else None
+            found = (at, needle)
+    return found[1] if found else None
+
+
+def diagnose(text: str, name: str) -> tuple[str, str] | None:
+    """What the question on the screen is, and how to answer it; None when there is none (question)."""
+    needle = question(text)
+    for words, what, fix in BLOCKED_ON:
+        if words == needle:
+            return what, fix.format(name=name)
+    return None
 
 
 def trust_keys(pane: str) -> list[str] | None:

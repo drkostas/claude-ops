@@ -118,6 +118,10 @@ def test_the_question_drawn_last_is_the_one_waiting():
     assert "usage limit" in what and "trust" not in what
     assert "costs nothing" in fix and "tmux attach -t claude-x" in fix
     assert not chat.input_box(LIMIT_SCREEN)
+    # a caller tells the usage-limit question from a start-up question by its words
+    assert chat.question(LIMIT_SCREEN) == chat.USAGE_LIMIT
+    assert chat.question(TRUST_SCREEN) == "trust this folder"
+    assert chat.question(AT_PROMPT_QUOTING_IT) is None
     # the same question with nothing above it
     what, _fix = chat.diagnose(LIMIT_SCREEN.split("✻")[1], "claude-x")
     assert "usage limit" in what
