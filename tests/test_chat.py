@@ -63,6 +63,43 @@ def test_a_start_up_question_counts_only_at_the_bottom():
     assert chat.diagnose("Please Select login method\n" + "line\n" * 20, "claude-x") is None
 
 
+class FakeTmux:
+    """tmux and osascript, run in turn; the server exists once iTerm2 has run its command."""
+    def __init__(self, server=False, iterm_runs=True):
+        self.server, self.iterm_runs, self.calls = server, iterm_runs, []
+
+    def __call__(self, cmd, **_k):
+        import subprocess as sp
+        self.calls.append(list(cmd))
+        if cmd[0].endswith("osascript"):
+            self.server = self.iterm_runs
+            return sp.CompletedProcess(cmd, 0 if self.iterm_runs else 1, "", "")
+        if "ls" in cmd or "has-session" in cmd:
+            return sp.CompletedProcess(cmd, 0 if self.server else 1, "", "")
+        return sp.CompletedProcess(cmd, 0, "", "")
+
+
+def test_a_new_tmux_server_is_started_through_iterm2():
+    run = FakeTmux()
+    assert not chat.server_running(run=run)
+    ok, how = chat.start_server_through_iterm("claude-x", Path("/tmp/work"), run=run, sleep=lambda s: None)
+    osa = [c for c in run.calls if c[0].endswith("osascript")]
+    assert ok and "iTerm2" in how and len(osa) == 1
+    # the command reaches iTerm2 as an argument, never inside the script, so no quoting can break it
+    assert "new-session" in osa[0][-1] and "claude-x" in osa[0][-1] and "/tmp/work" in osa[0][-1]
+    assert "claude-x" not in " ".join(osa[0][:-1])
+
+
+def test_iterm2_that_does_not_run_it_is_a_failure_and_a_running_server_is_never_touched():
+    run = FakeTmux(iterm_runs=False)
+    ok, how = chat.start_server_through_iterm("claude-x", Path("/tmp/work"), run=run, wait=3,
+                                              sleep=lambda s: None)
+    assert not ok and how
+    run = FakeTmux(server=True)
+    ok, how = chat.start_server_through_iterm("claude-x", Path("/tmp/work"), run=run, sleep=lambda s: None)
+    assert not ok and "runs" in how and not [c for c in run.calls if c[0].endswith("osascript")]
+
+
 def test_at_prompt_is_not_fooled_by_a_conversation_about_the_question(monkeypatch):
     monkeypatch.setattr(chat, "pane_text", lambda *_a, **_k: AT_PROMPT_QUOTING_IT)
     assert chat.at_prompt("claude-x", wait=0.1)
