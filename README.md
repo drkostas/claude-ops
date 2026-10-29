@@ -125,6 +125,7 @@ claude-ops union <worktree> --ordered order.txt --journal CHANGES.md   # in a st
 claude-ops secret-shapes <worktree> origin/main --shapes shapes.json   # or --pre-push in a git hook
 claude-ops mutate <worktree> --run "pytest -q {copy}/tests" --function src/pkg/mod.py:name
 claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps lists them
+claude-ops pr-changes --repo owner/name --text "fix spawn_helpers"     # which open PR changes it
 ```
 
 - `union` settles a rebase conflict where both sides only added lines, by keeping both, the
@@ -145,6 +146,13 @@ claude-ops plan-apply PLAN.md 'Step 1' 'Step 2'                       # --steps 
   one whose base pull request merged with its commits rewritten.
 - `plan-apply` applies a written plan's `(Write `path`)` and `(Edit on `path`)` steps exactly, and
   stops at the first step that cannot be applied.
+- `pr-changes` reads every open pull request (`gh pr list`) and the files and functions its branch
+  changes against its base (a `git diff` over fetched `origin/` refs, then the file's own
+  definitions: Python by its syntax tree, SQL by its CREATE statements, shell by its function
+  openers, TypeScript and JavaScript by their top-level functions), and with `--text` prints which
+  open pull request already changes a function or code file the text names, by number. A session
+  about to build on a brief, a work item or a thing it claims asks this first, so two sessions do
+  not build the same thing. The listing is cached for ten minutes; `--no-cache` reads again.
 
 ## A job that outlives the chat
 
