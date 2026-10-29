@@ -91,6 +91,24 @@ def test_two_chats_never_share_a_worktree(world):
     assert prep(world, world["repo"], "fix")["worktree"].endswith("-fix")
 
 
+def test_a_chat_whose_folder_is_gone_reuses_its_own_branch(world):
+    first = Path(prep(world, world["repo"], "back")["worktree"])
+    (first / "b.txt").write_text("work")
+    git(first, "add", "b.txt")
+    commit(first, "the chat's own commit")
+    git(world["repo"], "worktree", "remove", "--force", str(first))   # the folder goes, the branch stays
+    again = Path(prep(world, world["repo"], "back")["worktree"])
+    assert again == first and cw.owner_branch(again) == "chat/back" and (again / "b.txt").read_text() == "work"
+
+
+def test_a_chat_branch_checked_out_elsewhere_is_refused(world):
+    first = Path(prep(world, world["repo"], "busy")["worktree"])
+    other = world["base"] / "elsewhere"
+    git(world["repo"], "worktree", "move", str(first), str(other))
+    with pytest.raises(ValueError, match="checked out in another worktree"):
+        prep(world, world["repo"], "busy")
+
+
 def test_a_subfolder_is_the_same_place_inside_the_worktree(world):
     repo = world["repo"]
     (repo / "kernel").mkdir()

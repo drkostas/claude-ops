@@ -107,6 +107,17 @@ def owner_branch(wt: Path, *, env: Env = None) -> str | None:
         return None
 
 
+def checked_out_at(root: Path, branch: str, *, env: Env = None) -> str | None:
+    """The folder of the worktree that has `branch` checked out, or None."""
+    path = None
+    for line in _git(root, "worktree", "list", "--porcelain", check=False, env=env).splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch}":
+            return path
+    return None
+
+
 def prepare(folder: Path, name: str, *, worktrees: Path = WORKTREES,
             projects: Path = PROJECTS, env: Env = None) -> dict:
     """Where a chat named `name` asked to work in `folder` should start, and what was linked.
@@ -133,8 +144,19 @@ def prepare(folder: Path, name: str, *, worktrees: Path = WORKTREES,
             raise ValueError(f"{wt} is another chat's worktree ({owner_branch(wt, env=env) or 'no branch'})")
     else:
         worktrees.mkdir(parents=True, exist_ok=True)
-        _git(root, "worktree", "add", "-q", "-b", f"chat/{name}", str(wt), default_ref(root, env=env),
-             env=env)
+        branch = f"chat/{name}"
+        # A worktree removed by hand can leave its branch behind, and `worktree add -b` then fails on
+        # "a branch named ... already exists", so the chat could not start. The chat's own branch is
+        # reused when no other worktree has it checked out; a folder whose worktree is gone is pruned
+        # first, so git no longer counts it.
+        _git(root, "worktree", "prune", check=False, env=env)
+        if _git(root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False, env=env):
+            holder = checked_out_at(root, branch, env=env)
+            if holder is not None:
+                raise ValueError(f"{branch} is checked out in another worktree ({holder})")
+            _git(root, "worktree", "add", "-q", str(wt), branch, env=env)
+        else:
+            _git(root, "worktree", "add", "-q", "-b", branch, str(wt), default_ref(root, env=env), env=env)
     linked = []
     for src in excluded_files(root):
         dst = wt / src.relative_to(root)
