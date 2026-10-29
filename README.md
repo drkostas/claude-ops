@@ -194,6 +194,16 @@ claude-ops mcp-containers           # list the running MCP containers no live ch
 claude-ops mcp-containers --stop    # and stop them; docker's --rm then removes them
 ```
 
+## An SQLite database inside a container
+
+A web app with SQLite in a Docker volume can keep answering its health URL while a page of its
+database is damaged, failing only the queries that touch that page. This reads the file itself.
+
+```bash
+claude-ops sqlite-check <container> <path>              # intact (exit 0), damaged (1), not asked (2)
+claude-ops sqlite-check <container> <path> --since 10m  # and the lines of SQLite damage in its log
+```
+
 A chat that runs an MCP server as `docker run -i --rm <image>` leaves the container running when
 the chat ends by a signal: the client dies, the server waits on a stdin nobody closes, and `--rm`
 only removes a container that exits. Only containers started that way are looked at (docker will
