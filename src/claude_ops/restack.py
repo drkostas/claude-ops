@@ -1,21 +1,22 @@
-"""restack — rebuild a stack of one-commit branches on a new base, settling add-only conflicts.
+"""restack — rebuild a stack of branches on a new base, settling add-only conflicts.
 
-A stack of pull requests, each built on the one before and each one commit, falls behind when the
-base moves or a lower branch changes. Restacking by hand means a rebase per branch and the same
-add-only conflicts each time (an entry at the end of a list, a line in a changelog). `restack`
-rebases each worktree's top commit onto the branch before it, the first onto the base, and settles
-conflicts with `union` (both sides only added lines, or a JSON object, or a file named as ordered,
+A stack of pull requests, each built on the one before, falls behind when the base moves or a lower
+branch changes. Restacking by hand means a rebase per branch and the same add-only conflicts each
+time (an entry at the end of a list, a line in a changelog). `restack` rebases each worktree's own
+commits onto the branch before it, the first onto the base, and settles conflicts with `union` (both sides only added lines, or a JSON object, or a file named as ordered,
 journal or set). It stops at the first conflict union refuses and says where; that rebase is left
 stopped for a person to finish.
 
     claude-ops restack <base> <worktree>... [--upstream COMMIT] [--ordered FILE] [--journal FILE] [--set FILE]
 
 Each worktree must have its branch checked out, and the branches are listed bottom first.
-Nothing is pushed.
+Nothing is pushed. A branch's own commits are, for the bottom one, every commit since it left the
+base, and for each branch above, every commit since the head the branch below had before it moved.
+Every one of them moves, however many there are.
 
-`--upstream` is for a bottom branch of several commits: the commit it sits on now, so every commit
-after it moves onto the base. That is the case after the pull request below it merged with its
-commits rewritten (a squash, or a merge queue that rebases): the old commits are not on the base, so
+`--upstream` is for a bottom branch that sits on commits which are not its own: the commit it sits
+on now, so only the commits after it move onto the base. That is the case after the pull request
+below it merged with its commits rewritten (a squash, or a merge queue that rebases): the old commits are not on the base, so
 a merge or a plain rebase brings them back and conflicts with their rewritten copies. Moving only
 what came after the old head leaves them behind.
 """
@@ -47,14 +48,24 @@ def restack(base: str, worktrees: list[Path], *, upstream: str | None = None, or
             journals: tuple = (), sets: tuple = (), env=None, say=print) -> int:
     """0 when every branch is rebuilt, 3 when a conflict needs a person (that rebase stays
     stopped), 1 for a worktree that is not on a branch or a rebase git could not start.
-    `upstream` is the commit the bottom branch sits on; without it each branch moves its top commit."""
+    `upstream` is the commit the bottom branch sits on; without it the bottom branch moves every
+    commit since it left the base, and each branch above every commit since the old head below it."""
     run_env = dict(os.environ if env is None else env, GIT_EDITOR="true")
+    below = None                       # the head the branch below had before it moved
     for wt in worktrees:
         br = _git(wt, "branch", "--show-current", env=run_env).stdout.strip()
         if not br:
             say(f"STOP at {wt}: no branch checked out")
             return 1
-        since = upstream if (upstream and wt == worktrees[0]) else "HEAD~1"
+        head = _git(wt, "rev-parse", "HEAD", env=run_env).stdout.strip()
+        if wt == worktrees[0]:
+            since = upstream or _git(wt, "merge-base", base, "HEAD", env=run_env).stdout.strip()
+        else:
+            since = _git(wt, "merge-base", below, "HEAD", env=run_env).stdout.strip()
+        if not since:
+            say(f"STOP at {br}: it shares no history with {base if wt == worktrees[0] else 'the branch below'}")
+            return 1
+        below = head
         r = _git(wt, "rebase", "-q", "--onto", base, since, env=run_env)
         # each commit that stops is settled and continued, so a branch of several commits moves whole
         while r.returncode != 0:
