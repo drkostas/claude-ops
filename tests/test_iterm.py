@@ -173,6 +173,23 @@ def test_restart_that_never_answers_is_a_failure():
     assert iterm.restart_app(procs=p)[0] == "failure" and p.opened == 0
 
 
+def test_start_opens_an_iterm2_that_is_not_running_and_waits_for_it():
+    p = FakeProcs(apps=(), answers_after=2)
+    outcome, detail = iterm.start_app(procs=p)
+    assert outcome == "success" and p.opened == 1 and p.asked == 2 and p.killed == []
+    p = FakeProcs(apps=(), answers_after=10**6)
+    outcome, detail = iterm.start_app(procs=p, answer_wait=9)
+    assert outcome == "failure" and "did not answer" in detail["message"]
+    p = FakeProcs(apps=(), opens=False)
+    assert iterm.start_app(procs=p)[0] == "failure"
+
+
+def test_start_leaves_a_running_iterm2_alone():
+    p = FakeProcs()
+    outcome, detail = iterm.start_app(procs=p)
+    assert outcome == "skipped" and p.opened == 0 and p.killed == [] and "running" in detail["message"]
+
+
 def test_an_api_that_does_not_answer_reads_none_and_does_not_end_the_program(monkeypatch):
     import sys
     import types
