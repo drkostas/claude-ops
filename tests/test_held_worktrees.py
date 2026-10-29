@@ -98,3 +98,53 @@ def test_main_refuses_with_its_signature_and_fails_open(place, monkeypatch, caps
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert hw.main(["--holders", str(holders)]) == 0
     assert os.path.isdir(holders)
+
+
+def started_of(pid):
+    return subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+def full(command, cwd, holders, **kw):
+    """check as main runs it: with the holders folder, so start times are compared."""
+    return hw.check({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)},
+                    hw.held(str(holders)), str(holders), **kw)
+
+
+def test_a_holder_with_its_own_start_time_still_holds(place):
+    held_wt, _free, holders, proc = place
+    (holders / f"{proc.pid}.started").write_text(started_of(proc.pid) + "\n")
+    assert full("git rebase main", held_wt, holders)
+
+
+def test_a_reused_pid_holds_nothing(place):
+    """The holder was killed and another process took its pid: the start time no longer matches."""
+    held_wt, _free, holders, proc = place
+    (holders / f"{proc.pid}.started").write_text("Thu Jan  1 00:00:00 1970\n")
+    assert full("git rebase main", held_wt, holders) is None
+    assert hw.same_process(str(holders), proc.pid) is False
+
+
+def test_a_holder_without_a_start_time_keeps_the_old_rule(place):
+    held_wt, _free, holders, proc = place
+    assert not (holders / f"{proc.pid}.started").exists()
+    assert full("git push", held_wt, holders) and hw.same_process(str(holders), proc.pid)
+
+
+def test_a_start_time_that_cannot_be_read_now_still_holds(place):
+    held_wt, _free, holders, proc = place
+    (holders / f"{proc.pid}.started").write_text("Thu Jan  1 00:00:00 1970\n")
+    assert full("git reset --hard", held_wt, holders, started=lambda pid: None)
+
+
+def test_a_reused_pid_does_not_hide_another_live_holder(place, tmp_path):
+    """Two files list the same worktree: the reused pid's holds nothing, the live one's still does."""
+    held_wt, _free, holders, proc = place
+    (holders / f"{proc.pid}.started").write_text("Thu Jan  1 00:00:00 1970\n")
+    other = subprocess.Popen(["sleep", "60"])
+    try:
+        (holders / str(other.pid)).write_text(f"{held_wt}\n")
+        why = full("git rebase main", held_wt, holders)
+        assert why and str(other.pid) in why and str(proc.pid) not in why
+    finally:
+        other.kill()
+        other.wait()
