@@ -152,7 +152,12 @@ claude-ops pr-changes --repo owner/name --text "fix spawn_helpers"     # which o
   openers, TypeScript and JavaScript by their top-level functions), and with `--text` prints which
   open pull request already changes a function or code file the text names, by number. A session
   about to build on a brief, a work item or a thing it claims asks this first, so two sessions do
-  not build the same thing. The listing is cached for ten minutes; `--no-cache` reads again.
+  not build the same thing. A pull request git could not read (its branch is not fetched, or the
+  folder is no working tree) is listed as unread with the reason, never as one that changes
+  nothing, and `--fetch` fetches the missing branches first. The command exits 2 when something
+  could not be read and nothing matched, so a reader cannot take "nothing found" from a reader
+  that read nothing. The listing is cached for ten minutes, per repository folder, and
+  `--no-cache` reads again.
 
 ## A job that outlives the chat
 
