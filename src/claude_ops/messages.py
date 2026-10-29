@@ -10,7 +10,8 @@ measurement), and those asides are the ones most likely to be forgotten.
 
 `person_messages` reads every shape, keeps only what a person typed, and folds the copies of one
 queued message into one entry. `around` shows the conversation before and after any entry, so a
-message can be read with what it answered and what was done about it.
+message can be read with what it answered and what was done about it. `said_since_person` is what
+the assistant wrote after the person last spoke, which a question it asks often points at.
 
     claude-ops messages --since 7d --chat build
     claude-ops messages --around <session id>:<line> --before 6 --after 10
@@ -339,6 +340,46 @@ def last_said(path: Path | str, *, before: float | None = None, chunk: int = 1 <
             if start == 0 or want >= limit:
                 return None
             want *= 4
+
+
+#: the tool that shows the person a question box; its result, unless it is an error, is their answer
+QUESTION_TOOL = "AskUserQuestion"
+
+
+def said_since_person(records: Iterable[dict], *, program_tag: re.Pattern = PROGRAM_TAG) -> list[str]:
+    """What the assistant wrote since the person last spoke, oldest first: the text of each assistant
+    record after the newest message the person typed, or their answer to a question box, in a
+    transcript's parsed `records` (oldest first). A question an assistant asks often points at what
+    it wrote just before it ("send the draft above?"), and this is that text, for a program that
+    shows the question somewhere the conversation is not. Tool calls and side chains are left out. A
+    message still in the queue does not count (the assistant has not read it), and neither does a
+    box the person declined or a program closed (an error result). With no message from the person,
+    every text is."""
+    texts: list[str] = []
+    boxes: set = set()
+    for line, d in enumerate(records, 1):
+        if not isinstance(d, dict) or d.get("isSidechain") or d.get("type") == "queue-operation":
+            continue
+        content = (d.get("message") or {}).get("content")
+        if d.get("type") == "assistant":
+            for x in content or []:
+                if not isinstance(x, dict):
+                    continue
+                if x.get("type") == "text" and str(x.get("text") or "").strip():
+                    texts.append(str(x["text"]).strip())
+                elif x.get("type") == "tool_use" and x.get("name") == QUESTION_TOOL:
+                    boxes.add(x.get("id"))
+            continue
+        if d.get("type") == "user" and isinstance(content, list) and any(
+                isinstance(x, dict) and x.get("type") == "tool_result" for x in content):
+            if any(isinstance(x, dict) and x.get("type") == "tool_result" and x.get("tool_use_id") in boxes
+                   and not x.get("is_error") for x in content):
+                texts = []
+            continue
+        e = _entry(d, Path("-"), line, program_tag)
+        if e is not None and e["role"] == "person":
+            texts = []
+    return texts
 
 
 # ------------------------------------------------------------------------------------ the CLI
