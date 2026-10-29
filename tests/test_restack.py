@@ -1,4 +1,4 @@
-"""restack rebuilds a stack of one-commit branches, settling add-only conflicts with union."""
+"""restack rebuilds a stack of branches, every commit of each, settling add-only conflicts with union."""
 import os
 import subprocess
 
@@ -98,3 +98,26 @@ def test_upstream_on_the_command_line(tmp_path, capsys):
         os.environ.clear()
         os.environ.update(old)
     assert git(two, "log", "--format=%s", "main..two").strip() == "add c"
+
+
+def test_a_branch_of_several_commits_keeps_every_one(tmp_path):
+    """A bottom branch of five commits whose base moved: all five move, not only the last."""
+    repo, one, two = stack(tmp_path)
+    for n in range(1, 5):
+        commit(one, f"n{n}.txt", f"{n}\n", f"note {n}")
+    said = []
+    assert restack.restack("main", [one], env=ENV, say=said.append) == 0
+    assert git(one, "log", "--format=%s", "main..one").splitlines() == [
+        "note 4", "note 3", "note 2", "note 1", "add b"]
+    assert all((one / f"n{n}.txt").exists() for n in range(1, 5))
+    assert (one / "list.txt").read_text() == "a\nz\nb\n"
+
+
+def test_a_branch_above_keeps_every_commit_of_its_own(tmp_path):
+    """The upper branch has two commits on the lower one: both move onto the rebuilt lower branch."""
+    repo, one, two = stack(tmp_path)
+    commit(two, "notes.txt", "1\n", "first note")
+    said = []
+    assert restack.restack("main", [one, two], env=ENV, say=said.append) == 0
+    assert git(two, "log", "--format=%s", "main..two").splitlines() == ["first note", "add c", "add b"]
+    assert (two / "list.txt").read_text() == "a\nz\nb\nc\n" and (two / "notes.txt").exists()
