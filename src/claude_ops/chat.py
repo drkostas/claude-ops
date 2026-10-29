@@ -35,6 +35,8 @@ BLOCKED_ON = [
      "tmux attach -t {name} and choose"),
     ("select login method", "Claude Code is not signed in.", "tmux attach -t {name} and sign in"),
     ("browser didn't open", "Claude Code is waiting for a sign-in in the browser.", "tmux attach -t {name} and finish it"),
+    ("wait for limit to reset", "Claude Code has reached the account's usage limit and asks whether to wait for the reset or add funds.",
+     "1 waits for the reset and costs nothing, 2 adds funds, a payment for the user to decide: tmux attach -t {name}"),
 ]
 
 
@@ -71,14 +73,19 @@ def diagnose(text: str, name: str) -> tuple[str, str] | None:
     """What a start-up question on the screen is, and how to answer it; None when there is none.
 
     Only the bottom of the screen counts, and never while the input box is there: a conversation
-    that mentions "trust this folder" read as a chat stuck on the trust prompt."""
+    that mentions "trust this folder" read as a chat stuck on the trust prompt. When the words of
+    several questions are there, the one drawn lowest wins, because the question waiting is drawn
+    last: a chat on the usage-limit question, under an answer that mentioned the trust prompt, read
+    as stuck on the trust prompt."""
     if input_box(text):
         return None
-    low = "\n".join([ln for ln in text.splitlines() if ln.strip()][-QUESTION_LINES:]).lower()
+    lines = [ln.lower() for ln in text.splitlines() if ln.strip()][-QUESTION_LINES:]
+    found = None
     for needle, what, fix in BLOCKED_ON:
-        if needle in low:
-            return what, fix.format(name=name)
-    return None
+        at = max((i for i, ln in enumerate(lines) if needle in ln), default=-1)
+        if at >= 0 and (found is None or at > found[0]):
+            found = (at, what, fix)
+    return (found[1], found[2].format(name=name)) if found else None
 
 
 def trust_keys(pane: str) -> list[str] | None:

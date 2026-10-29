@@ -100,6 +100,32 @@ def test_iterm2_that_does_not_run_it_is_a_failure_and_a_running_server_is_never_
     assert not ok and "runs" in how and not [c for c in run.calls if c[0].endswith("osascript")]
 
 
+# the usage-limit question, drawn under an answer that mentions the trust prompt
+LIMIT_SCREEN = """
+⏺ Answered the "Yes, I trust this folder" question for the new chat, and its tests now run.
+
+✻ Worked for 12m 3s
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   What do you want to do?
+   ❯ 1. Stop and wait for limit to reset
+     2. Add funds to continue with usage credits
+   Enter to confirm · Esc to cancel
+"""
+
+
+def test_the_question_drawn_last_is_the_one_waiting():
+    what, fix = chat.diagnose(LIMIT_SCREEN, "claude-x")
+    assert "usage limit" in what and "trust" not in what
+    assert "costs nothing" in fix and "tmux attach -t claude-x" in fix
+    assert not chat.input_box(LIMIT_SCREEN)
+    # the same question with nothing above it
+    what, _fix = chat.diagnose(LIMIT_SCREEN.split("✻")[1], "claude-x")
+    assert "usage limit" in what
+    # and a trust prompt drawn under older words about the limit is the trust prompt
+    what, _fix = chat.diagnose("I will stop and wait for limit to reset later.\n" + TRUST_SCREEN, "claude-x")
+    assert "trust this folder" in what
+
+
 def test_at_prompt_is_not_fooled_by_a_conversation_about_the_question(monkeypatch):
     monkeypatch.setattr(chat, "pane_text", lambda *_a, **_k: AT_PROMPT_QUOTING_IT)
     assert chat.at_prompt("claude-x", wait=0.1)
