@@ -31,6 +31,8 @@ PROJECTS = Path.home() / ".claude" / "projects"
 #: the words Claude Code's usage-limit question is found by. It is not a start-up question: the
 #: chat waits there until a person or a program answers it, and option 2 spends money
 USAGE_LIMIT = "wait for limit to reset"
+#: the usage-limit question's option that costs nothing (the other adds funds, a payment)
+WAIT_OPTION = "stop and wait for limit to reset"
 
 BLOCKED_ON = [
     ("trust this folder", "Claude Code is asking whether to trust this folder.",
@@ -147,6 +149,32 @@ def answer_trust(name: str, *, env: Mapping[str, str] | None = None) -> bool:
         time.sleep(0.3)
     if not cursor_on_yes(stable_pane(name, env=env)):
         return False  # never press Enter on an option we did not see selected
+    subprocess.run([TMUX, "-u", "send-keys", "-t", name, "Enter"], env=env)
+    return True
+
+
+def wait_keys(pane: str) -> list[str] | None:
+    """["Enter"] when the usage-limit question is on screen with its cursor on "Stop and wait for
+    limit to reset", else None.
+
+    Only that option is ever chosen: the other one adds funds, a payment that is the user's to
+    decide. The cursor is never moved either, so a cursor anywhere else means no key at all."""
+    if question(pane) != USAGE_LIMIT:
+        return None
+    lines = [ln.strip().lower() for ln in pane.splitlines() if ln.strip()][-QUESTION_LINES:]
+    cursor = [ln for ln in lines if ln.startswith("❯")]
+    if not cursor or WAIT_OPTION not in cursor[-1]:
+        return None
+    return ["Enter"]
+
+
+def answer_wait(name: str, *, env: Mapping[str, str] | None = None) -> bool:
+    """Choose "Stop and wait for limit to reset" on the usage-limit question in tmux session `name`.
+
+    Enter is pressed only on a screen that has stopped changing and shows the cursor on that option
+    (wait_keys); False, with nothing pressed, when the question or the cursor is not as expected."""
+    if wait_keys(stable_pane(name, env=env)) is None:
+        return False
     subprocess.run([TMUX, "-u", "send-keys", "-t", name, "Enter"], env=env)
     return True
 

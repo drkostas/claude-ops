@@ -130,6 +130,22 @@ def test_the_question_drawn_last_is_the_one_waiting():
     assert "trust this folder" in what
 
 
+def test_only_the_free_option_of_the_usage_limit_question_is_chosen(monkeypatch):
+    assert chat.wait_keys(LIMIT_SCREEN) == ["Enter"]
+    on_funds = LIMIT_SCREEN.replace("   ❯ 1. Stop and wait", "     1. Stop and wait").replace(
+        "     2. Add funds", "   ❯ 2. Add funds")
+    assert chat.wait_keys(on_funds) is None          # the cursor is never moved, and 2 is a payment
+    assert chat.wait_keys(TRUST_SCREEN) is None
+    assert chat.wait_keys(AT_PROMPT_QUOTING_IT) is None
+    sent = []
+    monkeypatch.setattr(chat, "stable_pane", lambda *_a, **_k: LIMIT_SCREEN)
+    monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **_k: sent.append(cmd))
+    assert chat.answer_wait("claude-x") and sent == [[chat.TMUX, "-u", "send-keys", "-t", "claude-x", "Enter"]]
+    sent.clear()
+    monkeypatch.setattr(chat, "stable_pane", lambda *_a, **_k: on_funds)
+    assert not chat.answer_wait("claude-x") and sent == []
+
+
 def test_at_prompt_is_not_fooled_by_a_conversation_about_the_question(monkeypatch):
     monkeypatch.setattr(chat, "pane_text", lambda *_a, **_k: AT_PROMPT_QUOTING_IT)
     assert chat.at_prompt("claude-x", wait=0.1)
