@@ -241,6 +241,8 @@ def new(name: str, cwd: Path, *, claude_args: str = "", trust: bool = False, sho
         if how:
             log(f"the tmux server was not started through iTerm2 ({how}); starting it here")
         subprocess.run([TMUX, "-u", "new-session", "-d", "-s", tmux_name, "-c", str(cwd), "-e", "ITERM_SESSION_ID="], check=True, env=env)
+    for look in plain_look(tmux_name):
+        subprocess.run(look, capture_output=True, env=env)
     shown = show_in_iterm(tmux_name, env=env) if show else (False, "not shown")
     command = f"claude -n {name} {claude_args}".strip()
     subprocess.run([TMUX, "-u", "send-keys", "-t", tmux_name, command, "Enter"], check=True, env=env)
@@ -406,6 +408,30 @@ def plain_look(name: str) -> list[list[str]]:
             [TMUX, "-u", "set-option", "-t", name, "set-titles", "on"],
             [TMUX, "-u", "set-option", "-t", name, "set-titles-string", "#{pane_title}"],
             [TMUX, "-u", "set-option", "-s", "focus-events", "on"]]
+
+
+def lacking_look(*, prefix: str = "claude-", env: Mapping[str, str] | None = None,
+                 run=subprocess.run) -> list[str] | None:
+    """The tmux sessions whose name starts with `prefix` that lack plain_look (their status bar is
+    not off), so a session made some other way, by hand or by a restore, can be given it. None when
+    tmux does not answer."""
+    try:
+        r = run([TMUX, "-u", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True,
+                timeout=5, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    out = []
+    for name in (n for n in r.stdout.split() if n.startswith(prefix)):
+        try:
+            o = run([TMUX, "-u", "show-options", "-v", "-t", name, "status"], capture_output=True,
+                    text=True, timeout=5, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if o.returncode == 0 and o.stdout.strip() != "off":
+            out.append(name)
+    return out
 
 
 def attach_line(cwd: str, name: str, resume: str, cc: bool = False) -> str:
