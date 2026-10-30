@@ -211,3 +211,15 @@ def test_claude_pid_walks_up_to_the_claude_process():
     assert ch.claude_pid(999, parent=lambda p: tree.get(p)) is None        # cannot read
     loop = {10: ("11", "sh"), 11: ("10", "sh")}
     assert ch.claude_pid(10, parent=lambda p: loop.get(p), depth=4) is None
+
+
+def test_lacking_look_names_the_sessions_whose_status_bar_is_on():
+    import subprocess as sp
+
+    def run(cmd, **_k):
+        if "list-sessions" in cmd:
+            return sp.CompletedProcess(cmd, 0, "claude-a\nclaude-b\nother\n", "")
+        name = cmd[cmd.index("-t") + 1]
+        return sp.CompletedProcess(cmd, 0, "off\n" if name == "claude-a" else "on\n", "")
+    assert chat.lacking_look(run=run) == ["claude-b"]
+    assert chat.lacking_look(run=lambda cmd, **k: sp.CompletedProcess(cmd, 1, "", "no server")) is None
