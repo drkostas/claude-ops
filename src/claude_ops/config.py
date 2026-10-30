@@ -69,6 +69,60 @@ def login_digest(path: os.PathLike | str = CLAUDE_JSON) -> str | None:
     return fingerprint(json.dumps([account.get(k) for k in LOGIN_KEYS]).encode())
 
 
+def _canonical(data) -> bytes:
+    return json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+
+
+def mcp_server_shapes(path: os.PathLike | str = CLAUDE_JSON, key: str = "mcpServers") -> dict[str, dict] | None:
+    """What a change to each MCP server's definition can mean to a running session:
+    {name: {"digest", "without_p", "module"}}. `digest` covers the whole definition, `without_p` the
+    same definition with Python's -P flag left out, and `module` is the top package a
+    `python -m <package.module>` server runs, or None. Only fingerprints and a package name are
+    returned, never the arguments or the environment, which can hold tokens. None when the file
+    cannot be read."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    servers = data.get(key, {}) if isinstance(data, dict) else {}
+    out: dict[str, dict] = {}
+    for name, spec in (servers if isinstance(servers, dict) else {}).items():
+        if not isinstance(spec, dict):
+            continue
+        args = [str(a) for a in spec.get("args") or []]
+        module = None
+        if "-m" in args and args.index("-m") + 1 < len(args):
+            module = args[args.index("-m") + 1].split(".")[0] or None
+        bare = {**spec, "args": [a for a in args if a != "-P"]} if "args" in spec else spec
+        out[name] = {"digest": fingerprint(_canonical(spec)), "without_p": fingerprint(_canonical(bare)),
+                     "module": module}
+    return out
+
+
+def mcp_change_affects(then: dict | None, now: dict | None, folder: os.PathLike | str | None) -> str | None:
+    """Why a change of one MCP server's definition, from `then` to `now` (two entries of
+    mcp_server_shapes), changes something for a session working in `folder`, or None when it does
+    not. A session keeps the servers it started with until it restarts.
+
+    - A server that did not exist when the session started was never loaded by it: None.
+    - A server removed since: the session still runs it, which is a change.
+    - A change that only adds or removes -P matters only when the folder holds the server's top
+      package, because -P only stops Python putting the working folder first on its import path, so
+      a folder without that package imports the same code either way."""
+    if not then:
+        return None
+    if not now:
+        return "a server it runs was removed"
+    if then.get("digest") == now.get("digest"):
+        return None
+    module = now.get("module") or then.get("module")
+    if then.get("without_p") == now.get("without_p"):
+        if module and folder and Path(folder, module).is_dir():
+            return f"-P changed, and its folder holds {module}, which the server imports"
+        return None
+    return "a server it runs is defined differently"
+
+
 def digest_files(paths: list[Path]) -> str | None:
     """One fingerprint over the files that exist, names included; None when none exists."""
     h = hashlib.sha256()

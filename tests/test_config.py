@@ -82,3 +82,43 @@ def test_login_digest_follows_the_account_and_nothing_else(tmp_path):
     f.write_text(json.dumps({"mcpServers": {}}))
     assert cc.login_digest(f) is None
     assert cc.login_digest(tmp_path / "missing.json") is None
+
+
+def test_mcp_server_shapes_hold_fingerprints_and_a_package_never_the_arguments(tmp_path):
+    p = tmp_path / "claude.json"
+    token = "tok-" + "0123456789"
+    p.write_text(json.dumps({"mcpServers": {
+        "app": {"command": "python3", "args": ["-P", "-m", "app.server"], "env": {"API_TOKEN": token}},
+        "web": {"command": "npx", "args": ["-y", "some-server", "--access-token", token]},
+    }}))
+    shapes = cc.mcp_server_shapes(p)
+    assert set(shapes) == {"app", "web"}
+    assert shapes["app"]["module"] == "app" and shapes["web"]["module"] is None
+    assert shapes["app"]["digest"] != shapes["app"]["without_p"]
+    assert shapes["web"]["digest"] == shapes["web"]["without_p"]
+    assert token not in json.dumps(shapes)
+    assert cc.mcp_server_shapes(tmp_path / "missing.json") is None
+
+
+def test_an_mcp_change_counts_only_for_a_session_it_changes_something_for(tmp_path):
+    p = tmp_path / "claude.json"
+    spec = {"command": "python3", "args": ["-m", "app.server"], "env": {"PYTHONPATH": "/srv/app"}}
+    p.write_text(json.dumps({"mcpServers": {"app": spec}}))
+    then = cc.mcp_server_shapes(p)["app"]
+    p.write_text(json.dumps({"mcpServers": {"app": {**spec, "args": ["-P", "-m", "app.server"]}}}))
+    now = cc.mcp_server_shapes(p)["app"]
+    shadowing, plain = tmp_path / "checkout", tmp_path / "elsewhere"
+    (shadowing / "app").mkdir(parents=True)
+    plain.mkdir()
+    # -P only matters where the working folder holds the package the server imports
+    assert "-P" in cc.mcp_change_affects(then, now, shadowing)
+    assert cc.mcp_change_affects(then, now, plain) is None
+    assert cc.mcp_change_affects(then, now, None) is None
+    # a server the session never loaded changes nothing for it, and one removed since does
+    assert cc.mcp_change_affects(None, now, shadowing) is None
+    assert cc.mcp_change_affects(then, None, plain) == "a server it runs was removed"
+    # any other change of a server it runs counts, wherever it works
+    p.write_text(json.dumps({"mcpServers": {"app": {**spec, "command": "python3.14"}}}))
+    other = cc.mcp_server_shapes(p)["app"]
+    assert cc.mcp_change_affects(then, other, plain) == "a server it runs is defined differently"
+    assert cc.mcp_change_affects(then, then, shadowing) is None
