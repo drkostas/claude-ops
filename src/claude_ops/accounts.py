@@ -47,6 +47,9 @@ BETA = "oauth-2025-04-20"
 USER_AGENT = f"claude-ops/{__version__}"
 #: an account is spent at this percent of either its 5-hour or its weekly limit
 THRESHOLD = 98.0
+#: a share per limit at which one account counts as full, by account name, for example
+#: {"north": {"weekly": 90.0}}; a limit without one stops at the threshold
+Limits = dict[str, dict[str, float]]
 _LIMIT = re.compile(r"hit your (?:(session|weekly) )?limit", re.I)
 
 
@@ -212,12 +215,20 @@ def expired(login: dict, now: dt.datetime, margin_s: int = 600) -> bool:
     return exp / 1000 <= now.timestamp() + margin_s
 
 
-def usable_at(u: dict | None, now: dt.datetime, threshold: float = THRESHOLD) -> dt.datetime | None:
-    """When the account can next be used: now while both limits are under `threshold`, otherwise the
-    latest reset among the limits at or over it. None when its usage is unknown."""
+def stop_for(limits: "Limits | None", account: str, name: str, threshold: float = THRESHOLD) -> float:
+    """The share at which `account`'s `name` limit ("session" or "weekly") counts as full: its own
+    in `limits`, else `threshold`."""
+    return float(((limits or {}).get(account) or {}).get(name, threshold))
+
+
+def usable_at(u: dict | None, now: dt.datetime, threshold: float = THRESHOLD,
+              stops: dict[str, float] | None = None) -> dt.datetime | None:
+    """When the account can next be used: now while both limits are under `threshold` (or under the
+    limit's own share in `stops`, by limit name), otherwise the latest reset among the limits at or
+    over it. None when its usage is unknown."""
     if not u:
         return None
-    full = [resets for pct, resets in u.values() if pct >= threshold]
+    full = [resets for name, (pct, resets) in u.items() if pct >= (stops or {}).get(name, threshold)]
     if not full:
         return now
     if any(r is None for r in full):
@@ -250,20 +261,23 @@ def _share(pct: float, resets: dt.datetime | None, now: dt.datetime) -> float:
     return 0.0 if resets is not None and resets <= now else pct
 
 
-def _bar(name: str, floor: float, threshold: float) -> float:
+def _bar(name: str, floor: float, threshold: float, stops: dict[str, float] | None = None) -> float:
     """What a limit must be under for the account to count as having room: the floor on the weekly
-    limit, the threshold on the session one."""
-    return floor if name == "weekly" else threshold
+    limit, the threshold on the session one, and never more than the limit's own share in `stops`."""
+    bar = floor if name == "weekly" else threshold
+    return min(bar, (stops or {}).get(name, bar))
 
 
-def _room(u: dict, now: dt.datetime, floor: float, threshold: float) -> bool:
-    return all(_share(pct, r, now) < _bar(name, floor, threshold) for name, (pct, r) in u.items())
+def _room(u: dict, now: dt.datetime, floor: float, threshold: float,
+          stops: dict[str, float] | None = None) -> bool:
+    return all(_share(pct, r, now) < _bar(name, floor, threshold, stops) for name, (pct, r) in u.items())
 
 
-def _room_at(u: dict, now: dt.datetime, floor: float, threshold: float) -> dt.datetime | None:
+def _room_at(u: dict, now: dt.datetime, floor: float, threshold: float,
+             stops: dict[str, float] | None = None) -> dt.datetime | None:
     """When the account has room: now, or the latest reset among the limits at or over their bar;
     None when such a reset is unknown."""
-    full = [r for name, (pct, r) in u.items() if _share(pct, r, now) >= _bar(name, floor, threshold)]
+    full = [r for name, (pct, r) in u.items() if _share(pct, r, now) >= _bar(name, floor, threshold, stops)]
     if not full:
         return now
     return None if any(r is None for r in full) else max(full)
@@ -275,10 +289,12 @@ def _clock(at: dt.datetime | None) -> str:
 
 def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hit: "bool | str" = False,
            threshold: float = THRESHOLD, floor: float = FLOOR,
-           short_wait: dt.timedelta = SHORT_WAIT) -> Decision:
+           short_wait: dt.timedelta = SHORT_WAIT, limits: "Limits | None" = None) -> Decision:
     """The action for the account in use, decided against every account's usage, never from its own
     alone. It is spent when a limit of its is at `threshold`, or a chat hit its limit (`hit`: True,
-    or the limit's name, "session" or "weekly", when the stop said which).
+    or the limit's name, "session" or "weekly", when the stop said which). `limits` gives an account
+    a share of its own per limit, for example {"north": {"weekly": 90.0}}: that account is spent at
+    it, and has room only under it, while every other limit keeps `threshold`.
 
     Then, in this order: a block on the session limit alone that resets within `short_wait` is
     waited out (pause); an account with room (its weekly limit under `floor`, its session limit
@@ -289,7 +305,8 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     mine = usages.get(current)
     if mine is None and not hit:
         return Decision("stay", reason=f"{current}'s usage is unknown")
-    spent = {name: r for name, (pct, r) in (mine or {}).items() if _share(pct, r, now) >= threshold}
+    spent = {name: r for name, (pct, r) in (mine or {}).items()
+             if _share(pct, r, now) >= stop_for(limits, current, name, threshold)}
     if hit and not spent:
         kind = hit if hit in ("session", "weekly") else "session"
         spent = {kind: ((mine or {}).get(kind) or (None, None))[1]}
@@ -297,7 +314,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
         return Decision("stay", reason=f"{current} has room")
     blocked = ", ".join(f"{k} limit" for k in spent)
     others = {n: u for n, u in usages.items() if n != current and u is not None}
-    room = sorted((n for n, u in others.items() if _room(u, now, floor, threshold)),
+    room = sorted((n for n, u in others.items() if _room(u, now, floor, threshold, (limits or {}).get(n))),
                   key=lambda n: (_share(*others[n]["weekly"], now), _share(*others[n]["session"], now)))
     session_only = set(spent) == {"session"}
     reset = spent.get("session")
@@ -315,7 +332,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     if own is not None:
         waits[current] = own
     for n, u in others.items():
-        at = _room_at(u, now, floor, threshold)
+        at = _room_at(u, now, floor, threshold, (limits or {}).get(n))
         if at is not None:
             waits[n] = at
     if not waits:
