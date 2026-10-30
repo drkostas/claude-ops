@@ -100,6 +100,52 @@ def test_iterm2_that_does_not_run_it_is_a_failure_and_a_running_server_is_never_
     assert not ok and "runs" in how and not [c for c in run.calls if c[0].endswith("osascript")]
 
 
+# the usage-limit question, drawn under an answer that mentions the trust prompt
+LIMIT_SCREEN = """
+⏺ Answered the "Yes, I trust this folder" question for the new chat, and its tests now run.
+
+✻ Worked for 12m 3s
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   What do you want to do?
+   ❯ 1. Stop and wait for limit to reset
+     2. Add funds to continue with usage credits
+   Enter to confirm · Esc to cancel
+"""
+
+
+def test_the_question_drawn_last_is_the_one_waiting():
+    what, fix = chat.diagnose(LIMIT_SCREEN, "claude-x")
+    assert "usage limit" in what and "trust" not in what
+    assert "costs nothing" in fix and "tmux attach -t claude-x" in fix
+    assert not chat.input_box(LIMIT_SCREEN)
+    # a caller tells the usage-limit question from a start-up question by its words
+    assert chat.question(LIMIT_SCREEN) == chat.USAGE_LIMIT
+    assert chat.question(TRUST_SCREEN) == "trust this folder"
+    assert chat.question(AT_PROMPT_QUOTING_IT) is None
+    # the same question with nothing above it
+    what, _fix = chat.diagnose(LIMIT_SCREEN.split("✻")[1], "claude-x")
+    assert "usage limit" in what
+    # and a trust prompt drawn under older words about the limit is the trust prompt
+    what, _fix = chat.diagnose("I will stop and wait for limit to reset later.\n" + TRUST_SCREEN, "claude-x")
+    assert "trust this folder" in what
+
+
+def test_only_the_free_option_of_the_usage_limit_question_is_chosen(monkeypatch):
+    assert chat.wait_keys(LIMIT_SCREEN) == ["Enter"]
+    on_funds = LIMIT_SCREEN.replace("   ❯ 1. Stop and wait", "     1. Stop and wait").replace(
+        "     2. Add funds", "   ❯ 2. Add funds")
+    assert chat.wait_keys(on_funds) is None          # the cursor is never moved, and 2 is a payment
+    assert chat.wait_keys(TRUST_SCREEN) is None
+    assert chat.wait_keys(AT_PROMPT_QUOTING_IT) is None
+    sent = []
+    monkeypatch.setattr(chat, "stable_pane", lambda *_a, **_k: LIMIT_SCREEN)
+    monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **_k: sent.append(cmd))
+    assert chat.answer_wait("claude-x") and sent == [[chat.TMUX, "-u", "send-keys", "-t", "claude-x", "Enter"]]
+    sent.clear()
+    monkeypatch.setattr(chat, "stable_pane", lambda *_a, **_k: on_funds)
+    assert not chat.answer_wait("claude-x") and sent == []
+
+
 def test_at_prompt_is_not_fooled_by_a_conversation_about_the_question(monkeypatch):
     monkeypatch.setattr(chat, "pane_text", lambda *_a, **_k: AT_PROMPT_QUOTING_IT)
     assert chat.at_prompt("claude-x", wait=0.1)
