@@ -482,6 +482,62 @@ def tmux_client_ttys(session: str, *, tmux: str = "tmux", env: Mapping[str, str]
 
 #: iTerm2's session server, which owns the terminals when session restoration runs through it
 SERVER_MARK = "/iTermServer-"
+#: how far up a client's parents to look for iTerm2
+_ANCESTORS = 12
+
+
+def _under_iterm(pid: int, procs: Mapping[int, tuple[int, str]]) -> bool:
+    for _ in range(_ANCESTORS):
+        if pid not in procs:
+            return False
+        ppid, command = procs[pid]
+        if SERVER_MARK in command or "/iTerm.app/" in command:
+            return True
+        pid = ppid
+    return False
+
+
+def doubled_clients(*, prefix: str = "claude-", tmux: str = "tmux", env: Mapping[str, str] | None = None,
+                    run=subprocess.run) -> dict[str, list[dict]] | None:
+    """{tmux session: its plain iTerm2 clients after the first} for each session whose name starts
+    with `prefix` that more than one plain client in iTerm2 shows, so the same session is open in two
+    tabs (an iTerm2 that restores two saved tabs of one session when it starts does this). Each client
+    is {tty, pid, created}, oldest first, and the oldest is left out, so what is returned is what to
+    detach. A control-mode client is not counted, nor a client outside iTerm2 (an ssh login, another
+    terminal app), which a person may have opened on purpose. None when tmux or ps does not answer."""
+    try:
+        r = run([tmux, "list-clients", "-F", "#{client_tty}\t#{client_pid}\t#{client_created}\t"
+                 "#{client_control_mode}\t#{session_name}"], capture_output=True, text=True, timeout=5, env=env)
+        ps = run(["ps", "-Ao", "pid=,ppid=,command="], capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0 or ps.returncode != 0:
+        return None
+    procs: dict[int, tuple[int, str]] = {}
+    for line in ps.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    by: dict[str, list[dict]] = {}
+    for line in r.stdout.splitlines():
+        p = line.split("\t")
+        if len(p) != 5 or p[3] != "0" or not p[4].startswith(prefix) or not p[1].isdigit():
+            continue
+        if _under_iterm(int(p[1]), procs):
+            by.setdefault(p[4], []).append({"tty": p[0], "pid": int(p[1]),
+                                            "created": int(p[2]) if p[2].isdigit() else 0})
+    return {s: sorted(cs, key=lambda c: (c["created"], c["pid"]))[1:] for s, cs in by.items() if len(cs) > 1}
+
+
+def detach_client(tty: str, *, tmux: str = "tmux", env: Mapping[str, str] | None = None,
+                  run=subprocess.run) -> bool:
+    """Detach one tmux client by its terminal, which ends the client and so closes the iTerm2 tab it
+    ran in; the session goes on. Whether tmux said yes."""
+    try:
+        return run([tmux, "detach-client", "-t", tty], capture_output=True, text=True, timeout=5,
+                   env=env).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _pids(argv: Sequence[str], env: Mapping[str, str] | None) -> list[int]:

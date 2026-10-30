@@ -341,3 +341,54 @@ def test_selecting_a_terminals_tab_answers_its_window(monkeypatch):
     assert iterm.select_tty('/dev/ttys041" then quit') is None and len(asked) == 1, "a name that is not a terminal asks nothing"
     monkeypatch.setattr(iterm, "_osa", lambda *a, **k: "")
     assert iterm.select_tty("/dev/ttys099") is None
+
+
+def _runner(clients: str, ps: str, rc: int = 0):
+    import subprocess as sp
+
+    def run(cmd, **_k):
+        if cmd[0] == "ps":
+            return sp.CompletedProcess(cmd, 0, ps, "")
+        if "detach-client" in cmd:
+            run.detached.append(cmd[-1])
+            return sp.CompletedProcess(cmd, 0, "", "")
+        return sp.CompletedProcess(cmd, rc, clients, "")
+    run.detached = []
+    return run
+
+
+SERVER = "/Users/someone/Library/Application Support/iTerm2/iTermServer-3.6.10 /tmp/socket"
+PS = (f"  1     0 /sbin/launchd\n"
+      f" 50     1 {SERVER}\n"
+      f"101    50 tmux -u attach -t claude-a\n"
+      f"102    50 tmux -u attach -t claude-a\n"
+      f"103    50 tmux -u attach -t claude-b\n"
+      f" 60     1 /usr/sbin/sshd\n"
+      f"104    60 tmux attach -t claude-b\n"
+      f"105    50 /bin/zsh -l\n"
+      f"106   105 tmux attach -t claude-c\n"
+      f"107    50 tmux -u attach -t claude-c\n")
+CLIENTS = ("/dev/ttys046\t101\t1000\t0\tclaude-a\n"
+           "/dev/ttys048\t102\t1001\t0\tclaude-a\n"
+           "/dev/ttys050\t103\t900\t0\tclaude-b\n"
+           "/dev/ttys051\t104\t950\t0\tclaude-b\n"
+           "/dev/ttys052\t106\t800\t0\tclaude-c\n"
+           "/dev/ttys053\t107\t700\t1\tclaude-c\n"
+           "/dev/ttys054\t107\t700\t0\tother-d\n")
+
+
+def test_doubled_clients_are_the_newer_iterm_clients_of_one_session():
+    got = iterm.doubled_clients(run=_runner(CLIENTS, PS))
+    # claude-a is open in two iTerm2 tabs: the newer one is what to detach
+    assert got == {"claude-a": [{"tty": "/dev/ttys048", "pid": 102, "created": 1001}]}
+    # claude-b's second client is an ssh login, and claude-c's second is iTerm2's control-mode
+    # client, so neither counts, and a session outside the prefix is never read
+
+
+def test_doubled_clients_say_unknown_when_tmux_does_not_answer():
+    assert iterm.doubled_clients(run=_runner("", PS, rc=1)) is None
+
+
+def test_detach_client_names_the_terminal():
+    run = _runner("", "")
+    assert iterm.detach_client("/dev/ttys048", run=run) and run.detached == ["/dev/ttys048"]
