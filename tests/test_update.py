@@ -1138,3 +1138,86 @@ def test_command_lines_runs_ps_with_the_given_env():
     assert cu.command_lines([7], run=run, env={"PATH": "/bin"}) == {7: "sleep 1"}
     assert seen.get("env") == {"PATH": "/bin"}
     assert cu.empty_prompt(None) == (False, cu.UNREAD)
+
+
+def test_tools_called_reads_back_to_since_and_only_real_calls(tmp_path):
+    def call(at, *names, text=""):
+        blocks = [{"type": "tool_use", "id": f"t{i}", "name": n, "input": {}} for i, n in enumerate(names)]
+        if text:
+            blocks.append({"type": "text", "text": text})
+        return {"type": "assistant", "timestamp": at, "message": {"role": "assistant", "content": blocks}}
+    rows = [
+        call("2026-01-02T09:00:00.000Z", "mcp__srv__old"),
+        {"type": "user", "timestamp": "2026-01-02T09:30:00.000Z", "message": {"content": "hello"}},
+        call("2026-01-02T10:00:00.000Z", "mcp__srv__ask", "Bash"),
+        # a shell command that only names a tool is not a call of it
+        call("2026-01-02T10:05:00.000Z", "Bash", text='run "mcp__srv__named" by hand'),
+        call("2026-01-02T10:10:00.000Z", "mcp__other__list"),
+        call("2026-01-02T10:20:00.000Z", "mcp__srv__list"),
+    ]
+    f = tmp_path / "chat.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+    assert cu.tools_called(f, "2026-01-02T09:45:00Z", prefix="mcp__srv__") == {"mcp__srv__ask", "mcp__srv__list"}
+    assert cu.tools_called(f, dt.datetime(2026, 1, 2, 10, 15), prefix="mcp__srv__") == {"mcp__srv__list"}, \
+        "a naive time is taken as UTC"
+    assert cu.tools_called(f, prefix="mcp__srv__") == {"mcp__srv__old", "mcp__srv__ask", "mcp__srv__list"}
+    assert cu.tools_called(f, "2026-01-02T10:00:00Z") == {"mcp__srv__ask", "Bash", "mcp__other__list",
+                                                          "mcp__srv__list"}, "with no prefix, every tool"
+    assert cu.tools_called(f, "2026-01-03T00:00:00Z", prefix="mcp__srv__") == set()
+    assert cu.tools_called(None) is None and cu.tools_called(tmp_path / "missing.jsonl") is None
+
+
+def test_tools_called_reads_no_further_than_its_limit(tmp_path):
+    big = {"type": "user", "timestamp": "2026-01-02T10:30:00.000Z", "message": {"content": "x" * 4000}}
+    early = {"type": "assistant", "timestamp": "2026-01-02T10:00:00.000Z",
+             "message": {"content": [{"type": "tool_use", "id": "a", "name": "mcp__srv__ask", "input": {}}]}}
+    f = tmp_path / "chat.jsonl"
+    f.write_text(json.dumps(early) + "\n" + json.dumps(big) + "\n")
+    assert cu.tools_called(f, prefix="mcp__srv__") == {"mcp__srv__ask"}
+    assert cu.tools_called(f, prefix="mcp__srv__", limit=4200) == set(), "a call before the window is not found"
+
+
+SERVER = '''
+import json
+
+TIMEOUT = 60
+
+
+def _call(path):
+    return {"path": path, "timeout": TIMEOUT}
+
+
+def build():
+    from mcp.server.fastmcp import FastMCP
+    mcp = FastMCP("demo")
+
+    @mcp.tool()
+    def ask(question: str) -> str:
+        """Ask the service a question."""
+        return json.dumps(_call("/ask?q=" + question))
+
+    @mcp.tool()
+    def status() -> str:
+        """The service's state."""
+        return json.dumps(_call("/status"))
+
+    return mcp
+'''
+
+
+def test_tool_digests_name_the_tools_whose_code_changed():
+    before = cu.tool_digests(SERVER)
+    assert set(before) == {"ask", "status", ""}
+    assert cu.tool_digests(SERVER.replace("return json.dumps(_call(\"/status\"))",
+                                          "# a comment changes nothing\n        return json.dumps(_call(\"/status\"))")) == before
+    one = cu.tool_digests(SERVER.replace('"""The service\'s state."""', '"""The service\'s state, now."""'))
+    assert [k for k in before if before[k] != one[k]] == ["status"], "a new description changes that tool only"
+    arg = cu.tool_digests(SERVER.replace("def ask(question: str)", "def ask(question: str, short: bool = False)"))
+    assert [k for k in before if before[k] != arg[k]] == ["ask"], "a new argument changes that tool only"
+    shared = cu.tool_digests(SERVER.replace("TIMEOUT = 60", "TIMEOUT = 90"))
+    assert [k for k in before if before[k] != shared[k]] == [""], "shared code changes the shared digest"
+    added = cu.tool_digests(SERVER.replace("    return mcp", "    @mcp.tool()\n    def ping() -> str:\n"
+                                                             "        return \"pong\"\n\n    return mcp"))
+    assert set(added) - set(before) == {"ping"} and all(added[k] == before[k] for k in before), \
+        "a new tool is a new name, and the others keep their digests"
+    assert cu.tool_digests("def broken(:\n") == {}

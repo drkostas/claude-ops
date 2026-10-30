@@ -21,7 +21,9 @@ dozen chats open at once.
 """
 from __future__ import annotations
 
+import ast
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -1107,6 +1109,98 @@ def tools_held(path: Path | None) -> dict[str, dict]:
         return {}
     return held
 
+
+#: how much of a transcript's end `tools_called` reads at most; a call older than that is not found
+TOOLS_CALLED_SCAN = 16 << 20
+
+
+def _utc(at: dt.datetime | str | None) -> dt.datetime | None:
+    """An aware UTC time from a datetime (a naive one is taken as UTC) or a transcript's ISO time."""
+    if at is None or at == "":
+        return None
+    if isinstance(at, str):
+        try:
+            at = dt.datetime.fromisoformat(at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return at.replace(tzinfo=dt.timezone.utc) if at.tzinfo is None else at.astimezone(dt.timezone.utc)
+
+
+def tools_called(path: Path | None, since: dt.datetime | str | None = None, *, prefix: str = "",
+                 limit: int = TOOLS_CALLED_SCAN) -> set[str] | None:
+    """The names of the tools the conversation called at or after `since` (a datetime, or a
+    transcript's ISO time; None for any time) that start with `prefix` (one MCP server's tools share
+    "mcp__<server>__"), read from the newest record back. Reading stops at the first record older than
+    `since`, or once the last `limit` bytes are read. None when the transcript cannot be read.
+
+    A chat keeps the tools its MCP servers had when they started: each server is started once with
+    the chat, and a resumed conversation also keeps the tool definitions it loaded until it is
+    compacted (`tools_held`). So when a server's tools change, the chats that call a changed tool
+    run old code, and a supervisor can restart those first and leave the others for later. A tool
+    whose name only appears in a call's text (a shell command that mentions it) was not called."""
+    if path is None:
+        return None
+    floor = _utc(since)
+    found: set[str] = set()
+    try:
+        for line in _lines_from_end(Path(path), limit=limit):
+            if '"timestamp"' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            at = _utc(rec.get("timestamp"))
+            if floor is not None and at is not None and at < floor:
+                break
+            if rec.get("type") != "assistant" or '"tool_use"' not in line:
+                continue
+            content = (rec.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else []:
+                name = block.get("name") if isinstance(block, dict) and block.get("type") == "tool_use" else None
+                if isinstance(name, str) and name.startswith(prefix):
+                    found.add(name)
+    except OSError:
+        return None
+    return found
+
+
+def _decorated(node: ast.AST, decorator: str) -> bool:
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+        isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == decorator
+        for d in node.decorator_list)
+
+
+def tool_digests(source: str, decorator: str = "tool") -> dict[str, str]:
+    """A digest of each function in a Python module's text that is decorated `@<object>.<decorator>()`
+    (an MCP server's tools, as FastMCP declares them), by function name, and under "" a digest of the
+    rest of the module, the code every tool shares. Comments and layout do not count: each digest is
+    taken over the syntax tree, so two readings differ only for a tool whose code, arguments or
+    description changed, and a changed "" means every tool may behave differently. {} for text that
+    is not Python."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    out: dict[str, str] = {}
+
+    def digest(node: ast.AST) -> str:
+        return hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest()[:16]
+
+    for node in ast.walk(tree):
+        if _decorated(node, decorator):
+            out[node.name] = digest(node)
+
+    class _Shared(ast.NodeTransformer):
+        def visit_FunctionDef(self, node):
+            return None if _decorated(node, decorator) else self.generic_visit(node)   # gone, not a stub
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+    out[""] = digest(_Shared().visit(tree))
+    return out
 
 def _whole_file(result) -> str | None:
     """The path a tool result shows the whole content of, or None (a range, an image, an error)."""
