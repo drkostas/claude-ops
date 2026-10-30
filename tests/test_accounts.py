@@ -432,3 +432,39 @@ def test_decide_takes_a_target_whose_session_limit_is_merely_usable():
     assert (d.action, d.account) == ("switch", "south")
     spent = {"session": (98.5, NOW + 3 * H), "weekly": (40.0, NOW + 100 * H)}
     assert ac.decide("north", {"north": north, "south": spent}, NOW).action == "pause"
+
+
+def test_usable_at_with_a_share_of_its_own_per_limit():
+    # an account that must last the week stops at 90% of its weekly limit while its session limit
+    # keeps the threshold
+    u = {"session": (30.0, NOW + 3 * H), "weekly": (90.5, NOW + 72 * H)}
+    assert ac.usable_at(u, NOW) == NOW
+    assert ac.usable_at(u, NOW, stops={"weekly": 90.0}) == NOW + 72 * H
+    assert ac.usable_at(u, NOW, stops={"session": 20.0}) == NOW + 3 * H
+    assert ac.stop_for({"north": {"weekly": 90.0}}, "north", "weekly") == 90.0
+    assert ac.stop_for({"north": {"weekly": 90.0}}, "north", "session") == ac.THRESHOLD
+    assert ac.stop_for(None, "south", "weekly") == ac.THRESHOLD
+
+
+def test_decide_stops_an_account_at_its_own_share():
+    # north must last the week: it is spent at 90% of its weekly limit, south keeps the threshold
+    limits = {"north": {"weekly": 90.0}}
+    north = {"session": (30.0, NOW + 3 * H), "weekly": (90.5, NOW + 72 * H)}
+    south = {"session": (6.0, NOW + 4 * H), "weekly": (40.0, NOW + 70 * H)}
+    d = ac.decide("north", {"north": north, "south": south}, NOW, limits=limits)
+    assert (d.action, d.account) == ("switch", "south") and "weekly limit" in d.reason
+    assert ac.decide("north", {"north": north, "south": south}, NOW).action == "stay"
+    # with south full, every chat waits for the earliest reset
+    full = {"session": (6.0, NOW + 4 * H), "weekly": (98.0, NOW + 20 * H)}
+    d = ac.decide("north", {"north": north, "south": full}, NOW, limits=limits)
+    assert (d.action, d.account, d.until) == ("pause", "south", NOW + 20 * H)
+    # south runs to the threshold as before
+    south95 = {"session": (6.0, NOW + 4 * H), "weekly": (95.0, NOW + 20 * H)}
+    assert ac.decide("south", {"north": north, "south": south95}, NOW, limits=limits).action == "stay"
+    # and an account's own share bounds its room too: with its session limit stopped at 50%, north
+    # at 60% of it is not switched to
+    blocked = {"session": (98.0, NOW + 4 * H), "weekly": (50.0, NOW + 20 * H)}
+    north60 = {"session": (60.0, NOW + 3 * H), "weekly": (40.0, NOW + 72 * H)}
+    assert ac.decide("south", {"north": north60, "south": blocked}, NOW).account == "north"
+    d = ac.decide("south", {"north": north60, "south": blocked}, NOW, limits={"north": {"session": 50.0}})
+    assert (d.action, d.account, d.until) == ("pause", "north", NOW + 3 * H)
