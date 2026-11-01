@@ -3,6 +3,7 @@ it, a transcript read from its position, telemetry through the collector, and th
 import gzip
 import io
 import json
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -218,9 +219,79 @@ def test_the_report_gives_each_chats_name_cache_counters_and_prefix(tmp_path):
     assert (c["session_name"], c["cache_ttl"], c["cache_requests"], c["cache_misses"]) == ("north", "1h", 9, 2)
     assert c["misses_by_cause"] == {"tools_changed": 2} and (c["miss_recache_tokens"], c["recache_tokens_if_cold"]) == (800, 5000)
     assert c["prefix_tokens"] == 1005, "the first response of the chat itself, a subagent's left out"
+    assert c["growth"]["floor"] == 1005 and c["growth"]["prompt"] == 5001, "the chat's own calls, in the report"
     meter.take({"session_id": "s-3", "prompt_cache": {}}, db=db, now=NOW - 4)
     bare = {x["session_id"]: x for x in meter.report(db=db, now=NOW)["chats"]}["s-3"]
     assert bare["session_name"] is None and bare["cache_requests"] is None and bare.get("prefix_tokens") is None
+
+
+def _said(mid, at, input_, read, write, output, *blocks, session="s-1"):
+    return json.dumps({"type": "assistant", "sessionId": session, "timestamp": at, "message": {
+        "id": mid, "model": "claude-opus-9", "content": list(blocks),
+        "usage": {"input_tokens": input_, "output_tokens": output, "cache_read_input_tokens": read,
+                  "cache_creation_input_tokens": write}}}).encode() + b"\n"
+
+
+def _handed_files(at, chars=3000, session="s-1"):
+    return json.dumps({"type": "attachment", "sessionId": session, "timestamp": at,
+                       "attachment": {"type": "instructions", "content": "x" * chars}}).encode() + b"\n"
+
+
+def test_growth_splits_a_prompt_since_its_compaction_and_adds_up(tmp_path):
+    f = tmp_path / "a.jsonl"
+    think = {"type": "thinking", "thinking": "", "signature": "z" * 50}
+    call = {"type": "tool_use", "name": "Bash", "input": {"command": "y" * 280}}
+    f.write_bytes(b"".join([
+        _said("old", "2027-01-15T08:00:00Z", 1, 900000, 100, 500),
+        _said("floor", "2027-01-15T09:00:00Z", 1, 30000, 120000, 1000, think, call),
+        _said("two", "2027-01-15T09:01:00Z", 1, 150000, 1500, 400, think),
+        _handed_files("2027-01-15T09:02:00Z"),
+        _said("three", "2027-01-15T09:02:30Z", 1, 151900, 40000, 200),
+        _said("four", "2027-01-15T09:03:00Z", 1, 191900, 3000, 100),
+    ]))
+    conn = meter.connect(tmp_path / "m.sqlite3")
+    meter.read_file(conn, f)
+    g = meter.growth(conn, "s-1")
+    assert (g["floor"], g["prompt"], g["calls"], g["compactions"]) == (150001, 194901, 4, 1)
+    assert g["output_kept"] == 1600, "the last response's output has reached no prompt yet"
+    assert g["reloaded"] == 191901 - 151501 - 400, "what arrived with the files, its response's output apart"
+    assert g["reloads"] == 1
+    assert g["output_kept"] + g["arrived"] + g["reloaded"] == g["grown"], "the split adds up to the growth"
+    assert 0 < g["thinking"] < g["output_kept"], "the output less what its visible blocks show"
+    assert "x" * 50 not in json.dumps(g), "no text is kept"
+    assert meter.growth(conn, "nobody") is None
+    conn.close()
+
+
+def test_files_handed_with_a_compaction_belong_to_the_floor(tmp_path):
+    f = tmp_path / "a.jsonl"
+    f.write_bytes(_said("old", "2027-01-15T08:00:00Z", 1, 900000, 100, 500)
+                  + _handed_files("2027-01-15T08:59:00Z")
+                  + _said("floor", "2027-01-15T09:00:00Z", 1, 30000, 120000, 10)
+                  + _said("next", "2027-01-15T09:01:00Z", 1, 150000, 20, 10))
+    conn = meter.connect(tmp_path / "m.sqlite3")
+    meter.read_file(conn, f)
+    g = meter.growth(conn, "s-1")
+    assert (g["reloads"], g["reloaded"], g["floor"]) == (0, 0, 150001)
+    conn.close()
+
+
+def test_an_older_store_gains_the_columns_and_reads_each_transcript_again(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript("""CREATE TABLE responses(message_id TEXT PRIMARY KEY, session_id TEXT, at REAL, model TEXT, input INTEGER,
+        output INTEGER, cache_read INTEGER, cache_write INTEGER, subagent INTEGER NOT NULL DEFAULT 0, cwd TEXT);
+        CREATE TABLE positions(path TEXT PRIMARY KEY, read_to INTEGER NOT NULL, seam TEXT, size INTEGER);""")
+    conn.execute("INSERT INTO responses(message_id, session_id, at, input, output, cache_read, cache_write) VALUES ('a', 's', 1, 1, 2, 3, 4)")
+    conn.execute("INSERT INTO positions VALUES ('/x', 10, 'seam', 10)")
+    conn.commit()
+    conn.close()
+    conn = meter.connect(db)
+    assert conn.execute("SELECT output, shown FROM responses").fetchone() == (2, 0), "the counts stay"
+    assert conn.execute("SELECT count(*) FROM positions").fetchone() == (0,)
+    conn.close()
+    conn = meter.connect(db)
+    conn.close()
 
 
 def test_prune_keeps_the_responses(tmp_path):

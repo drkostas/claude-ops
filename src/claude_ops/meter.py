@@ -48,9 +48,11 @@ CREATE TABLE IF NOT EXISTS statusline(
 CREATE INDEX IF NOT EXISTS statusline_at ON statusline(at);
 CREATE TABLE IF NOT EXISTS responses(
   message_id TEXT PRIMARY KEY, session_id TEXT, at REAL, model TEXT, input INTEGER, output INTEGER,
-  cache_read INTEGER, cache_write INTEGER, subagent INTEGER NOT NULL DEFAULT 0, cwd TEXT);
+  cache_read INTEGER, cache_write INTEGER, subagent INTEGER NOT NULL DEFAULT 0, cwd TEXT,
+  shown INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS responses_at ON responses(at);
 CREATE INDEX IF NOT EXISTS responses_session ON responses(session_id, at);
+CREATE TABLE IF NOT EXISTS reloads(session_id TEXT NOT NULL, at REAL NOT NULL, chars INTEGER NOT NULL, PRIMARY KEY(session_id, at));
 CREATE TABLE IF NOT EXISTS positions(path TEXT PRIMARY KEY, read_to INTEGER NOT NULL, seam TEXT, size INTEGER);
 CREATE TABLE IF NOT EXISTS telemetry(
   minute INTEGER NOT NULL, session_id TEXT NOT NULL DEFAULT '', account TEXT NOT NULL DEFAULT '',
@@ -67,6 +69,11 @@ def connect(db: "Path | str | None" = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    if "shown" not in [r[1] for r in conn.execute("PRAGMA table_info(responses)")]:
+        # A store from before these figures: each transcript is read once more to fill them, and the counts stay.
+        conn.execute("ALTER TABLE responses ADD COLUMN shown INTEGER NOT NULL DEFAULT 0")
+        conn.execute("DELETE FROM positions")
+        conn.commit()
     return conn
 
 
@@ -178,7 +185,8 @@ def responses_in(raw_lines, *, subagent: bool = False) -> dict:
         mid = m.get("id") if isinstance(m, dict) else None
         if not mid or not isinstance(use, dict):
             continue
-        new = {"message_id": mid, "session_id": d.get("sessionId"), "at": _when(d.get("timestamp")),
+        shown = sum(len(json.dumps(b)) for b in m.get("content") or [] if isinstance(b, dict) and b.get("type") != "thinking")
+        new = {"message_id": mid, "session_id": d.get("sessionId"), "at": _when(d.get("timestamp")), "shown": shown,
                "model": m.get("model"), "cwd": d.get("cwd"), "subagent": int(subagent or bool(d.get("isSidechain"))),
                "input": int(use.get("input_tokens") or 0), "output": int(use.get("output_tokens") or 0),
                "cache_read": int(use.get("cache_read_input_tokens") or 0),
@@ -188,6 +196,7 @@ def responses_in(raw_lines, *, subagent: bool = False) -> dict:
             for k in ("input", "output", "cache_read", "cache_write"):
                 new[k] = max(new[k], old[k])
             new["at"] = old["at"] or new["at"]
+            new["shown"] += old["shown"]
         out[mid] = new
     return out
 
@@ -197,6 +206,27 @@ _SAVE = ("INSERT INTO responses(message_id, session_id, at, model, input, output
          "ON CONFLICT(message_id) DO UPDATE SET input=max(input, excluded.input), output=max(output, excluded.output), "
          "cache_read=max(cache_read, excluded.cache_read), cache_write=max(cache_write, excluded.cache_write), "
          "subagent=min(subagent, excluded.subagent)")
+
+
+_SHOWN = "UPDATE responses SET shown = max(shown, ?) WHERE message_id = ?"
+_RELOAD = b'"instructions"'
+
+
+def reloads_in(raw_lines) -> list[tuple]:
+    """The instruction files a conversation was handed again, each as (session, time, characters). No text is kept."""
+    out = []
+    for raw in raw_lines:
+        if _RELOAD not in raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        at = d.get("attachment") if isinstance(d, dict) and d.get("type") == "attachment" else None
+        when = _when(d.get("timestamp")) if isinstance(at, dict) and at.get("type") == "instructions" else None
+        if when is not None and d.get("sessionId"):
+            out.append((d["sessionId"], when, len(json.dumps(at))))
+    return out
 
 
 def read_file(conn: sqlite3.Connection, path: Path) -> int:
@@ -221,6 +251,8 @@ def read_file(conn: sqlite3.Connection, path: Path) -> int:
     found = responses_in(whole, subagent=path.parent.name == "subagents")
     if found:
         conn.executemany(_SAVE, list(found.values()))
+        conn.executemany(_SHOWN, [(r["shown"], r["message_id"]) for r in found.values()])
+    conn.executemany("INSERT OR REPLACE INTO reloads(session_id, at, chars) VALUES (?, ?, ?)", reloads_in(whole))
     conn.execute("INSERT OR REPLACE INTO positions(path, read_to, seam, size) VALUES (?, ?, ?, ?)",
                  (str(path), read_to, seam, st.st_size))
     return len(found)
@@ -408,6 +440,42 @@ def _prefixes(conn: sqlite3.Connection, sessions: list[str]) -> list[tuple[str, 
         "ON r.session_id = f.session_id AND r.at = f.at WHERE r.subagent = 0", sessions).fetchall()
 
 
+CHARS_PER_TOKEN = 3.0  # only to split a response's output into what it showed and what it thought
+COMPACTED = 0.7  # a prompt that falls below this share of the one before it was compacted or cleared
+
+
+def growth(conn: sqlite3.Connection, session_id: str) -> "dict | None":
+    """Where a chat's prompt grew since its last compaction, from the responses' own usage. A call's prompt is
+    the one before it, plus that response's output, plus what arrived in between, so `output_kept`, `arrived` and
+    `reloaded` add up to `grown` exactly. `reloaded` is what arrived with instruction files read again (a resumed
+    conversation is handed each file that changed, whole, and keeps it until it is compacted). `thinking` is
+    estimated, the part of the output its visible blocks do not account for. A subagent's calls are left out."""
+    rows = [r for r in conn.execute(
+        "SELECT at, input + cache_read + cache_write, output, shown FROM responses "
+        "WHERE session_id = ? AND subagent = 0 AND at IS NOT NULL ORDER BY at", (session_id,)) if r[1]]
+    if not rows:
+        return None
+    start = compactions = 0
+    for i in range(1, len(rows)):
+        if rows[i][1] < rows[i - 1][1] * COMPACTED:
+            start, compactions = i, compactions + 1
+    marks = [r[0] for r in conn.execute("SELECT at FROM reloads WHERE session_id = ? ORDER BY at", (session_id,))]
+    kept = shown = arrived = reloaded = reloads = 0
+    stretch = rows[start:]
+    for before, after in zip(stretch, stretch[1:]):
+        came = after[1] - before[1] - before[2]
+        kept += before[2]
+        shown += min(before[2], before[3] / CHARS_PER_TOKEN)
+        if any(before[0] < m <= after[0] for m in marks):
+            reloaded += came
+            reloads += 1
+        else:
+            arrived += came
+    return {"since": stretch[0][0], "calls": len(stretch), "floor": stretch[0][1], "prompt": stretch[-1][1],
+            "grown": stretch[-1][1] - stretch[0][1], "output_kept": kept, "thinking": round(kept - shown),
+            "arrived": arrived, "reloaded": reloaded, "reloads": reloads, "compactions": compactions}
+
+
 def report(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
            fresh_s: float = 600.0, now: "float | None" = None) -> dict:
     """Per chat over a window: responses, tokens and the weighted figure (measured, and estimated for the
@@ -457,10 +525,12 @@ def report(*, db: "Path | str | None" = None, since: "float | None" = None, unti
                          **_cache_block(payload))
         for sid, prefix in _prefixes(conn, [k for k in chats if k]):
             chats[sid]["prefix_tokens"] = prefix
+            chats[sid]["growth"] = growth(conn, sid)
         return {"since": since, "until": until, "weighted_total": total, "fresh_chats": fresh, "known_chats": len(latest),
                 "official_limits": limits, "official_limits_at": limits_at,
                 "chats": sorted(chats.values(), key=lambda c: -c["weighted"]),
-                "labels": {"limits": "official", "tokens": "measured", "weighted": "estimated"}}
+                "labels": {"limits": "official", "tokens": "measured", "weighted": "estimated", "growth": "measured",
+                           "thinking": "estimated"}}
     finally:
         conn.close()
 
