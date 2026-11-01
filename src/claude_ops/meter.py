@@ -384,6 +384,30 @@ def prune(*, db: "Path | str | None" = None, keep_days: int = KEEP_DAYS, now: "f
     return {"statusline": a, "telemetry": b}
 
 
+def _cache_block(payload: "str | None") -> dict:
+    """What a chat's newest payload says beyond the row's columns: its name, and the prompt-cache counters since
+    its process started, among them the tokens a rewrite would cost if its cache went cold."""
+    try:
+        d = json.loads(payload) if payload else {}
+    except ValueError:
+        return {}
+    pc = d.get("prompt_cache") or {}
+    return {"session_name": d.get("session_name"), "cache_ttl": pc.get("ttl"), "cache_requests": pc.get("requests"),
+            "cache_misses": pc.get("misses"), "misses_by_cause": pc.get("miss_causes") or None,
+            "miss_recache_tokens": pc.get("miss_recache_tokens"), "recache_tokens_if_cold": pc.get("recache_tokens_if_cold")}
+
+
+def _prefixes(conn: sqlite3.Connection, sessions: list[str]) -> list[tuple[str, int]]:
+    """The context each session's first response paid for, which is its standing prefix. A subagent's is left out."""
+    if not sessions:
+        return []
+    marks = ",".join("?" * len(sessions))
+    return conn.execute(
+        f"SELECT r.session_id, r.input + r.cache_read + r.cache_write FROM responses r JOIN "  # noqa: S608 - only marks
+        f"(SELECT session_id, min(at) AS at FROM responses WHERE subagent = 0 AND session_id IN ({marks}) GROUP BY session_id) f "
+        "ON r.session_id = f.session_id AND r.at = f.at WHERE r.subagent = 0", sessions).fetchall()
+
+
 def report(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
            fresh_s: float = 600.0, now: "float | None" = None) -> dict:
     """Per chat over a window: responses, tokens and the weighted figure (measured, and estimated for the
@@ -414,12 +438,13 @@ def report(*, db: "Path | str | None" = None, since: "float | None" = None, unti
             c["share"] = c["weighted"] / total if total else None
         latest = conn.execute(
             "SELECT s.session_id, s.at, s.model, s.context_tokens, s.context_pct, s.cost_usd, s.limits, s.hit_ratio, "
-            "s.expected_rebuilds, s.miss_causes FROM statusline s JOIN (SELECT session_id, max(at) AS at FROM statusline "
-            "WHERE at < ? GROUP BY session_id) n ON s.session_id = n.session_id AND s.at = n.at", (until,)).fetchall()
+            "s.expected_rebuilds, s.miss_causes, s.payload FROM statusline s JOIN (SELECT session_id, max(at) AS at "
+            "FROM statusline WHERE at < ? GROUP BY session_id) n ON s.session_id = n.session_id AND s.at = n.at",
+            (until,)).fetchall()
         fresh = 0
         limits = None
         limits_at = None
-        for sid, at, model, ctx, pct, cost, lim, hit, rebuilds, causes in latest:
+        for sid, at, model, ctx, pct, cost, lim, hit, rebuilds, causes, payload in latest:
             if now - at < fresh_s:
                 fresh += 1
             if lim and (limits_at is None or at > limits_at):
@@ -428,7 +453,10 @@ def report(*, db: "Path | str | None" = None, since: "float | None" = None, unti
                 c = chats.setdefault(sid, {"session_id": sid, "responses": 0, "subagent_responses": 0, "input": 0, "output": 0,
                                            "cache_read": 0, "cache_write": 0, "weighted": 0.0, "models": {}, "share": None})
                 c.update(statusline_at=at, model=model, context_tokens=ctx, context_pct=pct, cost_usd=cost, hit_ratio=hit,
-                         expected_rebuilds=rebuilds, miss_causes=json.loads(causes) if causes else None)
+                         expected_rebuilds=rebuilds, miss_causes=json.loads(causes) if causes else None,
+                         **_cache_block(payload))
+        for sid, prefix in _prefixes(conn, [k for k in chats if k]):
+            chats[sid]["prefix_tokens"] = prefix
         return {"since": since, "until": until, "weighted_total": total, "fresh_chats": fresh, "known_chats": len(latest),
                 "official_limits": limits, "official_limits_at": limits_at,
                 "chats": sorted(chats.values(), key=lambda c: -c["weighted"]),
