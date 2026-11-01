@@ -352,6 +352,8 @@ Gmail's default search leaves out Trash and gives no sign of it, so a message so
 
 `box.message(id)` then gives a match's headers, labels, snippet and internalDate (Gmail's arrival time, for a watcher that checkpoints by when a message arrived), and `box.body(id)` the message text itself, the first text/plain part, or the HTML part with its tags stripped, for a watcher that has to read the body and not only match on it.
 
+A request Google fails (a 5xx) or asks to slow down (a 429) is asked again up to three times in all, with a short wait between tries. After that it raises `GmailError`, with Google's words and `status`. Its `needs_sign_in` is true only for a refused sign-in (a 401, or `invalid_grant` from the token exchange), so a job can tell a person to sign in again only when that is what would help.
+
 The `chat-watcher` skill explains the full pattern to Claude, including the launchd file.
 
 ## Run something at a weekday time in a time zone

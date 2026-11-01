@@ -18,21 +18,32 @@ files that a finished OAuth sign-in leaves on disk:
 A `Mailbox` asks Google for a fresh access token the first time it is used and keeps it for its own
 life, so a job that makes one per run never holds an expired one. Nothing is written to either file.
 The token needs a scope that can read mail (gmail.readonly is enough).
+
+A request Google failed (a 5xx) or asked to slow down (a 429) is asked again after a short wait, so one
+failed request does not cost a job the rest of its read. Once the tries are spent, `GmailError` says what
+Google said, and its `needs_sign_in` tells a refused sign-in from everything a later run can get past.
 """
 from __future__ import annotations
 
 import base64
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
+from .accounts import retry_after_seconds
+
 API = "https://gmail.googleapis.com/gmail/v1/users/me/"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 #: the headers `message` asks for when it is not told which
 HEADERS = ("From", "To", "Subject", "Date", "Reply-To")
+#: the answers worth asking again: Google failed, or it asks for fewer requests. A refusal stays one.
+ASKED_AGAIN = frozenset({429, 500, 502, 503, 504})
+#: the longest wait between tries, even when an answer's Retry-After names a longer one
+MAX_WAIT_S = 30.0
 
 
 class GmailError(Exception):
@@ -41,6 +52,13 @@ class GmailError(Exception):
     def __init__(self, status: int, detail: str):
         super().__init__(f"HTTP {status}: {detail}" if status else detail)
         self.status = status
+        self.detail = detail
+
+    @property
+    def needs_sign_in(self) -> bool:
+        """Whether only a new sign-in can help: Google refused the access token (401), or the token
+        exchange refused the saved refresh token (400 invalid_grant)."""
+        return self.status == 401 or (self.status == 400 and "invalid_grant" in self.detail)
 
 
 def _client(token: dict, client_file) -> dict:
@@ -119,26 +137,39 @@ def _strip_tags(html: str) -> str:
 
 
 class Mailbox:
-    """One Gmail mailbox, read with a refresh token. `fetch` is `urllib.request.urlopen` or a stand-in."""
+    """One Gmail mailbox, read with a refresh token. `fetch` is `urllib.request.urlopen` or a stand-in.
+    `tries` is how many times one request is made while Google fails it, `wait_s` the first wait between
+    them (it doubles each time), and `sleep` is `time.sleep` or a stand-in."""
 
-    def __init__(self, token_file, client_file=None, *, fetch=urllib.request.urlopen, timeout: float = 40):
+    def __init__(self, token_file, client_file=None, *, fetch=urllib.request.urlopen, timeout: float = 40,
+                 tries: int = 3, wait_s: float = 2.0, sleep=time.sleep):
         token = json.loads(Path(token_file).read_text())
         if not token.get("refresh_token"):
             raise ValueError(f"{token_file} holds no refresh_token")
         self._refresh = token["refresh_token"]
         self._client = _client(token, client_file)
         self._fetch, self._timeout = fetch, timeout
+        self._tries, self._wait_s, self._sleep = max(1, tries), wait_s, sleep
         self._access: str | None = None
 
     def _open(self, req) -> dict:
-        try:
-            with self._fetch(req, timeout=self._timeout) as r:
-                return json.loads(r.read() or b"{}")
-        except urllib.error.HTTPError as e:
-            body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
-            raise GmailError(e.code, " ".join(body.split())[:300] or str(e.reason)) from e
-        except urllib.error.URLError as e:
-            raise GmailError(0, f"no answer: {e.reason}") from e
+        """The answer to one request, asked again while Google fails it or asks for fewer requests.
+        A wait the answer names (Retry-After) comes before the doubling one, up to MAX_WAIT_S. A refusal,
+        no answer at all and the last failed try raise GmailError at once."""
+        for attempt in range(1, self._tries + 1):
+            try:
+                with self._fetch(req, timeout=self._timeout) as r:
+                    return json.loads(r.read() or b"{}")
+            except urllib.error.HTTPError as e:
+                if e.code not in ASKED_AGAIN or attempt == self._tries:
+                    body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
+                    raise GmailError(e.code, " ".join(body.split())[:300] or str(e.reason)) from e
+                named = retry_after_seconds((e.headers or {}).get("Retry-After"))
+                e.close()
+            except urllib.error.URLError as e:
+                raise GmailError(0, f"no answer: {e.reason}") from e
+            self._sleep(min(self._wait_s * 2 ** (attempt - 1) if named is None else named, MAX_WAIT_S))
+        raise AssertionError("unreachable")
 
     def token(self) -> str:
         """An access token, asked for once per Mailbox."""

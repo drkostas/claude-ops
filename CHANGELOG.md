@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `gmail.Mailbox` asks a request again when Google fails it (a 5xx) or asks for fewer requests (a 429), three tries by default with a short growing wait, so one failed request no longer costs a job its whole read. `GmailError.needs_sign_in` is true only for a refused sign-in (a 401, or `invalid_grant`), so a job can tell the two apart.
 - The README and `Mailbox.search` say that Gmail's default search leaves out Trash, and that a search that must not miss a message starts with `in:anywhere -in:spam`.
 - `held-worktrees` no longer says a plain commit on top is kept. It says the commit stays on the branch, a run already going does not include it, and it needs its own change afterwards.
 - `claude-ops meter on` (`meter.turn_on`) puts telemetry's environment into this machine's managed settings, so each chat sends to the collector from its next start. Everything else in the file stays, it goes through sudo with no prompt, and a file it cannot read is refused rather than replaced.
