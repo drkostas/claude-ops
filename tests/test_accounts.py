@@ -89,39 +89,37 @@ def test_usage_reads_every_row_and_an_absent_limit_as_no_limit():
     assert list(u) == ["session", "weekly", "weekly/fable", "weekly/cowork", "monthly/monthly_thing"]
     assert ac.limit_name({"kind": "weekly_all"}) == "weekly" and ac.limit_name({"kind": "five_hour"}) == "session"
     assert ac.limit_name({"kind": "weekly_scoped", "group": "weekly", "scope": {"model": {"display_name": "Opus 4"}}}) == "weekly/opus-4"
-    assert ac.limit_group("weekly/fable") == "weekly" and ac.limit_group("session") == "session"
     assert ac.limits_in({}) == {"session": (None, None), "weekly": (None, None)}
 
 
-def test_an_absent_limit_binds_nothing_and_a_scoped_row_takes_its_group_share():
+def test_an_absent_limit_binds_nothing():
     none = {"session": (None, None), "weekly": (19.0, NOW + 100 * H), "weekly/fable": (14.0, NOW + 100 * H)}
     assert ac.usable_at(none, NOW) == NOW
     assert ac.usable_at({"session": (None, None), "weekly": (None, None)}, NOW) == NOW
     assert ac.usable_at({}, NOW) is None
-    full = {"session": (None, None), "weekly": (40.0, NOW + 100 * H), "weekly/fable": (98.0, NOW + 100 * H)}
-    assert ac.usable_at(full, NOW) == NOW + 100 * H, "a scoped weekly row at the threshold is a full limit"
-    assert ac.usable_at(full, NOW, stops={"weekly": 90.0}) == NOW + 100 * H
-    assert ac.usable_at({**full, "weekly/fable": (91.0, NOW + 100 * H)}, NOW, stops={"weekly": 90.0}) == NOW + 100 * H, \
-        "the account's weekly share binds its scoped weekly rows too"
-    assert ac.usable_at({**full, "weekly/fable": (91.0, NOW + 100 * H)}, NOW, stops={"weekly/fable": 95.0}) == NOW, \
-        "and a share named for the row itself comes first"
-    assert ac.stop_for({"north": {"weekly": 90.0}}, "north", "weekly/fable") == 90.0
-    assert ac.stop_for({"north": {"weekly": 90.0, "weekly/fable": 70.0}}, "north", "weekly/fable") == 70.0
-    assert ac.stop_for({"north": {"weekly": 90.0}}, "north", "session") == ac.THRESHOLD
-    # decide: an account whose scoped row is at its share is spent, and one with no session row is
-    # switched to and described by the limits it reports
-    north = {"session": (None, None), "weekly": (60.0, NOW + 72 * H), "weekly/fable": (90.5, NOW + 72 * H)}
-    south = {"session": (None, None), "weekly": (19.0, NOW + 100 * H), "weekly/fable": (14.0, NOW + 100 * H)}
-    d = ac.decide("north", {"north": north, "south": south}, NOW, limits={"north": {"weekly": 90.0}})
-    assert (d.action, d.account) == ("switch", "south") and "weekly/fable limit" in d.reason
-    assert "19% weekly, 14% weekly/fable" in d.reason and "session" not in d.reason
-    assert ac.decide("north", {"north": north, "south": south}, NOW).action == "stay"
-    assert ac.decide("south", {"north": north, "south": south}, NOW).action == "stay"
-    assert ac.choose("north", {"north": north, "south": south}, NOW) is None
-    # with every scoped row full everywhere, the wait is for the earliest reset
-    south_full = {"session": (None, None), "weekly": (50.0, NOW + 20 * H), "weekly/fable": (98.0, NOW + 20 * H)}
-    d = ac.decide("north", {"north": north, "south": south_full}, NOW, limits={"north": {"weekly": 90.0}})
-    assert (d.action, d.account, d.until) == ("pause", "south", NOW + 20 * H)
+    # an account with no session limit is switched to, and described by what binds it
+    north = {"session": (None, None), "weekly": (90.5, NOW + 72 * H), "weekly/fable": (55.0, NOW + 72 * H)}
+    d = ac.decide("north", {"north": north, "south": none}, NOW, limits={"north": {"weekly": 90.0}})
+    assert (d.action, d.account) == ("switch", "south") and "weekly limit" in d.reason
+    assert "19% weekly" in d.reason and "session" not in d.reason and "fable" not in d.reason
+    assert ac.decide("south", {"north": north, "south": none}, NOW).action == "stay"
+    assert ac.choose("south", {"north": north, "south": none}, NOW) is None
+
+
+def test_a_row_scoped_to_one_model_moves_and_pauses_nothing():
+    # a model row at 100% limits that model. Work on other models goes on, so nothing moves.
+    full = {"session": (None, None), "weekly": (40.0, NOW + 72 * H), "weekly/fable": (100.0, NOW + 72 * H)}
+    room = {"session": (None, None), "weekly": (20.0, NOW + 100 * H), "weekly/fable": (100.0, NOW + 100 * H)}
+    assert ac.usable_at(full, NOW) == NOW and ac.usable_at(full, NOW, stops={"weekly": 90.0}) == NOW
+    d = ac.decide("north", {"north": full, "south": room}, NOW, limits={"north": {"weekly": 90.0}})
+    assert d.action == "stay", "in use with a full model row, the account stays"
+    # and a full model row takes no room away from a target
+    spent = {"session": (None, None), "weekly": (99.0, NOW + 72 * H)}
+    d = ac.decide("north", {"north": spent, "south": room}, NOW)
+    assert (d.action, d.account) == ("switch", "south")
+    assert ac.choose("north", {"north": full, "south": room}, NOW) is None
+    assert ac.scoped_rows(full) == {"weekly/fable": (100.0, NOW + 72 * H)}
+    assert ac.scoped_rows({"session": (None, None), "weekly": (1.0, None)}) == {} and ac.scoped_rows(None) == {}
 
 
 def test_profile_names_the_account():
