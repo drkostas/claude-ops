@@ -400,3 +400,16 @@ def test_per_call_around_compares_the_calls_on_each_side(tmp_path):
     early = meter.per_call_around("s-1", NOW, calls=4, db=db)
     assert early["change"] is None and early["before"] == got["before"]
     assert meter.per_call_around("nobody", NOW, db=db) == {"before": None, "after": None, "calls_before": 0, "calls_after": 0, "change": None}
+
+
+def test_per_call_around_says_nothing_across_a_model_change(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    conn = meter.connect(db)
+    for i, (mid, at, model) in enumerate([("b0", NOW - 2, "claude-opus-9"), ("b1", NOW - 1, "claude-opus-9"),
+                                          ("a0", NOW + 1, "claude-haiku-9"), ("a1", NOW + 2, "claude-haiku-9")]):
+        conn.execute("INSERT INTO responses(message_id, session_id, at, model, input, output, cache_read, cache_write, subagent) "
+                     "VALUES (?, 's-1', ?, ?, 0, 0, 1000, 0, 0)", (mid, at, model))
+    conn.commit()
+    conn.close()
+    got = meter.per_call_around("s-1", NOW, calls=2, db=db)
+    assert got["change"] is None and got["before"] > got["after"] and got["calls_after"] == 2
