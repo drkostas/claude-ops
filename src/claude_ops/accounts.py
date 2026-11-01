@@ -211,11 +211,11 @@ def limit_name(row: dict) -> str:
     return f"{group}/{str(part).lower().replace(' ', '-')}"
 
 
-def _binding(u: dict) -> dict:
+def wide_rows(u: "dict | None") -> dict:
     """The limits of `u` that can stop the whole account: the ones it reports, without the scoped ones. A
     (None, None) entry is a limit it does not report now, and a row scoped to one model or surface
     limits that model or surface only, so it must not move or pause work on another."""
-    return {n: (p, r) for n, (p, r) in u.items() if p is not None and "/" not in n}
+    return {n: (p, r) for n, (p, r) in (u or {}).items() if p is not None and "/" not in n}
 
 
 def scoped_rows(u: "dict | None") -> dict:
@@ -278,12 +278,12 @@ def stop_for(limits: "Limits | None", account: str, name: str, threshold: float 
 
 def usable_at(u: dict | None, now: dt.datetime, threshold: float = THRESHOLD,
               stops: dict[str, float] | None = None) -> dt.datetime | None:
-    """When the account can next be used: now while every limit that binds it (`_binding`) is under
+    """When the account can next be used: now while every limit that binds it (`wide_rows`) is under
     `threshold` (or under the limit's own share in `stops`, by limit name), otherwise the latest reset
     among the limits at or over it. None when its usage is unknown."""
     if not u:
         return None
-    full = [resets for name, (pct, resets) in _binding(u).items() if pct >= (stops or {}).get(name, threshold)]
+    full = [resets for name, (pct, resets) in wide_rows(u).items() if pct >= (stops or {}).get(name, threshold)]
     if not full:
         return now
     if any(r is None for r in full):
@@ -325,7 +325,7 @@ def _bar(name: str, floor: float, threshold: float, stops: dict[str, float] | No
 
 def _room(u: dict, now: dt.datetime, floor: float, threshold: float,
           stops: dict[str, float] | None = None) -> bool:
-    return all(_share(pct, r, now) < _bar(name, floor, threshold, stops) for name, (pct, r) in _binding(u).items())
+    return all(_share(pct, r, now) < _bar(name, floor, threshold, stops) for name, (pct, r) in wide_rows(u).items())
 
 
 def _wide(u: dict, name: str) -> tuple:
@@ -336,14 +336,14 @@ def _wide(u: dict, name: str) -> tuple:
 
 def _words(u: dict) -> str:
     """The limits that bind an account, in a line: "6% session, 40% weekly"."""
-    return ", ".join(f"{pct:.0f}% {name}" for name, (pct, _r) in _binding(u).items()) or "no limit reported"
+    return ", ".join(f"{pct:.0f}% {name}" for name, (pct, _r) in wide_rows(u).items()) or "no limit reported"
 
 
 def _room_at(u: dict, now: dt.datetime, floor: float, threshold: float,
              stops: dict[str, float] | None = None) -> dt.datetime | None:
     """When the account has room: now, or the latest reset among the limits at or over their bar;
     None when such a reset is unknown."""
-    full = [r for name, (pct, r) in _binding(u).items() if _share(pct, r, now) >= _bar(name, floor, threshold, stops)]
+    full = [r for name, (pct, r) in wide_rows(u).items() if _share(pct, r, now) >= _bar(name, floor, threshold, stops)]
     if not full:
         return now
     return None if any(r is None for r in full) else max(full)
@@ -371,7 +371,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     mine = usages.get(current)
     if mine is None and not hit:
         return Decision("stay", reason=f"{current}'s usage is unknown")
-    spent = {name: r for name, (pct, r) in _binding(mine or {}).items()
+    spent = {name: r for name, (pct, r) in wide_rows(mine or {}).items()
              if _share(pct, r, now) >= stop_for(limits, current, name, threshold)}
     if hit and not spent:
         kind = hit if hit in ("session", "weekly") else "session"
