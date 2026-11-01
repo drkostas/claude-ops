@@ -18,7 +18,7 @@ import shutil
 from pathlib import Path
 
 ARCHIVE = Path(os.environ.get("CLAUDE_OPS_ARCHIVE", Path.home() / ".config" / "superpowers" / "conversation-archive"))
-PROJECTS = Path(os.environ.get("CLAUDE_OPS_PROJECTS", Path.home() / ".claude" / "projects"))
+from .paths import PROJECTS  # noqa: E402
 
 
 def missing(archive: Path = ARCHIVE, projects: Path = PROJECTS) -> list[Path]:

@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .inject import TMUX, tmux_sessions
 
-PROJECTS = Path.home() / ".claude" / "projects"
+from .paths import PROJECTS  # noqa: E402
 
 #: the words Claude Code's usage-limit question is found by. It is not a start-up question: the
 #: chat waits there until a person or a program answers it, and option 2 spends money

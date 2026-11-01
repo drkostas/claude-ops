@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 WORKTREES = Path(os.path.expanduser("~/worktrees"))
-PROJECTS = Path(os.path.expanduser("~/.claude/projects"))
+from .paths import PROJECTS  # noqa: E402
 GIT = "/usr/bin/git"
 #: a chat name as it is typed, where Claude and tmux allow it: letters of either case, digits,
 #: dashes and underscores, never a dot or a colon (tmux refuses both) and never a space
