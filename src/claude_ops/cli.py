@@ -271,6 +271,9 @@ def cmd_meter(a) -> int:
     if a.what == "env":
         print(json.dumps(meter.env_block(a.port), indent=1))
         return 0
+    if a.what == "on":
+        print(json.dumps({"changed": meter.turn_on(port=a.port), "path": str(meter.MANAGED)}))
+        return 0
     if a.what == "prune":
         print(json.dumps(meter.prune()))
         return 0
@@ -429,7 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("meter", help="what each chat spends: keep the status line, read the transcripts, "
                                      "collect telemetry, report")
-    s.add_argument("what", choices=["statusline", "serve", "read", "env", "prune", "report"])
+    s.add_argument("what", choices=["statusline", "serve", "read", "env", "on", "prune", "report"])
     s.add_argument("--days", type=float, default=1.0, help="report over this many days, or read only files written "
                                                            "in them (0 reads every file)")
     s.add_argument("--port", type=int, default=4318)

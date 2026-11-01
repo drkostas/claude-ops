@@ -3,6 +3,7 @@ it, a transcript read from its position, telemetry through the collector, and th
 import gzip
 import io
 import json
+import pathlib
 import sqlite3
 import threading
 import time
@@ -180,6 +181,46 @@ def test_the_environment_turns_telemetry_on_toward_this_machine():
     e = meter.env_block(4999)
     assert e["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1" and e["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:4999"
     assert e["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/json" and e["OTEL_LOGS_EXPORTER"] == "none"
+
+
+def _as_root(calls):
+    """What sudo would do, on a test's own file."""
+    def run(argv, **kw):
+        calls.append(argv)
+        assert argv[:2] == ["sudo", "-n"], "never a password prompt"
+        if argv[2].endswith("tee"):
+            pathlib.Path(argv[3]).write_text(kw["input"])
+    return run
+
+
+def test_turning_on_keeps_the_rest_of_the_file_and_writes_only_once(tmp_path):
+    f = tmp_path / "managed-settings.json"
+    f.write_text(json.dumps({"keep": 1, "env": {"OTHER": "x", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://old"}}))
+    calls = []
+    assert meter.turn_on(path=f, port=4999, run=_as_root(calls)) is True
+    got = json.loads(f.read_text())
+    assert got["keep"] == 1 and got["env"]["OTHER"] == "x"
+    assert got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:4999" and got["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
+    calls.clear()
+    assert meter.turn_on(path=f, port=4999, run=_as_root(calls)) is False and calls == [], "already on writes nothing"
+
+
+def test_turning_on_makes_a_missing_file_and_refuses_one_it_cannot_read(tmp_path):
+    f = tmp_path / "folder" / "managed-settings.json"
+    calls = []
+    f.parent.mkdir()
+    assert meter.turn_on(path=f, run=_as_root(calls)) is True and calls[0][2].endswith("mkdir")
+    assert json.loads(f.read_text())["env"]["OTEL_METRICS_EXPORTER"] == "otlp"
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json")
+    calls.clear()
+    try:
+        meter.turn_on(path=bad, run=_as_root(calls))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a file it cannot read must not be replaced")
+    assert calls == [] and bad.read_text() == "not json"
 
 
 def test_the_report_labels_its_figures_and_counts_the_chats_it_can_see(tmp_path):
