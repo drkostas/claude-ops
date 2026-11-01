@@ -329,6 +329,16 @@ with lock(Path("/tmp/repo-watch.lock")) as got:
 - A source that fails several runs in a row (an expired token, for example) sends one alert into the chat instead of going quiet.
 - The lock stops two runs from sending the same thing.
 
+A job that fires on a calendar (a Friday reminder, a monthly payment) has no source to read, so `remind` takes the period instead. The scheduler can fire it twice in a period, in case the chat is closed or the machine sleeps, and the first shot that is handed over ends the period.
+
+```python
+from claude_ops.watch import remind
+
+result = remind(Path.home() / ".local/state/rent/state.json", "2026-11", "Please pay the rent.", "my-chat")
+```
+
+The message opens with its period, so a queue that joins identical open messages keeps a new month apart from last month's. The result is "sent", "already-done" or what the send said instead, which belongs in the job's log.
+
 For a mailbox, `claude_ops.gmail.Mailbox` answers the search with the token file and OAuth client file a Google sign-in leaves on disk, so the job needs no browser and no Google client library:
 
 ```python

@@ -105,6 +105,12 @@ with lock(Path("/tmp/my-watch.lock")) as got:
                          target="my-chat"))
 ```
 
+A job that fires on a calendar has no source to read. `claude_ops.watch.remind(state_file, period,
+text, target, send=...)` sends one message per period (`"2026-W45"`, `"2026-11"`), opens it with the
+period so a queue keeps a new week apart from last week's open message, and counts the period as done
+only after the message was handed over. Schedule two shots a period, and write its result to a log, so
+a run that delivered nothing says why.
+
 ## A launchd job (macOS)
 
 `~/Library/LaunchAgents/<label>.plist` with `ProgramArguments` set to the interpreter and the
