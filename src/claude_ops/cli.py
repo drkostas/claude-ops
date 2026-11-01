@@ -257,6 +257,27 @@ def cmd_merge(a) -> int:
     return code
 
 
+def cmd_meter(a) -> int:
+    from . import meter
+    if a.what == "statusline":
+        return meter.statusline_main()
+    if a.what == "serve":
+        meter.serve(port=a.port)
+        return 0
+    if a.what == "read":
+        since = time.time() - a.days * 86400 if a.days else None
+        print(json.dumps(meter.read_all(since=since)))
+        return 0
+    if a.what == "env":
+        print(json.dumps(meter.env_block(a.port), indent=1))
+        return 0
+    if a.what == "prune":
+        print(json.dumps(meter.prune()))
+        return 0
+    print(json.dumps(meter.report(since=time.time() - a.days * 86400), indent=1))
+    return 0
+
+
 def cmd_sqlite_check(a) -> int:
     from . import sqlite_health
     argv = [a.container, a.path, "--engine", a.engine] + (["--since", a.since] if a.since else []) \
@@ -405,6 +426,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--engine", default="docker")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_sqlite_check)
+
+    s = sub.add_parser("meter", help="what each chat spends: keep the status line, read the transcripts, "
+                                     "collect telemetry, report")
+    s.add_argument("what", choices=["statusline", "serve", "read", "env", "prune", "report"])
+    s.add_argument("--days", type=float, default=1.0, help="report over this many days, or read only files written "
+                                                           "in them (0 reads every file)")
+    s.add_argument("--port", type=int, default=4318)
+    s.set_defaults(func=cmd_meter)
 
     s = sub.add_parser("mcp-containers", help="list or stop the MCP server containers no live chat runs")
     s.add_argument("--stop", action="store_true", help="stop the orphans (docker stop)")
