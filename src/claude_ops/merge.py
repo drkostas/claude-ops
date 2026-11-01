@@ -41,9 +41,11 @@ from . import dependency_bump as dependency_bump_mod
 PASSED = {"SUCCESS", "SKIPPED"}
 #: a check whose result is not in yet
 WAITING = {"", "PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+#: a workflow run that has not finished
+RUNNING = {"queued", "in_progress", "requested", "waiting", "pending", "action_required"}
 METHODS = ("merge", "squash", "rebase", "auto")
 #: what a look at the pull request reads; the dependency gate reads the rest
-FIELDS = "headRefOid,state,statusCheckRollup,mergeCommit"
+FIELDS = "headRefOid,state,statusCheckRollup,mergeCommit,baseRefName"
 GATE_FIELDS = FIELDS + ",title,body,author,files,url"
 
 
@@ -51,30 +53,167 @@ def _gh(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess
     return subprocess.run(["gh", *args], capture_output=True, text=True, env=env)
 
 
+def _one(check: dict) -> tuple[str, str, str]:
+    """Pure. (name, "passed" | "waiting" | "failed", the result in one word) for one rollup entry.
+    Check runs carry status and conclusion, commit statuses carry state."""
+    name = check.get("name") or check.get("context") or "?"
+    if "state" in check and "conclusion" not in check:            # a commit status
+        state = (check.get("state") or "").upper()
+        if state in WAITING:
+            return name, "waiting", state.lower()
+        return name, "passed" if state == "SUCCESS" else "failed", state.lower()
+    if (check.get("status") or "").upper() != "COMPLETED":
+        return name, "waiting", ((check.get("status") or "").lower() or "pending")
+    result = (check.get("conclusion") or "").upper()
+    return name, "passed" if result in PASSED else "failed", (result.lower() or "none")
+
+
 def verdict(rollup: list[dict]) -> tuple[str, list[str]]:
     """Pure. ("passed" | "waiting" | "failed" | "none", the checks that hold it up), from gh's
-    statusCheckRollup: check runs carry status and conclusion, commit statuses carry state."""
+    statusCheckRollup. A check that did not pass is named with its result, so a caller can say
+    which one and why.
+
+    A conclusion this function does not count as passed stops the merge, `neutral` included. Some
+    scanners report a real finding that way, and a merge is the one moment where the cautious
+    reading is the right one. The message a caller builds carries the check's own words, so a
+    finding can be told apart from a check that had nothing to do."""
     if not rollup:
         return "none", []
     waiting, bad = [], []
-    for c in rollup:
-        name = c.get("name") or c.get("context") or "?"
-        if "state" in c and "conclusion" not in c:            # a commit status
-            state = (c.get("state") or "").upper()
-            if state in WAITING:
-                waiting.append(name)
-            elif state != "SUCCESS":
-                bad.append(f"{name}: {state.lower()}")
-            continue
-        if (c.get("status") or "").upper() != "COMPLETED":
+    for check in rollup:
+        name, state, result = _one(check)
+        if state == "waiting":
             waiting.append(name)
-        elif (c.get("conclusion") or "").upper() not in PASSED:
-            bad.append(f"{name}: {(c.get('conclusion') or 'none').lower()}")
+        elif state == "failed":
+            bad.append(f"{name}: {result}")
     if bad:
         return "failed", bad
     if waiting:
         return "waiting", waiting
     return "passed", []
+
+
+def failed_names(rollup: list[dict]) -> list[str]:
+    """Pure. The bare names of the checks that did not pass."""
+    return [name for check in rollup for name, state, _ in [_one(check)] if state == "failed"]
+
+
+def still_running(rollup: list[dict]) -> list[str]:
+    """Pure. The names of the checks whose result is not in yet."""
+    return [name for check in rollup for name, state, _ in [_one(check)] if state == "waiting"]
+
+
+def check_words(repo: str | None, sha: str, names, gh) -> dict[str, str]:
+    """What each of `names` said about itself, as one line per check.
+
+    A check run reports a title and a summary of its own, and gh's statusCheckRollup carries
+    neither, so this reads them from the commit's check runs. They are the difference between
+    "the scan is neutral" and the scan's own "1 secret uncovered". Returns an empty mapping when
+    they cannot be read, since the words only make a message better and must never replace it."""
+    wanted = {str(n) for n in names}
+    if not (sha and wanted):
+        return {}
+    where = _name_with_owner(repo, gh)
+    if not where:
+        return {}
+    r = gh(["api", f"repos/{where}/commits/{sha}/check-runs", "--paginate"])
+    if r.returncode != 0:
+        return {}
+    try:
+        runs = json.loads(r.stdout).get("check_runs") or []
+    except (ValueError, AttributeError):
+        return {}
+    out = {}
+    for run_ in runs:
+        name = run_.get("name")
+        if name not in wanted or name in out:
+            continue
+        output = run_.get("output") or {}
+        title = (output.get("title") or "").strip()
+        summary = (output.get("summary") or "").strip()
+        first = next((line.strip(" #").strip() for line in summary.splitlines() if line.strip()), "")
+        said = ". ".join(part for part in (title, first) if part)
+        if said:
+            out[name] = said
+    return out
+
+
+def required_checks(repo: str | None, base: str, gh) -> list[str] | None:
+    """The check names the base branch requires, or None when they cannot be read.
+
+    A branch without protection, and a token without the right to read it, both answer nothing, and
+    neither means the branch requires nothing. None says "unknown", so a caller gates on the runs
+    in flight instead of trusting a short list."""
+    where = _name_with_owner(repo, gh)
+    if not (where and base):
+        return None
+    r = gh(["api", f"repos/{where}/branches/{base}/protection/required_status_checks"])
+    if r.returncode != 0:
+        return None
+    try:
+        got = json.loads(r.stdout)
+    except ValueError:
+        return None
+    names = [c.get("context") for c in (got.get("checks") or []) if c.get("context")]
+    return names or list(got.get("contexts") or [])
+
+
+def runs_in_flight(repo: str | None, sha: str, gh) -> list[str]:
+    """The workflow runs on this head that have not finished, as "<name> (<status>)".
+
+    This is the check that does not depend on a repository having protection rules. A run exists
+    from the moment the platform creates it, which is a little before its checks appear on the pull
+    request, so a run listed here is work the pull request has not reported yet."""
+    where = _name_with_owner(repo, gh)
+    if not (where and sha):
+        return []
+    r = gh(["api", f"repos/{where}/actions/runs?head_sha={sha}&per_page=100"])
+    if r.returncode != 0:
+        return []
+    try:
+        runs = json.loads(r.stdout).get("workflow_runs") or []
+    except (ValueError, AttributeError):
+        return []
+    out = []
+    for run_ in runs:
+        status = (run_.get("status") or "").lower()
+        if status in RUNNING:
+            out.append(f"{run_.get('name') or run_.get('display_title') or 'a workflow'} ({status})")
+    return out
+
+
+def gate_blockers(rollup: list[dict], repo: str | None, base: str, sha: str, gh) -> list[str]:
+    """Why this head is not ready to merge although every check it reported has passed.
+
+    A pull request reports the checks that exist, and nothing about the ones still being created.
+    One fast check that goes green on a new head therefore reads as "everything passed" for the few
+    seconds before the slow one appears. Two readings close that window. The runs on the head name
+    work that has not finished, whether or not its checks exist yet, and the base branch's required
+    checks name work that must report at all."""
+    blockers = list(runs_in_flight(repo, sha, gh))
+    reported = {c.get("name") or c.get("context") for c in rollup}
+    for name in required_checks(repo, base, gh) or []:
+        if name not in reported:
+            blockers.append(f"{name} is required on {base} and has not reported")
+    return blockers
+
+
+def why_not_merged(rollup: list[dict], repo: str | None, sha: str, gh) -> str:
+    """The reason a merge stopped, in the checks' own words where they gave any, and naming the
+    checks that had not finished, so a caller is not left thinking the finished ones are the whole
+    story."""
+    _, named = verdict(rollup)
+    words = check_words(repo, sha, failed_names(rollup), gh)
+    parts = []
+    for item in named:
+        name = item.split(":")[0]
+        said = words.get(name)
+        parts.append(f"{item} ({said})" if said else item)
+    message = "not every check passed: " + "; ".join(parts)
+    running = still_running(rollup)
+    if running:
+        message += f". Still running, so it was not waited out: {', '.join(running)}"
+    return message
 
 
 def _view(number: str, repo: str | None, gh, fields: str = FIELDS) -> dict:
@@ -110,9 +249,18 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
                      gh=None, env: dict | None = None, sleep=time.sleep,
                      clock=time.monotonic) -> tuple[int, str]:
     """Wait for every check on the pull request's head, then merge it if all passed.
-    Returns (exit code, what happened). `settle_s` is how long "no checks yet" counts as waiting,
-    since checks register a little after a push. `dependency_bump` ("patch" or "minor") merges only
-    a bot's update of lockfiles and manifests within that level, read once before any waiting."""
+
+    Returns (exit code, what happened). A pull request reports the checks that exist, so a head
+    whose fast check has gone green while its slow one is still being created reads as "everything
+    passed". The gate therefore asks for more than the rollup. No workflow run on the head may be
+    unfinished, every check the base branch requires must have reported where that list can be
+    read, and the whole picture must still hold `settle_s` later, because a run is created a moment
+    after a push. The cost is one `settle_s` before a merge, and it is what stops an untested head
+    reaching the base branch.
+
+    `settle_s` is also how long "no checks yet" counts as waiting. `dependency_bump` ("patch" or
+    "minor") merges only a bot's update of lockfiles and manifests within that level, read once
+    before any waiting."""
     if method not in METHODS:
         return 2, f"method is one of {', '.join(METHODS)}"
     if gh is None:
@@ -136,6 +284,7 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
             return 4, "the repository allows no merge method gh knows"
         method = allowed[0]
     t0 = clock()
+    ready_at = None
     while True:
         try:
             pr = _view(number, repo, gh)
@@ -143,12 +292,29 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
             return 4, f"could not read the pull request: {e}"
         if pr.get("state") != "OPEN":
             return 5, f"the pull request is {(pr.get('state') or 'unknown').lower()}, not open"
-        state, names = verdict(pr.get("statusCheckRollup") or [])
+        rollup = pr.get("statusCheckRollup") or []
+        state, names = verdict(rollup)
         waited = clock() - t0
         if state == "failed":
-            return 3, "not every check passed: " + "; ".join(names)
+            return 3, why_not_merged(rollup, repo, pr.get("headRefOid") or "", gh)
         if state == "passed" or (state == "none" and allow_no_checks and waited >= settle_s):
-            break
+            blockers = gate_blockers(rollup, repo, pr.get("baseRefName") or "",
+                                     pr.get("headRefOid") or "", gh)
+            if blockers:
+                ready_at = None
+                if waited >= timeout_s:
+                    return 2, "not ready at the timeout: " + "; ".join(blockers)
+                sleep(poll_s)
+                continue
+            if ready_at is None:
+                ready_at = clock()         # read it again after settle_s, in case more is coming
+            if clock() - ready_at >= settle_s:
+                break
+            if waited >= timeout_s:
+                return 2, "the checks passed but had not settled at the timeout"
+            sleep(poll_s)
+            continue
+        ready_at = None
         if state == "none" and waited >= settle_s and not allow_no_checks:
             return 2, "no checks were reported on its head (pass --allow-no-checks to merge anyway)"
         if waited >= timeout_s:
