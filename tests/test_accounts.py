@@ -66,6 +66,64 @@ def test_usage_reads_the_two_limits():
     assert calls[0].get_header("User-agent") == ac.USER_AGENT
 
 
+def test_usage_reads_every_row_and_an_absent_limit_as_no_limit():
+    # the shape the endpoint answers with: the old keys, a null for a limit the account has no window
+    # of, and a limits list with the account-wide weekly row and a weekly row scoped to one model
+    reset = "2026-11-05T12:59:59+00:00"
+    fetch, _ = fake({"five_hour": None, "seven_day": {"utilization": 97.0, "resets_at": reset},
+                     "seven_day_opus": None,
+                     "limits": [{"kind": "weekly_all", "group": "weekly", "percent": 97, "resets_at": reset,
+                                 "scope": None, "is_active": True},
+                                {"kind": "weekly_scoped", "group": "weekly", "percent": 55, "resets_at": reset,
+                                 "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+                                {"kind": "weekly_scoped", "group": "weekly", "percent": 3, "resets_at": reset,
+                                 "scope": {"model": None, "surface": "cowork"}},
+                                {"kind": "monthly_thing", "percent": 9, "resets_at": None},
+                                {"kind": "five_hour", "percent": None}]})
+    u = ac.usage("tok", fetch=fetch)
+    when = dt.datetime(2026, 11, 5, 12, 59, 59, tzinfo=UTC)
+    assert u["session"] == (None, None), "no 5-hour row is no 5-hour limit, not a failed read and not 0%"
+    assert u["weekly"] == (97.0, when)
+    assert u["weekly/fable"] == (55.0, when) and u["weekly/cowork"] == (3.0, when)
+    assert u["monthly/monthly_thing"] == (9.0, None), "a kind the module does not know is still read, under its own name"
+    assert list(u) == ["session", "weekly", "weekly/fable", "weekly/cowork", "monthly/monthly_thing"]
+    assert ac.limit_name({"kind": "weekly_all"}) == "weekly" and ac.limit_name({"kind": "five_hour"}) == "session"
+    assert ac.limit_name({"kind": "weekly_scoped", "group": "weekly", "scope": {"model": {"display_name": "Opus 4"}}}) == "weekly/opus-4"
+    assert ac.limit_group("weekly/fable") == "weekly" and ac.limit_group("session") == "session"
+    assert ac.limits_in({}) == {"session": (None, None), "weekly": (None, None)}
+
+
+def test_an_absent_limit_binds_nothing_and_a_scoped_row_takes_its_group_share():
+    none = {"session": (None, None), "weekly": (19.0, NOW + 100 * H), "weekly/fable": (14.0, NOW + 100 * H)}
+    assert ac.usable_at(none, NOW) == NOW
+    assert ac.usable_at({"session": (None, None), "weekly": (None, None)}, NOW) == NOW
+    assert ac.usable_at({}, NOW) is None
+    full = {"session": (None, None), "weekly": (40.0, NOW + 100 * H), "weekly/fable": (98.0, NOW + 100 * H)}
+    assert ac.usable_at(full, NOW) == NOW + 100 * H, "a scoped weekly row at the threshold is a full limit"
+    assert ac.usable_at(full, NOW, stops={"weekly": 90.0}) == NOW + 100 * H
+    assert ac.usable_at({**full, "weekly/fable": (91.0, NOW + 100 * H)}, NOW, stops={"weekly": 90.0}) == NOW + 100 * H, \
+        "the account's weekly share binds its scoped weekly rows too"
+    assert ac.usable_at({**full, "weekly/fable": (91.0, NOW + 100 * H)}, NOW, stops={"weekly/fable": 95.0}) == NOW, \
+        "and a share named for the row itself comes first"
+    assert ac.stop_for({"north": {"weekly": 90.0}}, "north", "weekly/fable") == 90.0
+    assert ac.stop_for({"north": {"weekly": 90.0, "weekly/fable": 70.0}}, "north", "weekly/fable") == 70.0
+    assert ac.stop_for({"north": {"weekly": 90.0}}, "north", "session") == ac.THRESHOLD
+    # decide: an account whose scoped row is at its share is spent, and one with no session row is
+    # switched to and described by the limits it reports
+    north = {"session": (None, None), "weekly": (60.0, NOW + 72 * H), "weekly/fable": (90.5, NOW + 72 * H)}
+    south = {"session": (None, None), "weekly": (19.0, NOW + 100 * H), "weekly/fable": (14.0, NOW + 100 * H)}
+    d = ac.decide("north", {"north": north, "south": south}, NOW, limits={"north": {"weekly": 90.0}})
+    assert (d.action, d.account) == ("switch", "south") and "weekly/fable limit" in d.reason
+    assert "19% weekly, 14% weekly/fable" in d.reason and "session" not in d.reason
+    assert ac.decide("north", {"north": north, "south": south}, NOW).action == "stay"
+    assert ac.decide("south", {"north": north, "south": south}, NOW).action == "stay"
+    assert ac.choose("north", {"north": north, "south": south}, NOW) is None
+    # with every scoped row full everywhere, the wait is for the earliest reset
+    south_full = {"session": (None, None), "weekly": (50.0, NOW + 20 * H), "weekly/fable": (98.0, NOW + 20 * H)}
+    d = ac.decide("north", {"north": north, "south": south_full}, NOW, limits={"north": {"weekly": 90.0}})
+    assert (d.action, d.account, d.until) == ("pause", "south", NOW + 20 * H)
+
+
 def test_profile_names_the_account():
     fetch, _ = fake({"account": {"email": "a@example.org", "uuid": "u1"}, "organization": {"uuid": "o1"}})
     assert ac.profile("tok", fetch=fetch) == {"email": "a@example.org", "uuid": "u1", "org": "o1"}
