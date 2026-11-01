@@ -25,12 +25,30 @@ class FakeGh:
     """gh with a pull request whose checks move through `views`, one per look. `pr` is what the
     dependency gate reads; `allowed` what `repo view` says the repository permits."""
 
-    def __init__(self, views, merge_code=0, pr=None, allowed=("merge", "squash", "rebase"), diff=None):
+    def __init__(self, views, merge_code=0, pr=None, allowed=("merge", "squash", "rebase"), diff=None,
+                 check_runs=None, runs=None, required=None):
         self.views, self.calls, self.merge_code, self.merged = list(views), [], merge_code, False
         self.pr, self.allowed, self.diff = pr or BOT_PR, allowed, BOT_DIFF if diff is None else diff
+        self.check_runs = check_runs
+        # one entry per look, like `views`, so a run can appear after the first read
+        self.runs = [[]] if runs is None else [list(r) for r in runs]
+        self.required = required
 
     def __call__(self, args):
         self.calls.append(args)
+        if args[0] == "api" and "check-runs" in args[1]:
+            if self.check_runs is None:
+                return run(1, err="not found")
+            return run(out=json.dumps({"check_runs": self.check_runs}))
+        if args[0] == "api" and "actions/runs" in args[1]:
+            now = self.runs.pop(0) if len(self.runs) > 1 else self.runs[0]
+            return run(out=json.dumps({"workflow_runs": now}))
+        if args[0] == "api" and "required_status_checks" in args[1]:
+            if self.required is None:
+                return run(1, err="Branch not protected")
+            return run(out=json.dumps({"checks": [{"context": c} for c in self.required]}))
+        if args[:3] == ["repo", "view", "--json"] and "nameWithOwner" in args[3]:
+            return run(out="owner/repo\n")
         if args[:2] == ["pr", "diff"]:
             return run(out=self.diff)
         if args[:2] == ["pr", "merge"]:
@@ -45,6 +63,7 @@ class FakeGh:
                                        "mergeCommit": {"oid": "fedcba9876543"}}))
         rollup = self.views.pop(0) if len(self.views) > 1 else self.views[0]
         return run(out=json.dumps({"state": "OPEN", "headRefOid": "abc123def4567",
+                                   "baseRefName": "main",
                                    "statusCheckRollup": rollup, **self.pr}))
 
 
@@ -333,3 +352,120 @@ def test_confirm_production_needs_both_checks_and_the_deployment():
     ok, msg = merge.confirm_production("owner/repo", "abc", gh=FakeRepo([], checks="failure"),
                                        sleep=lambda s: None, clock=lambda: 0.0)
     assert not ok and "did not pass" in msg
+
+
+def said(name, title, summary=""):
+    """A check run as the commit's check-runs API returns it."""
+    return {"name": name, "output": {"title": title, "summary": summary}}
+
+
+def test_failed_names_and_still_running():
+    rollup = [check_run("fast", conclusion="NEUTRAL"),
+              check_run("slow", status="IN_PROGRESS", conclusion=""),
+              check_run("done")]
+    assert merge.failed_names(rollup) == ["fast"]
+    assert merge.still_running(rollup) == ["slow"]
+
+
+def test_check_words_reads_what_each_check_said():
+    gh = FakeGh([[]], check_runs=[said("scan", "1 secret uncovered!",
+                                      "#### 1 secret was uncovered from the scan\n\nPlease look.\n"),
+                                  said("other", "ignored, nobody asked for it")])
+    words = merge.check_words("owner/repo", "abc123", ["scan"], gh)
+    assert words == {"scan": "1 secret uncovered!. 1 secret was uncovered from the scan"}
+
+
+def test_check_words_is_empty_when_the_api_cannot_be_read():
+    """The words only improve a message, so a failure to read them must not raise."""
+    assert merge.check_words("owner/repo", "abc123", ["scan"], FakeGh([[]])) == {}
+    assert merge.check_words("owner/repo", "", ["scan"], FakeGh([[]], check_runs=[])) == {}
+
+
+def test_a_stop_carries_the_check_own_words_and_names_what_was_still_running():
+    """The case this came from: a fast scanner reported neutral while the long check had only just
+    started, so the message must say what the scanner found and that the other had not finished."""
+    rollup = [check_run("scan", conclusion="NEUTRAL"),
+              check_run("tests", status="IN_PROGRESS", conclusion="")]
+    gh = FakeGh([rollup], check_runs=[said("scan", "1 secret uncovered!")])
+    code, said_back = go(gh)
+    assert code == 3
+    assert not gh.merged
+    assert "scan: neutral" in said_back
+    assert "1 secret uncovered!" in said_back
+    assert "Still running" in said_back and "tests" in said_back
+
+
+def test_neutral_stops_the_merge_even_with_nothing_to_read():
+    gh = FakeGh([[check_run("scan", conclusion="NEUTRAL")]])
+    code, said_back = go(gh)
+    assert code == 3
+    assert not gh.merged
+    assert said_back == "not every check passed: scan: neutral"
+
+
+def test_a_plain_failure_still_reads_as_before_when_nothing_else_runs():
+    gh = FakeGh([[check_run("tests", conclusion="FAILURE")]], check_runs=[])
+    code, said_back = go(gh)
+    assert code == 3
+    assert said_back == "not every check passed: tests: failure"
+
+def workflow_run(name, status="completed"):
+    return {"name": name, "status": status}
+
+
+def test_runs_in_flight_names_unfinished_runs():
+    gh = FakeGh([[]], runs=[[workflow_run("Tests", "in_progress"), workflow_run("Lint")]])
+    assert merge.runs_in_flight("owner/repo", "abc123", gh) == ["Tests (in_progress)"]
+
+
+def test_runs_in_flight_is_empty_when_it_cannot_be_read():
+    class NoApi(FakeGh):
+        def __call__(self, args):
+            if args[0] == "api":
+                return run(1, err="no")
+            return super().__call__(args)
+    assert merge.runs_in_flight("owner/repo", "abc123", NoApi([[]])) == []
+
+
+def test_required_checks_is_unknown_without_protection():
+    assert merge.required_checks("owner/repo", "main", FakeGh([[]])) is None
+    assert merge.required_checks("owner/repo", "main", FakeGh([[]], required=["Tests"])) == ["Tests"]
+
+
+def test_a_required_check_that_has_not_reported_holds_the_merge():
+    rollup = [check_run("Lint")]
+    gh = FakeGh([rollup], required=["Lint", "Tests"])
+    code, said_back = go(gh, timeout_s=50)
+    assert code == 2
+    assert not gh.merged
+    assert "Tests is required on main and has not reported" in said_back
+
+
+def test_one_fast_green_check_does_not_merge_while_a_run_is_still_going():
+    """The case this came from. A two-second check went green on a new head, the sixteen-minute one
+    had been created but had no check yet, and the rollup read as everything passed."""
+    rollup = [check_run("Scan")]
+    gh = FakeGh([rollup], runs=[[workflow_run("Tests", "in_progress")]])
+    code, said_back = go(gh, timeout_s=50)
+    assert code == 2
+    assert not gh.merged
+    assert "Tests (in_progress)" in said_back
+
+
+def test_a_run_that_appears_after_the_first_read_also_holds_it():
+    """A workflow run is created a moment after a push, so one clean reading is not enough."""
+    rollup = [check_run("Scan")]
+    gh = FakeGh([rollup], runs=[[], [workflow_run("Tests", "queued")]])
+    code, said_back = go(gh, timeout_s=50)
+    assert code == 2
+    assert not gh.merged
+    assert "Tests (queued)" in said_back
+
+
+def test_it_merges_once_nothing_is_in_flight_and_the_picture_holds():
+    rollup = [check_run("Scan"), check_run("Tests")]
+    gh = FakeGh([rollup], runs=[[workflow_run("Tests", "completed")]], required=["Scan", "Tests"])
+    code, said_back = go(gh)
+    assert code == 0, said_back
+    assert gh.merged
+    assert said_back.startswith("merged abc123def456 as fedcba987654 (merge)")
