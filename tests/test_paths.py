@@ -25,3 +25,14 @@ def test_unset_every_module_reads_claude_codes_folder(tmp_path):
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_OPS_PROJECTS"}
     env["HOME"] = str(tmp_path)
     assert read(env) == {str(Path(tmp_path) / ".claude" / "projects")}
+
+
+def test_the_hook_reads_session_ids_from_the_same_folder(tmp_path):
+    project = tmp_path / "-project"
+    project.mkdir()
+    (project / "0d0e0f10-1111-4222-8333-444455556666.jsonl").write_text("")
+    code = ("from claude_ops.hooks import no_session_links as h\n"
+            "print(*sorted(h.session_ids()), sep=chr(10))")
+    env = {**os.environ, "CLAUDE_OPS_PROJECTS": str(tmp_path)}
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    assert out.stdout.split() == ["0d0e0f10-1111-4222-8333-444455556666"]

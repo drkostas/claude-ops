@@ -84,7 +84,7 @@ def session_ids() -> set[str]:
     global _sessions
     if _sessions is None:
         found: set[str] = set()
-        root = os.path.join(config_dir(), "projects")
+        root = os.environ.get("CLAUDE_OPS_PROJECTS") or os.path.join(config_dir(), "projects")
         try:
             for d in os.scandir(root):
                 if d.is_dir():
