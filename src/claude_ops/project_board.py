@@ -17,6 +17,10 @@ that state (a row, a JSON file) beside its record.
                     fields={"State": "Open", "Topic": "backups"}, had=None)
     # keep `had`; pass it next time
     board.prune(days=14)                 # closed items leave the board (the issues stay)
+    board.set_labels(node, ["kind:bug"], repo="owner/other")   # a missing label is made first
+    board.attach(parent_node, child_node)                      # across repositories of one owner
+    board.ensure_views([{"name": "Goals", "layout": "TABLE_LAYOUT", "filter": "label:goal",
+                         "fields": ["Title", "Sub-issues progress"]}], remove=("View 1",))
 
 GitHub limits writes (about 80 a minute and 500 an hour for one account), so each Board counts its
 writes and stops at `budget`, raising OutOfBudget before a record it cannot finish. A caller runs
@@ -38,10 +42,12 @@ from datetime import datetime, timedelta, timezone
 
 #: the first line of every issue body this writes, so an issue can be found by its record's key
 MARKER = "<!-- board-key: {key} -->"
-#: the most writes one `put` can make (issue, title or body, state, parent, project item, fields)
-PUT_WRITES = 6
+#: the most writes one `put` can make (issue, title or body, state, parent, project item, fields, labels)
+PUT_WRITES = 8
 #: the colour a new single-select option gets
 COLOR = "GRAY"
+#: the colour a label gets when this makes it
+LABEL_COLOR = "ededed"
 
 
 class BoardError(RuntimeError):
@@ -98,6 +104,7 @@ class Board:
         self.project: dict | None = None
         self.repository_id: str | None = None
         self.fields: dict[str, dict] = {}
+        self._labels: dict[tuple[str, str], str] = {}
 
     # -- talking to GitHub ---------------------------------------------------------------------
 
@@ -234,11 +241,14 @@ class Board:
     # -- one record ----------------------------------------------------------------------------
 
     def put(self, key: str, *, title: str, body: str, closed: bool = False, parent: str | None = None,
-            fields: dict[str, str] | None = None, had: dict | None = None) -> dict:
+            fields: dict[str, str] | None = None, had: dict | None = None,
+            labels: list[str] | None = None) -> dict:
         """Make the record's issue say what the record says, writing only what changed since `had`.
 
         `parent` is the node id of the issue this one sits under (the `node` of its `had`), or None.
-        A field set to "" is cleared. Returns the new `had`, which the caller keeps.
+        A field set to "" is cleared. `labels` are added to the issue when `had` does not list them,
+        and a label is never taken off, since a person may have put it there. Returns the new `had`,
+        which the caller keeps.
         """
         if self.project is None:
             raise BoardError("call ensure() first")
@@ -291,10 +301,124 @@ class Board:
                 if new["fields"].get(name) != value:
                     self._set_field(new["item"], name, value)
                     new["fields"][name] = value
+            missing = [n for n in labels or [] if n not in new.get("labels", [])]
+            if missing:
+                self.set_labels(new["node"], missing)
+                new["labels"] = [*new.get("labels", []), *missing]
         except BoardError as e:
             e.had = new
             raise
         return new
+
+    # -- labels and parents of anything the account can write ------------------------------------
+
+    def label_id(self, name: str, repo: str | None = None) -> str:
+        """The id of a label in `repo` (the board's own by default), made when the repository lacks
+        it, so a new label never fails a pass."""
+        repo = repo or self.repo
+        if (repo, name) in self._labels:
+            return self._labels[(repo, name)]
+        owner, short = repo.split("/", 1)
+        read = """query($owner: String!, $name: String!, $label: String!) {
+                    repository(owner: $owner, name: $name) { id label(name: $label) { id } } }"""
+        found = self.graphql(read, {"owner": owner, "name": short, "label": name}).get("repository") or {}
+        if not found:
+            raise BoardError(f"no repository {repo}")
+        label = (found.get("label") or {}).get("id")
+        if not label:
+            try:
+                label = self.graphql(
+                    """mutation($repo: ID!, $name: String!, $color: String!) {
+                         createLabel(input: {repositoryId: $repo, name: $name, color: $color}) {
+                           label { id } } }""",
+                    {"repo": found["id"], "name": name, "color": LABEL_COLOR}, write=True)["createLabel"]["label"]["id"]
+            except BoardError as e:
+                if "already" not in str(e).lower():    # another writer made it first
+                    raise
+                label = (self.graphql(read, {"owner": owner, "name": short, "label": name})
+                         .get("repository") or {}).get("label", {}).get("id")
+                if not label:
+                    raise
+        self._labels[(repo, name)] = label
+        return label
+
+    def set_labels(self, node: str, names: list[str], repo: str | None = None) -> None:
+        """Add labels to an issue or pull request of `repo` (by node id). Labels it already has stay."""
+        if names:
+            self.graphql(
+                """mutation($node: ID!, $labels: [ID!]!) {
+                     addLabelsToLabelable(input: {labelableId: $node, labelIds: $labels}) { clientMutationId } }""",
+                {"node": node, "labels": [self.label_id(n, repo) for n in names]}, write=True)
+
+    def attach(self, parent: str, child: str) -> None:
+        """Put an issue under a parent issue (both node ids), which may be in another repository of
+        the same owner. An issue that already has a parent keeps it unless this is called for it."""
+        self.graphql(
+            """mutation($parent: ID!, $child: ID!) {
+                 addSubIssue(input: {issueId: $parent, subIssueId: $child, replaceParent: true}) {
+                   issue { id } } }""", {"parent": parent, "child": child}, write=True)
+
+    # -- views ---------------------------------------------------------------------------------
+
+    def views(self) -> list[dict]:
+        """The project's views in their order: id, name, layout, filter and visible field names."""
+        data = self.graphql(
+            """query($id: ID!) { node(id: $id) { ... on ProjectV2 { views(first: 50) { nodes {
+                 id name layout filter fields(first: 50) { nodes { ... on ProjectV2FieldCommon { name } } } } } } } }""",
+            {"id": self.project["id"]})
+        return [{"id": v["id"], "name": v["name"], "layout": v.get("layout"), "filter": v.get("filter") or "",
+                 "fields": [f["name"] for f in ((v.get("fields") or {}).get("nodes") or []) if f.get("name")]}
+                for v in ((data.get("node") or {}).get("views") or {}).get("nodes") or []]
+
+    def ensure_views(self, wanted: list[dict], remove: tuple[str, ...] = ()) -> list[str]:
+        """Make `wanted` the project's first views, in that order. Each is {"name", "layout", and
+        optionally "filter" and "fields", the visible field names}. Views named in `remove`
+        go, and any other view a person made stays, after these. GitHub cannot reorder views, so a
+        wanted view that is out of place is made again; a view is made before any is removed, because
+        a project keeps at least one. Returns what it did, in words."""
+        if self.project is None:
+            raise BoardError("call ensure() first")
+        have, did = self.views(), []
+        names = [w["name"] for w in wanted]
+        kept = 0
+        while kept < min(len(have), len(wanted)) and have[kept]["name"] == names[kept]:
+            kept += 1
+        for w, v in zip(wanted[:kept], have[:kept]):
+            if self._view_differs(w, v):
+                self._write_view(v["id"], w)
+                did.append(f"changed {w['name']}")
+        for w in wanted[kept:]:
+            made = self.graphql(
+                """mutation($project: ID!, $name: String!, $layout: ProjectV2ViewLayout!) {
+                     createProjectV2View(input: {projectId: $project, name: $name, layout: $layout}) {
+                       projectV2View { id } } }""",
+                {"project": self.project["id"], "name": w["name"], "layout": w["layout"]},
+                write=True)["createProjectV2View"]["projectV2View"]
+            self._write_view(made["id"], w)
+            did.append(f"made {w['name']}")
+        for v in have[kept:]:
+            if v["name"] in remove or v["name"] in names:
+                self.graphql("""mutation($id: ID!) { deleteProjectV2View(input: {viewId: $id}) { clientMutationId } }""",
+                             {"id": v["id"]}, write=True)
+                did.append(f"removed {v['name']}")
+        return did
+
+    @staticmethod
+    def _view_differs(want: dict, view: dict) -> bool:
+        return (want["layout"] != view["layout"] or want.get("filter", "") != view["filter"]
+                # GitHub answers with the project's own field order, so which are shown is what compares
+                or ("fields" in want and set(want["fields"]) != set(view["fields"])))
+
+    def _write_view(self, view: str, want: dict) -> None:
+        unknown = [n for n in want.get("fields", []) if n not in self.fields]
+        if unknown:
+            raise BoardError(f"the project has no field {unknown[0]!r}")
+        given = {"visibleFieldIds": [self.fields[n]["id"] for n in want["fields"]]} if "fields" in want else None
+        self.graphql(
+            """mutation($id: ID!, $layout: ProjectV2ViewLayout!, $filter: String, $config: ProjectV2ViewConfigurationInput) {
+                 updateProjectV2View(input: {viewId: $id, layout: $layout, filter: $filter, configuration: $config}) {
+                   projectV2View { id } } }""",
+            {"id": view, "layout": want["layout"], "filter": want.get("filter", ""), "config": given}, write=True)
 
     def add_item(self, content_id: str) -> str:
         """Put an issue or pull request (by node id) on the project. Returns the item's id.
