@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS responses(
 CREATE INDEX IF NOT EXISTS responses_at ON responses(at);
 CREATE INDEX IF NOT EXISTS responses_session ON responses(session_id, at);
 CREATE TABLE IF NOT EXISTS reloads(session_id TEXT NOT NULL, at REAL NOT NULL, chars INTEGER NOT NULL, PRIMARY KEY(session_id, at));
+CREATE TABLE IF NOT EXISTS compactions(session_id TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(session_id, at));
 CREATE TABLE IF NOT EXISTS positions(path TEXT PRIMARY KEY, read_to INTEGER NOT NULL, seam TEXT, size INTEGER);
 CREATE TABLE IF NOT EXISTS telemetry(
   minute INTEGER NOT NULL, session_id TEXT NOT NULL DEFAULT '', account TEXT NOT NULL DEFAULT '',
@@ -68,10 +69,14 @@ def connect(db: "Path | str | None" = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.executescript(SCHEMA)
+    older = bool(tables) and "compactions" not in tables
     if "shown" not in [r[1] for r in conn.execute("PRAGMA table_info(responses)")]:
-        # A store from before these figures: each transcript is read once more to fill them, and the counts stay.
         conn.execute("ALTER TABLE responses ADD COLUMN shown INTEGER NOT NULL DEFAULT 0")
+        older = True
+    if older:
+        # A store from before these figures: each transcript is read once more to fill them, and the counts stay.
         conn.execute("DELETE FROM positions")
         conn.commit()
     return conn
@@ -229,6 +234,26 @@ def reloads_in(raw_lines) -> list[tuple]:
     return out
 
 
+_COMPACTED = b'"compact_boundary"'
+
+
+def compactions_in(raw_lines) -> list[tuple]:
+    """Each compaction a conversation's lines record, as (session, time)."""
+    out = []
+    for raw in raw_lines:
+        if _COMPACTED not in raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "system" and d.get("subtype") == "compact_boundary" and d.get("sessionId"):
+            when = _when(d.get("timestamp"))
+            if when is not None:
+                out.append((d["sessionId"], when))
+    return out
+
+
 def read_file(conn: sqlite3.Connection, path: Path) -> int:
     """The responses a transcript gained since the last read, saved. It reads from the remembered position
     when the bytes before it still hash the same (sessions._seam), and from the start for a file replaced
@@ -253,6 +278,7 @@ def read_file(conn: sqlite3.Connection, path: Path) -> int:
         conn.executemany(_SAVE, list(found.values()))
         conn.executemany(_SHOWN, [(r["shown"], r["message_id"]) for r in found.values()])
     conn.executemany("INSERT OR REPLACE INTO reloads(session_id, at, chars) VALUES (?, ?, ?)", reloads_in(whole))
+    conn.executemany("INSERT OR REPLACE INTO compactions(session_id, at) VALUES (?, ?)", compactions_in(whole))
     conn.execute("INSERT OR REPLACE INTO positions(path, read_to, seam, size) VALUES (?, ?, ?, ?)",
                  (str(path), read_to, seam, st.st_size))
     return len(found)
@@ -468,7 +494,7 @@ def _prefixes(conn: sqlite3.Connection, sessions: list[str]) -> list[tuple[str, 
 
 
 CHARS_PER_TOKEN = 3.0  # only to split a response's output into what it showed and what it thought
-COMPACTED = 0.7  # a prompt that falls below this share of the one before it was compacted or cleared
+COMPACTED = 0.7  # a prompt that falls below this share of the one before it was cleared, with no compaction's row
 
 
 def growth(conn: sqlite3.Connection, session_id: str) -> "dict | None":
@@ -482,9 +508,10 @@ def growth(conn: sqlite3.Connection, session_id: str) -> "dict | None":
         "WHERE session_id = ? AND subagent = 0 AND at IS NOT NULL ORDER BY at", (session_id,)) if r[1]]
     if not rows:
         return None
+    cut = [r[0] for r in conn.execute("SELECT at FROM compactions WHERE session_id = ? ORDER BY at", (session_id,))]
     start = compactions = 0
     for i in range(1, len(rows)):
-        if rows[i][1] < rows[i - 1][1] * COMPACTED:
+        if rows[i][1] < rows[i - 1][1] * COMPACTED or any(rows[i - 1][0] < m <= rows[i][0] for m in cut):
             start, compactions = i, compactions + 1
     marks = [r[0] for r in conn.execute("SELECT at FROM reloads WHERE session_id = ? ORDER BY at", (session_id,))]
     kept = shown = arrived = reloaded = reloads = 0

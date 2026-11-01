@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `meter.growth` reads a compaction from the conversation's own row. A compaction that kept over 70% of the prompt was missed and read as a negative arrival. The share stays as the way to see a clear, which leaves no such row.
 - `accounts.wide_rows(u)`: the limits of a usage that can stop a whole account, for a caller that compares them. A row scoped to one model or surface and a limit not reported now are left out, as `decide` and `usable_at` already leave them out.
 - `gmail.Mailbox` asks a request again when Google fails it (a 5xx) or asks for fewer requests (a 429), three tries by default with a short growing wait, so one failed request no longer costs a job its whole read. `GmailError.needs_sign_in` is true only for a refused sign-in (a 401, or `invalid_grant`), so a job can tell the two apart.
 - The README and `Mailbox.search` say that Gmail's default search leaves out Trash, and that a search that must not miss a message starts with `in:anywhere -in:spam`.
