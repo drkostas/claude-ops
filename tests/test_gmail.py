@@ -175,3 +175,93 @@ def test_body_is_empty_when_there_is_no_text_part(tmp_path):
     ]}
     g = Google([{"payload": payload}])
     assert Mailbox(t, c, fetch=g).body("m3") == ""
+
+
+def _failed(code=503, headers=None):
+    return urllib.error.HTTPError("https://gmail.googleapis.com/", code, "Failed", headers or {},
+                                  io.BytesIO(b'{"error": "internal_failure"}'))
+
+
+def test_a_server_failure_is_asked_again_and_the_read_goes_on(tmp_path):
+    t, c = files(tmp_path)
+    google = Google([_failed(), {"messages": [{"id": "m1", "threadId": "t1"}]}])
+    waits = []
+    found = Mailbox(t, c, fetch=google, sleep=waits.append).search("x")
+    assert [m["id"] for m in found] == ["m1"]
+    assert len(google.requests) == 3    # the token exchange, the failed search, the search again
+    assert waits == [2.0]
+
+
+def test_server_failures_past_the_limit_raise_with_googles_words(tmp_path):
+    t, c = files(tmp_path)
+    google = Google([_failed(), _failed(), _failed(), {"messages": []}])
+    waits = []
+    with pytest.raises(GmailError) as e:
+        Mailbox(t, c, fetch=google, sleep=waits.append).search("x")
+    assert e.value.status == 503 and "internal_failure" in str(e.value)
+    assert len(google.requests) == 4    # the token exchange and three tries, never the fourth page
+    assert waits == [2.0, 4.0]          # the wait grows, and none follows the last try
+
+
+def test_a_429_is_asked_again(tmp_path):
+    t, c = files(tmp_path)
+    google = Google([_failed(429), {"messages": []}])
+    assert Mailbox(t, c, fetch=google, sleep=lambda s: None).search("x") == []
+    assert len(google.requests) == 3
+
+
+def test_a_wait_the_answer_names_comes_first_up_to_the_longest(tmp_path):
+    t, c = files(tmp_path)
+    google = Google([_failed(429, {"Retry-After": "7"}), _failed(503, {"Retry-After": "3600"}), {"messages": []}])
+    waits = []
+    Mailbox(t, c, fetch=google, sleep=waits.append).search("x")
+    assert waits == [7, 30.0]
+
+
+def test_a_mailbox_can_be_told_to_ask_once(tmp_path):
+    t, c = files(tmp_path)
+    google = Google([_failed(), {"messages": []}])
+    with pytest.raises(GmailError):
+        Mailbox(t, c, fetch=google, tries=1, sleep=lambda s: None).search("x")
+    assert len(google.requests) == 2
+
+
+def test_the_token_exchange_is_asked_again_too(tmp_path):
+    t, c = files(tmp_path)
+    answers = [_failed(502), Answer({"access_token": "access-1"})]
+    def fetch(req, timeout=None):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    assert Mailbox(t, c, fetch=fetch, sleep=lambda s: None).token() == "access-1"
+
+
+def test_a_refusal_is_not_asked_again(tmp_path):
+    t, c = files(tmp_path)
+    google = Google([_failed(401), {"messages": []}])
+    waits = []
+    with pytest.raises(GmailError) as e:
+        Mailbox(t, c, fetch=google, sleep=waits.append).search("x")
+    assert e.value.status == 401
+    assert len(google.requests) == 2    # the token exchange and one search
+    assert waits == []
+
+
+def test_no_answer_is_not_asked_again(tmp_path):
+    t, c = files(tmp_path)
+    google = Google([urllib.error.URLError("timed out"), {"messages": []}])
+    waits = []
+    with pytest.raises(GmailError):
+        Mailbox(t, c, fetch=google, sleep=waits.append).search("x")
+    assert len(google.requests) == 2
+    assert waits == []
+
+
+def test_only_a_refused_sign_in_needs_a_new_sign_in():
+    assert GmailError(401, "Invalid Credentials").needs_sign_in
+    assert GmailError(400, '{"error": "invalid_grant"}').needs_sign_in
+    assert not GmailError(400, "Invalid query").needs_sign_in
+    assert not GmailError(503, "internal_failure").needs_sign_in
+    assert not GmailError(429, "slow down").needs_sign_in
+    assert not GmailError(0, "no answer: timed out").needs_sign_in
