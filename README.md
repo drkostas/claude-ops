@@ -345,8 +345,10 @@ For a mailbox, `claude_ops.gmail.Mailbox` answers the search with the token file
 from claude_ops.gmail import Mailbox
 
 box = Mailbox("/path/to/token.json", "/path/to/credentials.json")
-fetch = lambda: [m["id"] for m in box.search('from:billing@example.org newer_than:14d')]
+fetch = lambda: [m["id"] for m in box.search('in:anywhere -in:spam from:billing@example.org newer_than:14d')]
 ```
+
+Gmail's default search leaves out Trash and gives no sign of it, so a message someone deleted before the next run is never seen. A search that must not miss a message starts with `in:anywhere -in:spam`.
 
 `box.message(id)` then gives a match's headers, labels, snippet and internalDate (Gmail's arrival time, for a watcher that checkpoints by when a message arrived), and `box.body(id)` the message text itself, the first text/plain part, or the HTML part with its tags stripped, for a watcher that has to read the body and not only match on it.
 

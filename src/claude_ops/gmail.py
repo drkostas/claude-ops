@@ -159,7 +159,8 @@ class Mailbox:
 
     def search(self, query: str, max_results: int = 100) -> list[dict]:
         """The messages matching a Gmail search (the same words as the search box), newest first, at
-        most `max_results`: each `{"id", "threadId"}`."""
+        most `max_results`: each `{"id", "threadId"}`. Gmail's default search leaves out Trash and Spam, so
+        a search that must not miss a message starts with `in:anywhere -in:spam`."""
         found: list[dict] = []
         page = None
         while len(found) < max_results:

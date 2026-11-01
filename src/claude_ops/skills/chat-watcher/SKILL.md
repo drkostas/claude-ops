@@ -88,6 +88,9 @@ Things that went wrong with senders like this one.
 8. Make a failure visible. One health check exited 0 on 35 dead runs in a row while it wrote a fresh
    timestamp each time, and one cleanup job failed on every run with an error only its own log held.
    Read the log once after installing the job, and check the job reports what it did.
+9. A source that a person also uses can lose an item between two runs. Gmail's default search leaves
+   out Trash and gives no sign of it, so a mail deleted before the next run is never seen. A search
+   that must not miss one starts with `in:anywhere -in:spam`.
 
 `claude_ops.watch` does steps 3 to 6 for you. Pass `send=` to hand the prompt to a queue instead
 of pasting it.

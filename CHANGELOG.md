@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The README and `Mailbox.search` say that Gmail's default search leaves out Trash, and that a search that must not miss a message starts with `in:anywhere -in:spam`.
 - `held-worktrees` no longer says a plain commit on top is kept. It says the commit stays on the branch, a run already going does not include it, and it needs its own change afterwards.
 - `claude-ops meter on` (`meter.turn_on`) puts telemetry's environment into this machine's managed settings, so each chat sends to the collector from its next start. Everything else in the file stays, it goes through sudo with no prompt, and a file it cannot read is refused rather than replaced.
 - `meter.growth(conn, session)`, and `growth` per chat in `meter.report`: where a chat's prompt grew since its last compaction, from the responses' own usage. A call's prompt is the one before it, plus that response's output, plus what arrived in between, so output kept, arrivals and instruction files read again add up to the growth exactly. Thinking is split out as an estimate. A store from before these figures gains its columns and reads each transcript once more, and its counts stay.
