@@ -379,3 +379,24 @@ def test_prune_keeps_the_responses(tmp_path):
     conn.close()
     assert meter.prune(db=db, now=NOW) == {"statusline": 1, "telemetry": 0}
     assert len(rows(db, "SELECT 1 FROM responses")) == 1
+
+
+def test_per_call_around_compares_the_calls_on_each_side(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    conn = meter.connect(db)
+    def add(mid, at, read, sub=0, session="s-1"):
+        conn.execute("INSERT INTO responses(message_id, session_id, at, model, input, output, cache_read, cache_write, subagent) "
+                     "VALUES (?, ?, ?, 'claude-opus-9', 0, 0, ?, 0, ?)", (mid, session, at, read, sub))
+    for i in range(3):
+        add(f"b{i}", NOW - 100 + i, 400000)
+        add(f"a{i}", NOW + 100 + i, 100000)
+    add("sub", NOW - 1, 9, sub=1)
+    add("other", NOW + 1, 9, session="s-2")
+    conn.commit()
+    conn.close()
+    got = meter.per_call_around("s-1", NOW, calls=3, db=db)
+    assert (got["calls_before"], got["calls_after"]) == (3, 3)
+    assert got["change"] == -0.75
+    early = meter.per_call_around("s-1", NOW, calls=4, db=db)
+    assert early["change"] is None and early["before"] == got["before"]
+    assert meter.per_call_around("nobody", NOW, db=db) == {"before": None, "after": None, "calls_before": 0, "calls_after": 0, "change": None}

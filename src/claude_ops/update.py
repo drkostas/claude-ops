@@ -894,6 +894,25 @@ def question_unreachable(screen: str | None, seconds_since_input: float | None, 
     return signed_out(screen) is not None
 
 
+#: what a session's screen says while it compacts: a spinner glyph, these words, the seconds so far
+COMPACTING = re.compile(r"^\W*Compacting conversation\b")
+#: the reason `ready` gives for a session that is compacting
+COMPACTS = "it is compacting its conversation"
+
+
+def compacting(screen: str | None) -> bool:
+    """Whether a session is compacting now. Its input line stays empty and its transcript stays quiet
+    for the minutes a compaction takes (nothing is written until the end, and the row it writes then
+    does not count as activity), so everything else reads as idle. A restart at that moment loses the
+    summary and what was paid for it. Only the lines just above the input line count: the same words
+    further up are a conversation about compacting."""
+    lines = [ln.strip() for ln in (screen or "").splitlines() if ln.strip()]
+    inputs = [i for i, ln in enumerate(lines) if ln.startswith("❯") and not OPTION.match(ln)]
+    if not inputs:
+        return False
+    return any(COMPACTING.match(ln) for ln in lines[max(0, inputs[-1] - 5):inputs[-1]])
+
+
 def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
           turn_ended_at: dt.datetime | None, now: dt.datetime, *,
           projects: Path = PROJECTS, commands: Mapping[int, str] | None = None,
@@ -911,6 +930,8 @@ def ready(pid: int, procs: dict[int, dict], chat_id: str, screen: str | None,
     but the reason has to say who it is waiting for. The one exception is `question_blocks=False`,
     for a question the caller found nobody can answer (`question_unreachable`) and has already
     closed and kept elsewhere, since an open dialog is not in the transcript."""
+    if compacting(screen):
+        return False, COMPACTS
     prompt = empty_prompt(screen)
     if not prompt[0] and prompt[1].startswith(LIMITED):
         return prompt
@@ -1108,6 +1129,67 @@ def tools_held(path: Path | None) -> dict[str, dict]:
     except OSError:
         return {}
     return held
+
+
+#: how far back `prompt_size` reads a transcript. Its newest response is always well inside that, and
+#: a compaction older than that reads as none known
+PROMPT_SCAN = 64 << 20
+
+
+def _prompt_of(use: dict) -> int:
+    """A response's prompt, by its usage: what it read from cache, wrote to cache and was sent fresh."""
+    return sum(int(use.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
+def prompt_size(path: Path | None, limit: int = PROMPT_SCAN) -> dict | None:
+    """How big a conversation's prompt is, from its transcript's end. None when nothing could be read.
+
+    {"tokens": the newest response's prompt, or None when a compaction came after it or no response
+    is in reach, "at": that response's time, "boundary": the newest compaction as {"at", "trigger",
+    "pre", "post", "seconds"} or None, "after_boundary": the prompt of the first response after that
+    compaction, or None until it has answered}.
+
+    A status line keeps showing the old size after a compaction and shows 0 after a restart, so a
+    caller that acts on the size reads it here: a compacted conversation has no known size until it
+    next answers, and a second compaction at that moment would pay for nothing. `post` leaves out the
+    standing instructions and tools, so it is much smaller than the next prompt. `after_boundary` is
+    the next prompt. A subagent's responses are left out."""
+    if path is None:
+        return None
+    out: dict = {"tokens": None, "at": None, "boundary": None, "after_boundary": None}
+    seen_response = False
+    earliest = None
+    try:
+        for line in _lines_from_end(Path(path), limit=limit):
+            if '"compact_boundary"' not in line and '"usage"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if d.get("type") == "system" and d.get("subtype") == "compact_boundary":
+                meta = d.get("compactMetadata") if isinstance(d.get("compactMetadata"), dict) else {}
+                ms = meta.get("durationMs")
+                out["boundary"] = {"at": d.get("timestamp"), "trigger": meta.get("trigger"), "pre": meta.get("preTokens"),
+                                   "post": meta.get("postTokens"), "seconds": None if ms is None else round(ms / 1000, 1)}
+                out["after_boundary"] = earliest
+                return out
+            m = d.get("message") if d.get("type") == "assistant" else None
+            use = m.get("usage") if isinstance(m, dict) else None
+            if not isinstance(use, dict) or d.get("isSidechain"):
+                continue
+            size = _prompt_of(use)
+            if not size:                  # the client's own stand-in for a response, which no call paid for
+                continue
+            if not seen_response:
+                seen_response = True
+                out.update(tokens=size, at=d.get("timestamp"))
+            earliest = size
+    except OSError:
+        return None
+    return out
 
 
 #: how much of a transcript's end `tools_called` reads at most; a call older than that is not found

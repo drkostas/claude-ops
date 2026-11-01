@@ -530,6 +530,25 @@ def growth(conn: sqlite3.Connection, session_id: str) -> "dict | None":
             "arrived": arrived, "reloaded": reloaded, "reloads": reloads, "compactions": compactions}
 
 
+def per_call_around(session_id: str, at: float, *, calls: int = 10, db: "Path | str | None" = None) -> dict:
+    """What a chat's calls cost on average just before and just after a moment, such as a compaction: each side's
+    mean `weighted`, over up to `calls` of its own responses, and `change`, the share the cost per call rose (below 0
+    when it fell), None until each side has `calls` responses. A subagent's calls are left out, and so is the call
+    that wrote the summary, which a transcript does not record."""
+    conn = connect(db)
+    try:
+        q = "SELECT model, input, output, cache_read, cache_write FROM responses WHERE session_id = ? AND subagent = 0 "
+        before = conn.execute(q + "AND at < ? ORDER BY at DESC LIMIT ?", (session_id, at, calls)).fetchall()
+        after = conn.execute(q + "AND at >= ? ORDER BY at LIMIT ?", (session_id, at, calls)).fetchall()
+    finally:
+        conn.close()
+    mean = lambda rows: sum(weighted(*r) for r in rows) / len(rows) if rows else None  # noqa: E731
+    was, now = mean(before), mean(after)
+    known = len(before) >= calls and len(after) >= calls and was
+    return {"before": was, "after": now, "calls_before": len(before), "calls_after": len(after),
+            "change": now / was - 1 if known else None}
+
+
 def report(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
            fresh_s: float = 600.0, now: "float | None" = None) -> dict:
     """Per chat over a window: responses, tokens and the weighted figure (measured, and estimated for the

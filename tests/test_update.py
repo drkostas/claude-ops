@@ -1221,3 +1221,86 @@ def test_tool_digests_name_the_tools_whose_code_changed():
     assert set(added) - set(before) == {"ping"} and all(added[k] == before[k] for k in before), \
         "a new tool is a new name, and the others keep their digests"
     assert cu.tool_digests("def broken(:\n") == {}
+
+
+def _rows(path, rows):
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return path
+
+
+def _answer(at, read, write=0, fresh=2, **more):
+    return {"type": "assistant", "timestamp": at, "message": {"usage": {
+        "input_tokens": fresh, "cache_read_input_tokens": read, "cache_creation_input_tokens": write, "output_tokens": 900}}, **more}
+
+
+BOUNDARY = {"type": "system", "subtype": "compact_boundary", "timestamp": "2030-01-01T10:00:00Z",
+            "compactMetadata": {"trigger": "manual", "preTokens": 500000, "postTokens": 30000, "durationMs": 90500}}
+
+
+def test_prompt_size_is_the_newest_response_and_leaves_out_a_subagent(tmp_path):
+    t = _rows(tmp_path / "t.jsonl", [_answer("2030-01-01T09:00:00Z", 100), _answer("2030-01-01T09:01:00Z", 400000, 1000),
+                                     _answer("2030-01-01T09:02:00Z", 5, isSidechain=True),
+                                     {"type": "user", "timestamp": "2030-01-01T09:03:00Z"}])
+    assert cu.prompt_size(t) == {"tokens": 401002, "at": "2030-01-01T09:01:00Z", "boundary": None, "after_boundary": None}
+
+
+def test_prompt_size_after_a_compaction_is_unknown_until_it_answers(tmp_path):
+    t = _rows(tmp_path / "t.jsonl", [_answer("2030-01-01T09:00:00Z", 500000), BOUNDARY,
+                                     {"type": "user", "isCompactSummary": True, "timestamp": "2030-01-01T10:00:00Z"}])
+    got = cu.prompt_size(t)
+    assert (got["tokens"], got["at"], got["after_boundary"]) == (None, None, None)
+    assert got["boundary"] == {"at": "2030-01-01T10:00:00Z", "trigger": "manual", "pre": 500000, "post": 30000, "seconds": 90.5}
+
+
+def test_prompt_size_gives_the_first_prompt_after_the_compaction(tmp_path):
+    t = _rows(tmp_path / "t.jsonl", [_answer("2030-01-01T09:00:00Z", 500000), BOUNDARY,
+                                     _answer("2030-01-01T10:01:00Z", 20000, 140000),
+                                     _answer("2030-01-01T10:02:00Z", 170000, 500)])
+    got = cu.prompt_size(t)
+    assert (got["tokens"], got["after_boundary"]) == (170502, 160002)
+
+
+def test_prompt_size_skips_a_response_nothing_paid_for_and_says_when_it_cannot_read(tmp_path):
+    t = _rows(tmp_path / "t.jsonl", [_answer("2030-01-01T09:00:00Z", 1000), _answer("2030-01-01T09:01:00Z", 0, fresh=0)])
+    assert cu.prompt_size(t)["tokens"] == 1002
+    assert cu.prompt_size(None) is None
+    assert cu.prompt_size(tmp_path / "gone.jsonl") is None
+
+
+def test_prompt_size_of_a_conversation_with_no_response_knows_nothing(tmp_path):
+    t = _rows(tmp_path / "t.jsonl", [{"type": "user", "timestamp": "2030-01-01T09:00:00Z"}])
+    assert cu.prompt_size(t) == {"tokens": None, "at": None, "boundary": None, "after_boundary": None}
+
+
+SPINNING = """
+\u273b Worked for 2s
+\u276f /compact
+\u2733 Compacting conversation\u2026 (4s \u00b7 \u2193 295 tokens)
+  \u23bf  Tip: Use /config to change your default permission mode
+\u2500\u2500\u2500\u2500
+\u276f
+\u2500\u2500\u2500\u2500
+  \u23f5\u23f5 auto mode on \u00b7 esc to interrupt
+"""
+
+
+def test_compacting_is_read_from_the_lines_above_the_input_line():
+    assert cu.compacting(SPINNING)
+    assert cu.compacting(SPINNING.replace("\u2733", "\u00b7"))
+    assert cu.empty_prompt(SPINNING)[0]            # why it needs its own reader
+    assert not cu.compacting("\u276f /compact\n  \u23bf  Compacted (ctrl+o to see full summary)\n\u276f\n")
+    assert not cu.compacting(None)
+    assert not cu.compacting("Compacting conversation\u2026 (4s)\n")       # no input line under it
+    far = "Compacting conversation is what the design calls it\n" + "text\n" * 8 + "\u276f\n"
+    assert not cu.compacting(far)
+    assert not cu.compacting("  we talked about Compacting conversation here today\n\u276f\n")
+
+
+def test_ready_says_no_while_a_session_compacts(monkeypatch):
+    now = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(cu, "last_activity", lambda *a, **k: now - dt.timedelta(minutes=5))
+    monkeypatch.setattr(cu, "transcript_of", lambda *a, **k: None)
+    monkeypatch.setattr(cu, "background_agent", lambda *a, **k: None)
+    ended = now - dt.timedelta(minutes=5)
+    assert cu.ready(1, {1: {"ppid": 0}}, "x", SPINNING, ended, now, commands={}) == (False, cu.COMPACTS)
+    assert cu.ready(1, {1: {"ppid": 0}}, "x", "\u276f\n", ended, now, commands={})[0]
