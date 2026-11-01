@@ -12,7 +12,9 @@ process that holds the worktree is alive:
   reached by `cd`, `git -C` or `--work-tree`, as protected_checkouts reads them.
 
 A plain `git commit` stays allowed: it only adds a commit on top, which a tool that restores a
-branch "as its worktree has it" keeps. Reading (log, show, status, diff, fetch) stays allowed too.
+branch "as its worktree has it" keeps. A run the tool already started does not include that commit,
+so it stays on the branch and needs its own change afterwards. Reading (log, show, status, diff,
+fetch) stays allowed too.
 
 The holders are a folder of files, each named after a process id, each listing the worktree folders
 that process holds, one per line. A file whose process is gone holds nothing, so a tool that died
@@ -195,7 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     if why:
         print(f"Blocked: {why}. A tool works on this branch in the background and puts it back as it "
               "recorded it, so this change would be undone or mixed into its work. A plain commit on "
-              "top is kept." + (f" {message}" if message else ""), file=sys.stderr)
+              "top stays on the branch, but a run already going does not include it, so check "
+              "afterwards and send it as its own change." + (f" {message}" if message else ""),
+              file=sys.stderr)
         return 2
     return 0
 
