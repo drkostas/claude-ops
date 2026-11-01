@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `update.prompt_size(transcript)`: how big a conversation's prompt is, from the newest response's usage, with the newest compaction and the first prompt after it. A conversation compacted since its last response has no known size until it answers, so a caller does not compact it twice. A status line shows the old size in that case, and 0 after a restart.
+- `update.compacting(screen)`, and `update.ready` answers no while a session compacts. Its input line is empty and its transcript is quiet for the minutes that takes, so a session read as idle and a restart could end the compaction.
+- `meter.per_call_around(session, at)`: what a chat's calls cost on average before and after a moment such as a compaction, and how much that changed.
 - `meter.growth` reads a compaction from the conversation's own row. A compaction that kept over 70% of the prompt was missed and read as a negative arrival. The share stays as the way to see a clear, which leaves no such row.
 - `accounts.wide_rows(u)`: the limits of a usage that can stop a whole account, for a caller that compares them. A row scoped to one model or surface and a limit not reported now are left out, as `decide` and `usable_at` already leave them out.
 - `gmail.Mailbox` asks a request again when Google fails it (a 5xx) or asks for fewer requests (a 429), three tries by default with a short growing wait, so one failed request no longer costs a job its whole read. `GmailError.needs_sign_in` is true only for a refused sign-in (a 401, or `invalid_grant`), so a job can tell the two apart.
