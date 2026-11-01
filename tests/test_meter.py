@@ -317,6 +317,23 @@ def test_files_handed_with_a_compaction_belong_to_the_floor(tmp_path):
     conn.close()
 
 
+def test_a_compaction_is_read_from_its_own_row_however_little_it_took(tmp_path):
+    f = tmp_path / "a.jsonl"
+    boundary = json.dumps({"type": "system", "subtype": "compact_boundary", "sessionId": "s-1",
+                           "timestamp": "2027-01-15T08:59:00Z"}).encode() + b"\n"
+    f.write_bytes(_said("old", "2027-01-15T08:00:00Z", 1, 211000, 100, 500)
+                  + boundary + _handed_files("2027-01-15T08:59:30Z")
+                  + _said("floor", "2027-01-15T09:00:00Z", 1, 30000, 120000, 10)
+                  + _said("next", "2027-01-15T09:01:00Z", 1, 150000, 20, 10))
+    conn = meter.connect(tmp_path / "m.sqlite3")
+    meter.read_file(conn, f)
+    g = meter.growth(conn, "s-1")
+    assert (g["compactions"], g["floor"], g["reloaded"], g["reloads"]) == (1, 150001, 0, 0), \
+        "211k to 150k is a compaction, though it kept over 70%, and no arrival is negative"
+    assert g["arrived"] == 150021 - 150001 - 10
+    conn.close()
+
+
 def test_an_older_store_gains_the_columns_and_reads_each_transcript_again(tmp_path):
     db = tmp_path / "m.sqlite3"
     conn = sqlite3.connect(db)
@@ -332,6 +349,23 @@ def test_an_older_store_gains_the_columns_and_reads_each_transcript_again(tmp_pa
     assert conn.execute("SELECT count(*) FROM positions").fetchone() == (0,)
     conn.close()
     conn = meter.connect(db)
+    conn.execute("INSERT INTO positions VALUES ('/y', 1, 's', 1)")
+    conn.commit()
+    conn.close()
+    conn = meter.connect(db)
+    assert conn.execute("SELECT count(*) FROM positions").fetchone() == (1,), "only the first open reads again"
+    conn.close()
+
+
+def test_a_store_from_before_compactions_reads_each_transcript_again(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    conn = meter.connect(db)
+    conn.execute("DROP TABLE compactions")
+    conn.execute("INSERT INTO positions VALUES ('/x', 10, 'seam', 10)")
+    conn.commit()
+    conn.close()
+    conn = meter.connect(db)
+    assert conn.execute("SELECT count(*) FROM positions").fetchone() == (0,)
     conn.close()
 
 
