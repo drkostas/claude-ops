@@ -533,7 +533,7 @@ def growth(conn: sqlite3.Connection, session_id: str) -> "dict | None":
 def per_call_around(session_id: str, at: float, *, calls: int = 10, db: "Path | str | None" = None) -> dict:
     """What a chat's calls cost on average just before and just after a moment, such as a compaction: each side's
     mean `weighted`, over up to `calls` of its own responses, and `change`, the share the cost per call rose (below 0
-    when it fell), None until each side has `calls` responses. A subagent's calls are left out, and so is the call
+    when it fell), None until each side has `calls` responses or when they do not all share one model. A subagent's calls are left out, and so is the call
     that wrote the summary, which a transcript does not record."""
     conn = connect(db)
     try:
@@ -544,7 +544,9 @@ def per_call_around(session_id: str, at: float, *, calls: int = 10, db: "Path | 
         conn.close()
     mean = lambda rows: sum(weighted(*r) for r in rows) / len(rows) if rows else None  # noqa: E731
     was, now = mean(before), mean(after)
-    known = len(before) >= calls and len(after) >= calls and was
+    # a call's cost carries its model's tier, so a model changed on either side reads as a gain or a loss
+    one_model = len({r[0] for r in before + after}) == 1
+    known = len(before) >= calls and len(after) >= calls and was and one_model
     return {"before": was, "after": now, "calls_before": len(before), "calls_after": len(after),
             "change": now / was - 1 if known else None}
 
