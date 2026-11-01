@@ -49,7 +49,7 @@ TYPING_WINDOW_S = 120
 AGENT_QUIET_S = 120
 #: a workflow with no final state whose journal was written this recently is still running
 WORKFLOW_QUIET_S = 1800
-PROJECTS = Path.home() / ".claude" / "projects"
+from .paths import PROJECTS  # noqa: E402
 
 
 def shell_children(pid: int, procs: dict[int, dict]) -> list[int]:

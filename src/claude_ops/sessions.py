@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(os.environ.get("CLAUDE_OPS_PROJECTS", Path.home() / ".claude" / "projects"))
+from .paths import PROJECTS as ROOT  # noqa: E402
 CACHE = Path(os.environ.get("CLAUDE_OPS_CACHE", Path.home() / ".cache" / "claude-ops" / "sessions.json"))
 LIVE_WINDOW = 15 * 60
 
