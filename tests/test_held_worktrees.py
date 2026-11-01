@@ -95,6 +95,7 @@ def test_main_refuses_with_its_signature_and_fails_open(place, monkeypatch, caps
     assert hw.main(["--holders", str(holders), "--message", "Stop the ship first."]) == 2
     err = capsys.readouterr().err
     assert err.startswith("Blocked:") and str(proc.pid) in err and "Stop the ship first." in err
+    assert "does not include it" in err and "is kept" not in err
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert hw.main(["--holders", str(holders)]) == 0
     assert os.path.isdir(holders)
