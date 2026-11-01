@@ -158,15 +158,73 @@ def _when(s: str | None) -> dt.datetime | None:
     return dt.datetime.fromisoformat(s) if s else None
 
 
+#: the response's own keys for the two account-wide limits, and the names this module gives them
+WIDE = (("five_hour", "session"), ("seven_day", "weekly"))
+#: the kinds of row in the response's limits list that are those same account-wide limits
+WIDE_KINDS = {"five_hour": "session", "session": "session", "weekly_all": "weekly", "weekly": "weekly"}
+
+
 def usage(token: str, *, fetch=urllib.request.urlopen) -> dict:
-    """{"session": (percent, resets_at), "weekly": (percent, resets_at)} for the token's account.
-    Raises RateLimited (with the seconds to wait) when Anthropic answers 429."""
-    d = _get(USAGE_URL, token, fetch)
+    """Every limit the token's account reports, by name: {"session": (percent, resets_at), "weekly":
+    (percent, resets_at), ...}. "session" and "weekly" are always present. One the account does not
+    report now is (None, None): a limit that does not bind (the read worked, there is no such limit),
+    which is not a failed read. Every further row of the response's limits list is an entry of its
+    own, named by `limit_name` ("weekly/fable" for a weekly limit on one model), so no row goes
+    unread. Raises RateLimited (with the seconds to wait) when Anthropic answers 429."""
+    return limits_in(_get(USAGE_URL, token, fetch))
+
+
+def _limit(w: dict, key: str) -> tuple:
+    pct = w.get(key)
+    return (None, None) if pct is None else (float(pct), _when(w.get("resets_at")))
+
+
+def limits_in(d: dict) -> dict:
+    """The limits of one usage response (see `usage`)."""
     out = {}
-    for key, name in (("five_hour", "session"), ("seven_day", "weekly")):
-        w = d.get(key) or {}
-        out[name] = (float(w.get("utilization") or 0.0), _when(w.get("resets_at")))
+    for key, name in WIDE:
+        w = d.get(key)
+        out[name] = _limit(w, "utilization") if isinstance(w, dict) else (None, None)
+    for row in d.get("limits") or []:
+        if not isinstance(row, dict):
+            continue
+        name = limit_name(row)
+        if name in out and out[name][0] is not None:
+            continue                      # the account-wide limit, already read from its own key
+        out[name] = _limit(row, "percent")
     return out
+
+
+def limit_name(row: dict) -> str:
+    """The name of one row of the response's limits list: "session" or "weekly" for the account-wide
+    limits, else the row's group (or the first word of its kind) and its scope, lower case, joined by
+    a slash ("weekly/fable" for a weekly limit on one model, "weekly/cowork" for one on a surface).
+    The group is in front so a reader can tell a scoped limit's account-wide limit, and every row
+    gets a name, so a kind this module does not know is still read."""
+    kind = str(row.get("kind") or "")
+    scope = row.get("scope") if isinstance(row.get("scope"), dict) else {}
+    if kind in WIDE_KINDS and not scope:
+        return WIDE_KINDS[kind]
+    group = str(row.get("group") or kind.split("_", 1)[0] or "limit").lower()
+    model = scope.get("model") if isinstance(scope.get("model"), dict) else {}
+    part = model.get("display_name") or model.get("id") or scope.get("surface") or kind or "scoped"
+    return f"{group}/{str(part).lower().replace(' ', '-')}"
+
+
+def limit_group(name: str) -> str:
+    """The account-wide limit a name belongs to: "weekly" for "weekly/fable"."""
+    return name.split("/", 1)[0]
+
+
+def _known(u: dict) -> dict:
+    """The limits of `u` the account reports; a (None, None) entry is one it does not report now."""
+    return {n: (p, r) for n, (p, r) in u.items() if p is not None}
+
+
+def _share_of(stops: "dict[str, float] | None", name: str, default: float) -> float:
+    """A limit's own share in `stops`, by its name, else by its group, else `default`."""
+    stops = stops or {}
+    return float(stops.get(name, stops.get(limit_group(name), default)))
 
 
 def login_for(account: str, items: list[tuple[str, str]], *, run=subprocess.run,
@@ -216,19 +274,20 @@ def expired(login: dict, now: dt.datetime, margin_s: int = 600) -> bool:
 
 
 def stop_for(limits: "Limits | None", account: str, name: str, threshold: float = THRESHOLD) -> float:
-    """The share at which `account`'s `name` limit ("session" or "weekly") counts as full: its own
-    in `limits`, else `threshold`."""
-    return float(((limits or {}).get(account) or {}).get(name, threshold))
+    """The share at which `account`'s `name` limit counts as full: its own in `limits`, by the limit's
+    name or else by its group ("weekly/fable" takes the account's "weekly" share), else `threshold`."""
+    return _share_of((limits or {}).get(account), name, threshold)
 
 
 def usable_at(u: dict | None, now: dt.datetime, threshold: float = THRESHOLD,
               stops: dict[str, float] | None = None) -> dt.datetime | None:
-    """When the account can next be used: now while both limits are under `threshold` (or under the
-    limit's own share in `stops`, by limit name), otherwise the latest reset among the limits at or
-    over it. None when its usage is unknown."""
+    """When the account can next be used: now while every limit it reports is under `threshold` (or
+    under the limit's own share in `stops`, by name or group), otherwise the latest reset among the
+    limits at or over it. None when its usage is unknown. A limit the account does not report
+    ((None, None)) binds nothing."""
     if not u:
         return None
-    full = [resets for name, (pct, resets) in u.items() if pct >= (stops or {}).get(name, threshold)]
+    full = [resets for name, (pct, resets) in _known(u).items() if pct >= _share_of(stops, name, threshold)]
     if not full:
         return now
     if any(r is None for r in full):
@@ -263,21 +322,33 @@ def _share(pct: float, resets: dt.datetime | None, now: dt.datetime) -> float:
 
 def _bar(name: str, floor: float, threshold: float, stops: dict[str, float] | None = None) -> float:
     """What a limit must be under for the account to count as having room: the floor on the weekly
-    limit, the threshold on the session one, and never more than the limit's own share in `stops`."""
-    bar = floor if name == "weekly" else threshold
-    return min(bar, (stops or {}).get(name, bar))
+    limit and on every weekly limit scoped to a model or surface, the threshold on the session one,
+    and never more than the limit's own share in `stops` (by name or group)."""
+    bar = floor if limit_group(name) == "weekly" else threshold
+    return min(bar, _share_of(stops, name, bar))
 
 
 def _room(u: dict, now: dt.datetime, floor: float, threshold: float,
           stops: dict[str, float] | None = None) -> bool:
-    return all(_share(pct, r, now) < _bar(name, floor, threshold, stops) for name, (pct, r) in u.items())
+    return all(_share(pct, r, now) < _bar(name, floor, threshold, stops) for name, (pct, r) in _known(u).items())
+
+
+def _wide(u: dict, name: str) -> tuple:
+    """An account-wide limit of `u` for sorting: one it does not report reads as empty."""
+    pct, r = u.get(name) or (None, None)
+    return (0.0, None) if pct is None else (pct, r)
+
+
+def _words(u: dict) -> str:
+    """An account's limits in a line: "6% session, 40% weekly, 14% weekly/fable"."""
+    return ", ".join(f"{pct:.0f}% {name}" for name, (pct, _r) in _known(u).items()) or "no limit reported"
 
 
 def _room_at(u: dict, now: dt.datetime, floor: float, threshold: float,
              stops: dict[str, float] | None = None) -> dt.datetime | None:
     """When the account has room: now, or the latest reset among the limits at or over their bar;
     None when such a reset is unknown."""
-    full = [r for name, (pct, r) in u.items() if _share(pct, r, now) >= _bar(name, floor, threshold, stops)]
+    full = [r for name, (pct, r) in _known(u).items() if _share(pct, r, now) >= _bar(name, floor, threshold, stops)]
     if not full:
         return now
     return None if any(r is None for r in full) else max(full)
@@ -305,7 +376,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     mine = usages.get(current)
     if mine is None and not hit:
         return Decision("stay", reason=f"{current}'s usage is unknown")
-    spent = {name: r for name, (pct, r) in (mine or {}).items()
+    spent = {name: r for name, (pct, r) in _known(mine or {}).items()
              if _share(pct, r, now) >= stop_for(limits, current, name, threshold)}
     if hit and not spent:
         kind = hit if hit in ("session", "weekly") else "session"
@@ -315,7 +386,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     blocked = ", ".join(f"{k} limit" for k in spent)
     others = {n: u for n, u in usages.items() if n != current and u is not None}
     room = sorted((n for n, u in others.items() if _room(u, now, floor, threshold, (limits or {}).get(n))),
-                  key=lambda n: (_share(*others[n]["weekly"], now), _share(*others[n]["session"], now)))
+                  key=lambda n: (_share(*_wide(others[n], "weekly"), now), _share(*_wide(others[n], "session"), now)))
     session_only = set(spent) == {"session"}
     reset = spent.get("session")
     if session_only and reset is not None and reset <= now + short_wait:
@@ -324,8 +395,7 @@ def decide(current: str, usages: dict[str, dict | None], now: dt.datetime, *, hi
     if room:
         u = others[room[0]]
         return Decision("switch", room[0], None,
-                        f"{current} is at its {blocked}; {room[0]} has room ({u['session'][0]:.0f}% session, "
-                        f"{u['weekly'][0]:.0f}% weekly)")
+                        f"{current} is at its {blocked}; {room[0]} has room ({_words(u)})")
     # nowhere has room: wait for the earliest time an account has it, the one in use included
     waits = {}
     own = reset if session_only else max((r for r in spent.values() if r is not None), default=None)
