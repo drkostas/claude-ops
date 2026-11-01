@@ -13,6 +13,9 @@ Rules this module enforces, each learned from a watcher that went wrong:
 - A source that keeps failing (expired token, blocked IP) raises one alert into the chat after a
   few runs, instead of going silent.
 
+`remind` is the same discipline for a job that fires on a calendar and has no source to read: one
+message per period, and the period counts as done only after the message was handed over.
+
 `stall` is the other kind of watch: it waits on a session's transcript (often a subagent's) and
 says whether the session finished its turn, stopped on an error, or stalled, so whoever started it
 hears about a session that stopped moving instead of waiting for it for ever.
@@ -120,6 +123,35 @@ def run_source(state: State, source: str, fetch, describe, target: str, *, trans
 
 #: the exit code of `claude-ops stall` for each result of `stall`
 STALL_EXIT = {"finished": 0, "done": 0, "gone": 0, "stalled": 1, "error": 1, "timeout": 2}
+
+
+def remind(state_file: Path, period: str, text: str, target: str, *, transport: str = "iterm",
+           send=inject) -> dict:
+    """Send one message for one period (a week, a month, a day), for a job that reminds on a calendar.
+
+    A scheduler fires such a job more than once in a period, so that a closed chat or a sleeping
+    machine gets another chance. The first shot that is handed over ends the period, and later shots
+    send nothing. The message opens with its period, "[2026-W45] text", so a queue that joins identical
+    open messages keeps a new week apart from last week's message that is still open.
+
+    Returns {"period", "result"}, for the caller's log line. The result is "sent", "already-done", or
+    what `send` said instead, which is the reason nothing was delivered. A state file that cannot be
+    read counts as no state, since a second reminder costs less than a lost one.
+    """
+    path = Path(state_file)
+    try:
+        done = json.loads(path.read_text()).get("done")
+    except (OSError, ValueError, AttributeError):
+        done = None
+    if done == period:
+        return {"period": period, "result": "already-done"}
+    result = send(target, f"[{period}] {text}", transport=transport).get("result")
+    if result == "sent":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"done": period, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}))
+        os.replace(tmp, path)
+    return {"period": period, "result": result}
 
 
 def _content(d: dict) -> list:
