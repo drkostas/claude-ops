@@ -363,6 +363,33 @@ def env_block(port: int = PORT) -> dict:
             "OTEL_METRIC_EXPORT_INTERVAL": "60000", "OTEL_METRICS_INCLUDE_ACCOUNT_UUID": "true"}
 
 
+MANAGED = Path("/Library/Application Support/ClaudeCode/managed-settings.json" if sys.platform == "darwin"
+               else "/etc/claude-code/managed-settings.json")
+
+
+def turn_on(*, path: "Path | str | None" = None, port: int = PORT, run=None, env: "dict | None" = None) -> bool:
+    """Put telemetry's environment into this machine's managed settings, so each chat sends to the collector from
+    its next start. Everything else in the file stays. Writing there takes root, so this goes through sudo with no
+    prompt, and fails rather than wait for a password. An unreadable file is refused, never replaced. Returns
+    whether the file changed."""
+    import subprocess  # noqa: PLC0415 - a status line render must not import this
+    run = run or subprocess.run
+    path = Path(path or MANAGED)
+    try:
+        now = json.loads(path.read_text())
+    except FileNotFoundError:
+        now = {}
+    if not isinstance(now, dict):
+        raise ValueError(f"{path} does not hold a settings object")
+    want = {**now, "env": {**(now.get("env") or {}), **env_block(port)}}
+    if want == now:
+        return False
+    run(["sudo", "-n", "/bin/mkdir", "-p", str(path.parent)], check=True, env=env)
+    run(["sudo", "-n", "/usr/bin/tee", str(path)], input=json.dumps(want, indent=2) + "\n", text=True, check=True,
+        stdout=subprocess.DEVNULL, env=env)
+    return True
+
+
 def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" = None, server=None) -> None:
     """The one OTLP collector. It binds this machine only, takes http/json metrics, and answers anything else
     with a refusal the exporter logs."""
