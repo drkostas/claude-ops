@@ -203,6 +203,26 @@ def test_the_report_labels_its_figures_and_counts_the_chats_it_can_see(tmp_path)
     assert r["official_limits"]["seven_day"]["percent"] == 19.5 and r["labels"]["weighted"] == "estimated"
 
 
+def test_the_report_gives_each_chats_name_cache_counters_and_prefix(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    conn = meter.connect(db)
+    conn.executemany(meter._SAVE, [
+        {"message_id": "a", "session_id": "s-1", "at": NOW - 3000, "model": "claude-opus-9", "input": 5, "output": 1, "cache_read": 100, "cache_write": 900, "subagent": 0, "cwd": "/x"},
+        {"message_id": "b", "session_id": "s-1", "at": NOW - 10, "model": "claude-opus-9", "input": 1, "output": 1, "cache_read": 5000, "cache_write": 0, "subagent": 0, "cwd": "/x"},
+        {"message_id": "c", "session_id": "s-1", "at": NOW - 4000, "model": "claude-haiku-9", "input": 1, "output": 1, "cache_read": 7, "cache_write": 0, "subagent": 1, "cwd": "/x"}])
+    conn.commit()
+    conn.close()
+    meter.take({**PAYLOAD, "session_name": "north", "prompt_cache": {"ttl": "1h", "requests": 9, "misses": 2, "hit_ratio": 0.9,
+                "miss_causes": {"tools_changed": 2}, "miss_recache_tokens": 800, "recache_tokens_if_cold": 5000}}, db=db, now=NOW - 5)
+    c = meter.report(db=db, now=NOW)["chats"][0]
+    assert (c["session_name"], c["cache_ttl"], c["cache_requests"], c["cache_misses"]) == ("north", "1h", 9, 2)
+    assert c["misses_by_cause"] == {"tools_changed": 2} and (c["miss_recache_tokens"], c["recache_tokens_if_cold"]) == (800, 5000)
+    assert c["prefix_tokens"] == 1005, "the first response of the chat itself, a subagent's left out"
+    meter.take({"session_id": "s-3", "prompt_cache": {}}, db=db, now=NOW - 4)
+    bare = {x["session_id"]: x for x in meter.report(db=db, now=NOW)["chats"]}["s-3"]
+    assert bare["session_name"] is None and bare["cache_requests"] is None and bare.get("prefix_tokens") is None
+
+
 def test_prune_keeps_the_responses(tmp_path):
     db = tmp_path / "m.sqlite3"
     meter.take(PAYLOAD, db=db, now=NOW - 60 * 86400)
