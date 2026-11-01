@@ -120,6 +120,8 @@ def test_a_row_scoped_to_one_model_moves_and_pauses_nothing():
     assert ac.choose("north", {"north": full, "south": room}, NOW) is None
     assert ac.scoped_rows(full) == {"weekly/fable": (100.0, NOW + 72 * H)}
     assert ac.scoped_rows({"session": (None, None), "weekly": (1.0, None)}) == {} and ac.scoped_rows(None) == {}
+    assert ac.wide_rows(full) == {"weekly": full["weekly"]}, "a model row and a limit not reported are left out"
+    assert ac.wide_rows(None) == {} and ac.wide_rows({"session": (None, None)}) == {}
 
 
 def test_profile_names_the_account():
