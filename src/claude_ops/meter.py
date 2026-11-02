@@ -551,6 +551,34 @@ def per_call_around(session_id: str, at: float, *, calls: int = 10, db: "Path | 
             "change": now / was - 1 if known else None}
 
 
+def chat_day(session_id: str, *, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
+             now: "float | None" = None) -> dict:
+    """One chat over a window: the prompt at each of its own responses, its compactions, what it and its subagents
+    spent in the report's weighting, and where its prompt grew. A subagent's prompt is its own, so the curve leaves
+    it out. An empty window gives an empty curve and no spend, never an error."""
+    now = time.time() if now is None else now
+    since = now - 86400 if since is None else since
+    until = now if until is None else until
+    conn = connect(db)
+    try:
+        curve: list[tuple[float, int]] = []
+        chat, subagents = {"responses": 0, "weighted": 0.0}, {"responses": 0, "weighted": 0.0}
+        for at, model, input_, output, read, write, sub in conn.execute(
+                "SELECT at, model, input, output, cache_read, cache_write, subagent FROM responses "
+                "WHERE session_id = ? AND at >= ? AND at < ? ORDER BY at", (session_id, since, until)):
+            side = subagents if sub else chat
+            side["responses"] += 1
+            side["weighted"] += weighted(model, input_, output, read, write)
+            if not sub and input_ + read + write:
+                curve.append((at, input_ + read + write))
+        marks = [r[0] for r in conn.execute("SELECT at FROM compactions WHERE session_id = ? AND at >= ? AND at < ? ORDER BY at",
+                                            (session_id, since, until))]
+        return {"session_id": session_id, "since": since, "until": until, "curve": curve, "compactions": marks,
+                "chat": chat, "subagents": subagents, "growth": growth(conn, session_id)}
+    finally:
+        conn.close()
+
+
 def report(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
            fresh_s: float = 600.0, now: "float | None" = None) -> dict:
     """Per chat over a window: responses, tokens and the weighted figure (measured, and estimated for the
