@@ -312,6 +312,48 @@ def test_rate_limit_is_its_own_error():
         board(gh).ensure()
 
 
+REFUSED = ('Post "https://api.github.com/graphql": http2: Transport: cannot retry err [stream error: stream ID 1; '
+           'REFUSED_STREAM; received from peer] after Request.Body was written; define Request.GetBody to avoid this error')
+
+
+def test_a_refused_stream_is_sent_again():
+    gh, waits, refusals = FakeGitHub(), [], [1]
+
+    def flaky(args, stdin=None):
+        if refusals:
+            refusals.pop()
+            return run(1, "", REFUSED)
+        return gh(args, stdin)
+    b = board(flaky, sleep=waits.append)
+    project = b.ensure()
+    # one wait for the refusal (the rest are the writes' own pause, 0 here)
+    assert project["number"] and [w for w in waits if w] == [project_board.REFUSED_WAIT]
+    assert gh.ops[0] == "repository"          # the refused query reached GitHub once, the second time
+
+
+def test_a_stream_refused_every_time_is_an_error_after_the_last_try():
+    calls, waits = [], []
+
+    def gh(args, stdin=None):
+        calls.append(args)
+        return run(1, "", REFUSED)
+    with pytest.raises(BoardError, match="REFUSED_STREAM"):
+        board(gh, sleep=waits.append).ensure()
+    assert len(calls) == project_board.REFUSED_TRIES
+    assert waits == [project_board.REFUSED_WAIT * n for n in range(1, project_board.REFUSED_TRIES)]
+
+
+def test_any_other_failure_is_not_sent_again():
+    calls = []
+
+    def gh(args, stdin=None):
+        calls.append(args)
+        return run(1, "", "HTTP 502: Bad Gateway")
+    with pytest.raises(BoardError, match="502"):
+        board(gh, sleep=lambda s: None).ensure()
+    assert len(calls) == 1
+
+
 def test_writes_wait_between_each_other():
     gh, waits = FakeGitHub(), []
     b = board(gh, pause=1.5, sleep=waits.append)

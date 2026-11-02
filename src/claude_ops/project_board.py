@@ -48,6 +48,15 @@ PUT_WRITES = 8
 COLOR = "GRAY"
 #: the colour a label gets when this makes it
 LABEL_COLOR = "ededed"
+#: what gh prints when GitHub refused a request's HTTP/2 stream. A refused stream was not processed
+#: (RFC 9113, section 8.7), so the request is sent again, a write included. gh does not do this itself
+#: once it has written the body ("cannot retry err [stream error: ... REFUSED_STREAM ...] after
+#: Request.Body was written").
+REFUSED_STREAM = "REFUSED_STREAM"
+#: how many times a refused request is sent in all, and the seconds waited before each new try, times
+#: its number
+REFUSED_TRIES = 3
+REFUSED_WAIT = 2.0
 
 
 class BoardError(RuntimeError):
@@ -117,8 +126,12 @@ class Board:
             if self.writes:
                 self.sleep(self.pause)
             self.writes += 1
-        out = self._gh(["api", "graphql", "--input", "-"],
-                       json.dumps({"query": query, "variables": variables or {}}))
+        request = json.dumps({"query": query, "variables": variables or {}})
+        for attempt in range(1, REFUSED_TRIES + 1):
+            out = self._gh(["api", "graphql", "--input", "-"], request)
+            if out.returncode == 0 or REFUSED_STREAM not in (out.stderr or "") or attempt == REFUSED_TRIES:
+                break
+            self.sleep(REFUSED_WAIT * attempt)
         try:
             reply = json.loads(out.stdout or "{}")
         except ValueError:
