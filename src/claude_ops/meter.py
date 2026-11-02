@@ -584,6 +584,51 @@ def chat_day(session_id: str, *, db: "Path | str | None" = None, since: "float |
         conn.close()
 
 
+#: what a window's spend went on
+CAUSES = ("reread", "expired", "output", "written", "fresh")
+
+
+def by_cause(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
+             now: "float | None" = None) -> dict:
+    """Where a window's spend went, per chat and per cause, in the report's weighting. The causes add up to it. `reread`
+    is the conversation read back from cache on each call, `output` is what the responses wrote, thinking included, and
+    `written` is what each call added to the cache. A cache write larger than the read beside it replaced the cached
+    prefix. That is `fresh` for a conversation's first response in the window, a subagent's, or the first after a
+    compaction, and `expired` otherwise, because the prefix ran out while the chat sat idle. Which of the two is judged
+    from the shape of the calls, so the split between them is estimated. The window defaults to the last 7 days."""
+    now = time.time() if now is None else now
+    since = now - 7 * 86400 if since is None else since
+    until = now if until is None else until
+    conn = connect(db)
+    try:
+        cuts: dict = {}
+        for sid, at in conn.execute("SELECT session_id, at FROM compactions WHERE at >= ? AND at < ?", (since, until)):
+            cuts.setdefault(sid, []).append(at)
+        chats: dict = {}
+        before: dict = {}
+        for sid, at, model, input_, output, read, write, sub in conn.execute(
+                "SELECT session_id, at, model, input, output, cache_read, cache_write, subagent FROM responses "
+                "WHERE at >= ? AND at < ? ORDER BY session_id, at", (since, until)):
+            c = chats.setdefault(sid or "", {"session_id": sid, "responses": 0, "weighted": 0.0, "causes": dict.fromkeys(CAUSES, 0.0)})
+            prompt, last = input_ + read + write, before.get(sid)
+            cause = "written"
+            if write > read:
+                over = sub or last is None or prompt < last[1] * COMPACTED or any(last[0] < m <= at for m in cuts.get(sid, ()))
+                cause = "fresh" if over else "expired"
+            if not sub and prompt:
+                before[sid] = (at, prompt)
+            parts = {"reread": weighted(model, input_, 0, read, 0), "output": weighted(model, 0, output, 0, 0), cause: weighted(model, 0, 0, 0, write)}
+            for name, part in parts.items():
+                c["causes"][name] += part
+            c["responses"] += 1
+            c["weighted"] += sum(parts.values())
+        causes = {name: sum(c["causes"][name] for c in chats.values()) for name in CAUSES}
+        return {"since": since, "until": until, "responses": sum(c["responses"] for c in chats.values()), "weighted": sum(causes.values()),
+                "causes": causes, "chats": sorted(chats.values(), key=lambda c: -c["weighted"])}
+    finally:
+        conn.close()
+
+
 def report(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
            fresh_s: float = 600.0, now: "float | None" = None) -> dict:
     """Per chat over a window: responses, tokens and the weighted figure (measured, and estimated for the
