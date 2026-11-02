@@ -461,3 +461,50 @@ def test_a_chats_day_is_its_own_curve_and_each_side_of_its_spend(tmp_path):
     empty = meter.chat_day("nobody", db=db, since=at - 3600, until=at + 3600)
     assert empty["curve"] == [] and empty["compactions"] == [] and empty["chat"]["responses"] == 0 and empty["growth"] is None
     assert empty["unknown_since"] is None, "no compaction, nothing to be unknown since"
+
+
+def _spent(conn, rows):
+    """(id, session, at, model, input, output, cache_read, cache_write, subagent)"""
+    conn.executemany("INSERT INTO responses(message_id, session_id, at, model, input, output, cache_read, cache_write, subagent) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+
+
+def test_a_windows_spend_splits_by_cause_and_adds_up(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    conn = meter.connect(db)
+    m = "claude-opus-9"
+    _spent(conn, [
+        ("old", "s-1", 50.0, m, 1, 10, 900000, 900000, 0),
+        ("first", "s-1", 1000.0, m, 1, 10, 0, 100000, 0),
+        ("warm", "s-1", 1010.0, m, 1, 20, 100000, 1000, 0),
+        ("idle", "s-1", 9000.0, m, 1, 30, 0, 101000, 0),
+        ("helper", "s-1", 9001.0, m, 1, 40, 0, 5000, 1),
+        ("warm-2", "s-1", 9010.0, m, 1, 50, 101000, 2000, 0),
+        ("small", "s-1", 9020.0, m, 1, 60, 1000, 40000, 0),
+        ("warm-3", "s-1", 9030.0, m, 1, 70, 41000, 2000, 0),
+        ("marked", "s-1", 9040.0, m, 1, 80, 1000, 42000, 0),
+        ("other", "s-2", 1000.0, "claude-fable-9", 1, 1, 0, 10, 0),
+    ])
+    conn.execute("INSERT INTO compactions(session_id, at) VALUES ('s-1', 9035.0)")
+    conn.commit()
+    conn.close()
+
+    got = meter.by_cause(db=db, since=500.0, until=9500.0)
+    one = next(c for c in got["chats"] if c["session_id"] == "s-1")
+    written = lambda *tokens: sum(meter.weighted(m, 0, 0, 0, t) for t in tokens)  # noqa: E731
+    assert one["causes"]["fresh"] == written(100000, 5000, 40000, 42000), "a first response, a subagent's, a fall in the prompt and a compaction's own row"
+    assert one["causes"]["expired"] == written(101000), "the same size written again, with nothing read: the prefix ran out"
+    assert one["causes"]["written"] == written(1000, 2000, 2000), "what each ordinary call added"
+    assert one["causes"]["output"] == meter.weighted(m, 0, 10 + 20 + 30 + 40 + 50 + 60 + 70 + 80, 0, 0)
+    assert one["causes"]["reread"] == sum(meter.weighted(m, 1, 0, r, 0) for r in (0, 100000, 0, 0, 101000, 1000, 41000, 1000))
+    assert one["responses"] == 8, "the response before the window is left out"
+    assert sum(one["causes"].values()) == one["weighted"]
+    assert got["weighted"] == sum(c["weighted"] for c in got["chats"]) == sum(got["causes"].values()), "it all adds up"
+    assert got["responses"] == 9 and got["chats"][0]["session_id"] == "s-1", "the dearest chat first"
+
+
+def test_an_empty_window_splits_into_nothing(tmp_path):
+    got = meter.by_cause(db=tmp_path / "m.sqlite3", since=1.0, until=2.0)
+    assert got["weighted"] == 0 and got["responses"] == 0 and got["chats"] == []
+    assert set(got["causes"]) == set(meter.CAUSES), "every cause is there, at nothing"
