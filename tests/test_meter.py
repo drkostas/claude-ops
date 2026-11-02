@@ -569,7 +569,7 @@ def test_a_standing_read_runs_no_hooks_and_saves_no_session(tmp_path):
     db, seen = tmp_path / "m.sqlite3", []
     assert meter.read_standing(tmp_path, db=db, now=100.0, run=_answers(CONTEXT, seen), env={"PATH": "/x"})
     argv, kw = seen[0]
-    assert argv[:3] == ["claude", "-p", "/context"] and "--no-session-persistence" in argv
+    assert argv[:3] == ["claude", "-p", "/context"] and "--no-session-persistence" in argv and "--strict-mcp-config" in argv
     assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": True}
     assert kw["cwd"] == str(tmp_path) and kw["env"] == {"PATH": "/x"} and kw["stdin"] == subprocess.DEVNULL
     got = meter.standing(db=db)[str(tmp_path)]

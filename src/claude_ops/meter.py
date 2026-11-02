@@ -661,16 +661,17 @@ def standing_parts(text: str) -> list[tuple[str, str, int]]:
 def read_standing(folder: "Path | str", *, db: "Path | str | None" = None, now: "float | None" = None, env: "dict | None" = None,
                   run=None, claude: str = "claude", timeout: float = 60.0) -> "list | None":
     """Ask Claude Code what a chat started in `folder` loads before its first message, and keep the answer. `/context`
-    in print mode makes no API call, so this costs nothing, and its figures are Claude Code's own estimates. Hooks are off
-    and the session is not saved, so the run leaves no trace. A folder that is gone or an answer with no tables keeps
-    nothing and returns None, since a size that was not read is unknown and not zero."""
+    in print mode spends nothing, and its figures are Claude Code's own estimates. Hooks and MCP servers are off and the
+    session is not saved, so the run leaves no trace and takes a second or two. `env` needs HOME and USER, since without
+    its sign-in Claude Code falls back to a rougher estimate that came out 15% smaller. A folder that is gone or an answer
+    with no tables keeps nothing and returns None, since a size that was not read is unknown and not zero."""
     import subprocess  # noqa: PLC0415 - a status line render must not import this
     run = run or subprocess.run
     if not Path(folder).is_dir():
         return None
     try:
-        got = run([claude, "-p", "/context", "--no-session-persistence", "--settings", json.dumps({"disableAllHooks": True}),
-                   "--output-format", "json"], cwd=str(folder), env=env, capture_output=True, text=True, timeout=timeout,
+        got = run([claude, "-p", "/context", "--no-session-persistence", "--strict-mcp-config", "--settings",
+                   json.dumps({"disableAllHooks": True}), "--output-format", "json"], cwd=str(folder), env=env, capture_output=True, text=True, timeout=timeout,
                   stdin=subprocess.DEVNULL)
         parts = standing_parts(json.loads(got.stdout).get("result") or "")
     except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
