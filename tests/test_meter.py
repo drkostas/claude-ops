@@ -438,7 +438,26 @@ def test_a_chats_day_is_its_own_curve_and_each_side_of_its_spend(tmp_path):
     assert day["compactions"] == [at + 2], "a compaction outside the window is left out"
     assert (day["chat"]["responses"], day["subagents"]["responses"]) == (2, 1)
     assert day["subagents"]["weighted"] > 0 and day["chat"]["weighted"] > 0, "each side has its own spend"
-    assert day["growth"]["prompt"] == 3501, "the same reading as meter.growth"
+    assert day["unknown_since"] == at + 2 and day["growth"] is None, "a compaction after the last response: nothing is known since"
+    assert day["curve"][-1] == (at, 3501), "the curve keeps what was read, and unknown_since says it is from before"
+
+    conn = meter.connect(db)
+    conn.execute("INSERT INTO responses(message_id, session_id, at, model, input, output, cache_read, cache_write, subagent) "
+                 "VALUES ('helper-2', 's-1', ?, 'claude-opus-9', 1, 10, 500000, 0, 1)", (at + 3,))
+    conn.commit()
+    conn.close()
+    day = meter.chat_day("s-1", db=db, since=at - 3600, until=at + 3600)
+    assert day["unknown_since"] == at + 2, "a subagent's response says nothing of the chat's own prompt"
+
+    conn = meter.connect(db)
+    conn.execute("INSERT INTO responses(message_id, session_id, at, model, input, output, cache_read, cache_write, subagent) "
+                 "VALUES ('three', 's-1', ?, 'claude-opus-9', 1, 10, 900, 0, 0)", (at + 4,))
+    conn.commit()
+    conn.close()
+    day = meter.chat_day("s-1", db=db, since=at - 3600, until=at + 3600)
+    assert day["unknown_since"] is None and day["curve"][-1] == (at + 4, 901), "its next response is its size again"
+    assert day["growth"]["floor"] == 901 and day["growth"]["prompt"] == 901, "the same reading as meter.growth, from the new start"
 
     empty = meter.chat_day("nobody", db=db, since=at - 3600, until=at + 3600)
     assert empty["curve"] == [] and empty["compactions"] == [] and empty["chat"]["responses"] == 0 and empty["growth"] is None
+    assert empty["unknown_since"] is None, "no compaction, nothing to be unknown since"

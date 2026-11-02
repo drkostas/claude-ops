@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `meter.chat_day` gives `unknown_since`, a compaction the chat has not responded since, and `meter.growth` answers None in that case. The last point of the curve is from before the compaction, so a caller could show it as the size now, and growth counted a stretch that had already ended.
 - `meter.chat_day(session)`: one chat over a window, with the prompt at each of its own responses, its compactions, what it and its subagents spent in the report's weighting, and where its prompt grew. A subagent's prompt is its own, so the curve leaves it out.
 - `update.prompt_size(transcript)`: how big a conversation's prompt is, from the newest response's usage, with the newest compaction and the first prompt after it. A conversation compacted since its last response has no known size until it answers, so a caller does not compact it twice. A status line shows the old size in that case, and 0 after a restart.
 - `update.compacting(screen)`, and `update.ready` answers no while a session compacts. Its input line is empty and its transcript is quiet for the minutes that takes, so a session read as idle and a restart could end the compaction.
