@@ -502,13 +502,16 @@ def growth(conn: sqlite3.Connection, session_id: str) -> "dict | None":
     the one before it, plus that response's output, plus what arrived in between, so `output_kept`, `arrived` and
     `reloaded` add up to `grown` exactly. `reloaded` is what arrived with instruction files read again (a resumed
     conversation is handed each file that changed, whole, and keeps it until it is compacted). `thinking` is
-    estimated, the part of the output its visible blocks do not account for. A subagent's calls are left out."""
+    estimated, the part of the output its visible blocks do not account for. A subagent's calls are left out. A
+    compaction after the last response means nothing has grown since, so the answer is None until the chat responds."""
     rows = [r for r in conn.execute(
         "SELECT at, input + cache_read + cache_write, output, shown FROM responses "
         "WHERE session_id = ? AND subagent = 0 AND at IS NOT NULL ORDER BY at", (session_id,)) if r[1]]
     if not rows:
         return None
     cut = [r[0] for r in conn.execute("SELECT at FROM compactions WHERE session_id = ? ORDER BY at", (session_id,))]
+    if cut and cut[-1] > rows[-1][0]:
+        return None
     start = compactions = 0
     for i in range(1, len(rows)):
         if rows[i][1] < rows[i - 1][1] * COMPACTED or any(rows[i - 1][0] < m <= rows[i][0] for m in cut):
@@ -555,7 +558,8 @@ def chat_day(session_id: str, *, db: "Path | str | None" = None, since: "float |
              now: "float | None" = None) -> dict:
     """One chat over a window: the prompt at each of its own responses, its compactions, what it and its subagents
     spent in the report's weighting, and where its prompt grew. A subagent's prompt is its own, so the curve leaves
-    it out. An empty window gives an empty curve and no spend, never an error."""
+    it out. An empty window gives an empty curve and no spend, never an error. `unknown_since` is a compaction the chat
+    has not responded since: the curve's last point is from before it, and the prompt is unknown until the next response."""
     now = time.time() if now is None else now
     since = now - 86400 if since is None else since
     until = now if until is None else until
@@ -573,7 +577,8 @@ def chat_day(session_id: str, *, db: "Path | str | None" = None, since: "float |
                 curve.append((at, input_ + read + write))
         marks = [r[0] for r in conn.execute("SELECT at FROM compactions WHERE session_id = ? AND at >= ? AND at < ? ORDER BY at",
                                             (session_id, since, until))]
-        return {"session_id": session_id, "since": since, "until": until, "curve": curve, "compactions": marks,
+        unknown_since = marks[-1] if marks and (not curve or marks[-1] > curve[-1][0]) else None
+        return {"session_id": session_id, "since": since, "until": until, "curve": curve, "compactions": marks, "unknown_since": unknown_since,
                 "chat": chat, "subagents": subagents, "growth": growth(conn, session_id)}
     finally:
         conn.close()
