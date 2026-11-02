@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `meter.read_standing(folder)` and `meter.carrying()`: what a chat started in a folder loads before its first message, read from Claude Code's own `/context` with no API call, and what carrying each part costs over a window, priced by the calls actually made in that folder. A call reads a part from cache, and a call whose cache write is larger than its read wrote it. The named parts are the instruction files and the skill listing, and the rest comes from what first calls really paid, because the estimate leaves things out. `claude-ops meter standing` reads one folder and prints the figures.
 - `meter.by_cause()`: where a window's spend went, per chat and per cause, which add up to it. Reading the conversation back from cache, the output, what each call added, a prefix that ran out while the chat sat idle, and starting over after a compaction or at a conversation's first response.
 - `meter.chat_day` gives `unknown_since`, a compaction the chat has not responded since, and `meter.growth` answers None in that case. The last point of the curve is from before the compaction, so a caller could show it as the size now, and growth counted a stretch that had already ended.
 - `meter.chat_day(session)`: one chat over a window, with the prompt at each of its own responses, its compactions, what it and its subagents spent in the report's weighting, and where its prompt grew. A subagent's prompt is its own, so the curve leaves it out.

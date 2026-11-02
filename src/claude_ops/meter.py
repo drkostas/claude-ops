@@ -55,6 +55,9 @@ CREATE INDEX IF NOT EXISTS responses_session ON responses(session_id, at);
 CREATE TABLE IF NOT EXISTS reloads(session_id TEXT NOT NULL, at REAL NOT NULL, chars INTEGER NOT NULL, PRIMARY KEY(session_id, at));
 CREATE TABLE IF NOT EXISTS compactions(session_id TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(session_id, at));
 CREATE TABLE IF NOT EXISTS positions(path TEXT PRIMARY KEY, read_to INTEGER NOT NULL, seam TEXT, size INTEGER);
+CREATE TABLE IF NOT EXISTS standing(
+  folder TEXT NOT NULL, at REAL NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, tokens INTEGER NOT NULL,
+  PRIMARY KEY(folder, at, kind, name));
 CREATE TABLE IF NOT EXISTS telemetry(
   minute INTEGER NOT NULL, session_id TEXT NOT NULL DEFAULT '', account TEXT NOT NULL DEFAULT '',
   metric TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', query_source TEXT NOT NULL DEFAULT '',
@@ -457,16 +460,17 @@ def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" 
 
 # ------------------------------------------------------------------------------ what it knows
 def prune(*, db: "Path | str | None" = None, keep_days: int = KEEP_DAYS, now: "float | None" = None) -> dict:
-    """Drop status line and telemetry rows past `keep_days`. Responses stay, see KEEP_DAYS."""
+    """Drop status line, telemetry and standing rows past `keep_days`. Responses stay, see KEEP_DAYS."""
     cut = (time.time() if now is None else now) - keep_days * 86400
     conn = connect(db)
     try:
         a = conn.execute("DELETE FROM statusline WHERE at < ?", (cut,)).rowcount
         b = conn.execute("DELETE FROM telemetry WHERE minute < ?", (int(cut // 60),)).rowcount
+        c = conn.execute("DELETE FROM standing WHERE at < ?", (cut,)).rowcount
         conn.commit()
     finally:
         conn.close()
-    return {"statusline": a, "telemetry": b}
+    return {"statusline": a, "telemetry": b, "standing": c}
 
 
 def _cache_block(payload: "str | None") -> dict:
@@ -627,6 +631,162 @@ def by_cause(*, db: "Path | str | None" = None, since: "float | None" = None, un
                 "causes": causes, "chats": sorted(chats.values(), key=lambda c: -c["weighted"])}
     finally:
         conn.close()
+
+
+_STANDING_TABLES = {"estimated usage by category": ("category", 0, 1), "memory files": ("file", 1, 2), "skills": ("skill", 0, 2)}
+FIRST_CALLS_DAYS = 14
+_UNIT = {"": 1, "k": 1000, "m": 1000000}
+
+
+def _tokens_cell(cell: str) -> "int | None":
+    """A count as /context prints it, such as 581, 29.9k, ~150 or < 20."""
+    m = re.fullmatch(r"[~<> ]*([\d.]+)([kmKM]?)", cell.strip())
+    return round(float(m.group(1)) * _UNIT[m.group(2).lower()]) if m else None
+
+
+def standing_parts(text: str) -> list[tuple[str, str, int]]:
+    """The tables of Claude Code's /context as (kind, name, tokens), where kind is category, file or skill."""
+    parts, table = [], None
+    for line in text.splitlines():
+        if line.startswith("#"):
+            table = _STANDING_TABLES.get(line.lstrip("# ").strip().lower())
+        elif table and line.startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            kind, name, tokens = table
+            if len(cells) > max(name, tokens) and (n := _tokens_cell(cells[tokens])) is not None:
+                parts.append((kind, cells[name], n))
+    return parts
+
+
+def read_standing(folder: "Path | str", *, db: "Path | str | None" = None, now: "float | None" = None, env: "dict | None" = None,
+                  run=None, claude: str = "claude", timeout: float = 60.0) -> "list | None":
+    """Ask Claude Code what a chat started in `folder` loads before its first message, and keep the answer. `/context`
+    in print mode makes no API call, so this costs nothing, and its figures are Claude Code's own estimates. Hooks are off
+    and the session is not saved, so the run leaves no trace. A folder that is gone or an answer with no tables keeps
+    nothing and returns None, since a size that was not read is unknown and not zero."""
+    import subprocess  # noqa: PLC0415 - a status line render must not import this
+    run = run or subprocess.run
+    if not Path(folder).is_dir():
+        return None
+    try:
+        got = run([claude, "-p", "/context", "--no-session-persistence", "--settings", json.dumps({"disableAllHooks": True}),
+                   "--output-format", "json"], cwd=str(folder), env=env, capture_output=True, text=True, timeout=timeout,
+                  stdin=subprocess.DEVNULL)
+        parts = standing_parts(json.loads(got.stdout).get("result") or "")
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+        return None
+    if not parts:
+        return None
+    now = time.time() if now is None else now
+    conn = connect(db)
+    try:
+        conn.executemany("INSERT OR REPLACE INTO standing(folder, at, kind, name, tokens) VALUES (?, ?, ?, ?, ?)",
+                         [(str(folder), now, *part) for part in parts])
+        conn.commit()
+    finally:
+        conn.close()
+    return parts
+
+
+def standing(*, db: "Path | str | None" = None) -> dict:
+    """The newest reading of each folder, as {folder: {"at": when, "parts": [(kind, name, tokens)]}}."""
+    conn = connect(db)
+    try:
+        got: dict = {}
+        for folder, at, kind, name, tokens in conn.execute(
+                "SELECT s.folder, s.at, s.kind, s.name, s.tokens FROM standing s JOIN "
+                "(SELECT folder, max(at) at FROM standing GROUP BY folder) n ON s.folder = n.folder AND s.at = n.at"):
+            got.setdefault(folder, {"at": at, "parts": []})["parts"].append((kind, name, tokens))
+        return got
+    finally:
+        conn.close()
+
+
+def busiest_folders(*, db: "Path | str | None" = None, days: float = 7.0, limit: int = 8, now: "float | None" = None) -> list[str]:
+    """The folders the most responses were made in over the last `days`, busiest first."""
+    now = time.time() if now is None else now
+    conn = connect(db)
+    try:
+        return [r[0] for r in conn.execute(
+            "SELECT cwd FROM responses WHERE subagent = 0 AND at >= ? AND cwd IS NOT NULL AND cwd != '' "
+            "GROUP BY cwd ORDER BY count(*) DESC LIMIT ?", (now - days * 86400, limit))]
+    finally:
+        conn.close()
+
+
+def _known(reading: dict) -> tuple[list, int]:
+    """A folder's parts that a person can trim, and their sum. Claude Code's estimate of the rest of what it loads
+    leaves things out, so the rest comes from what first calls really paid."""
+    named = [(kind, name, tokens) for kind, name, tokens in reading["parts"] if kind == "file" or (kind, name) == ("category", "Skills")]
+    return named, sum(p[2] for p in named)
+
+
+def carrying(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
+             now: "float | None" = None) -> dict:
+    """What the prefix every call reads again costs over a window, the last 7 days by default, split into its parts,
+    from the newest reading of each folder (`read_standing`). A call reads a part from cache, and a call whose cache
+    write is larger than its read wrote it. `weighted` is the report's weighting and `equivalents` the same tokens at
+    cache read 0.1 and cache write 1.25 with no tier. `rest` is the median of what a conversation's first call paid
+    beyond the named parts over the last FIRST_CALLS_DAYS, which holds the tool schemas, the system prompt, text from
+    hooks and the first message. A conversation whose folder has no reading, perhaps because it is gone, is compared
+    with the busiest folder's parts. Only chats in a folder with a reading are priced, and `responses_read` says how
+    many responses that is out of `responses`. Subagents load less and are left out of the carrying, and counted in
+    `weighted`."""
+    import statistics  # noqa: PLC0415 - a status line render must not import this
+    now = time.time() if now is None else now
+    since = now - 7 * 86400 if since is None else since
+    until = now if until is None else until
+    readings = standing(db=db)
+    known = {folder: _known(r) for folder, r in readings.items()}
+    conn = connect(db)
+    try:
+        pace: dict = {}
+        total = 0.0
+        responses = 0
+        for cwd, model, input_, output, read, write, sub in conn.execute(
+                "SELECT cwd, model, input, output, cache_read, cache_write, subagent FROM responses WHERE at >= ? AND at < ?", (since, until)):
+            total += weighted(model, input_, output, read, write)
+            if sub:
+                continue
+            responses += 1
+            if cwd in known:
+                wrote = write > read
+                p = pace.setdefault(cwd, {"responses": 0, "weighted": 0.0, "equivalents": 0.0})
+                p["responses"] += 1
+                p["weighted"] += weighted(model, 0, 0, 0, 1) if wrote else weighted(model, 0, 0, 1, 0)
+                p["equivalents"] += 1.25 if wrote else 0.1
+        firsts = conn.execute(
+            "SELECT r.cwd, r.input + r.cache_read + r.cache_write FROM responses r JOIN "
+            "(SELECT session_id, min(at) first FROM responses WHERE subagent = 0 GROUP BY session_id) f "
+            "ON r.session_id = f.session_id AND r.at = f.first WHERE r.subagent = 0 AND f.first >= ? AND f.first < ?",
+            (until - FIRST_CALLS_DAYS * 86400, until)).fetchall()
+    finally:
+        conn.close()
+    paid = [row[1] for row in firsts]
+    busiest = max(pace, key=lambda f: pace[f]["responses"], default=None)
+    beyond = [max(prompt - known[cwd if cwd in known else busiest][1], 0) for cwd, prompt in firsts] if busiest else []
+    rest = round(statistics.median(beyond)) if beyond else None
+    parts: dict = {}
+    for folder, (named, _sum) in known.items():
+        for kind, name, tokens in named:
+            parts.setdefault((kind, name), {}).update({folder: tokens})
+    if rest is not None:
+        parts[("rest", "rest")] = {folder: rest for folder in known}
+    rows = []
+    for (kind, name), folders in parts.items():
+        got = {"kind": "skills" if kind == "category" else kind, "name": name, "tokens": max(folders.values()), "folders": folders, "weighted": 0.0, "equivalents": 0.0}
+        for folder, tokens in folders.items():
+            p = pace.get(folder)
+            if p:
+                got["weighted"] += tokens * p["weighted"]
+                got["equivalents"] += tokens * p["equivalents"]
+        rows.append(got)
+    rows.sort(key=lambda r: -r["weighted"])
+    return {"since": since, "until": until, "weighted": total, "responses": responses, "responses_read": sum(p["responses"] for p in pace.values()),
+            "folders": {f: {"at": readings[f]["at"], "responses": pace.get(f, {}).get("responses", 0)} for f in readings},
+            "first_call": round(statistics.median(paid)) if paid else None, "first_calls": len(paid), "rest": rest,
+            "carried": {"weighted": sum(r["weighted"] for r in rows), "equivalents": sum(r["equivalents"] for r in rows)}, "parts": rows,
+            "skills": sorted(((n, t) for k, n, t in readings[busiest]["parts"] if k == "skill"), key=lambda s: -s[1]) if busiest else []}
 
 
 def report(*, db: "Path | str | None" = None, since: "float | None" = None, until: "float | None" = None,
