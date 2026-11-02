@@ -5,6 +5,7 @@ import io
 import json
 import pathlib
 import sqlite3
+import subprocess
 import threading
 import time
 import urllib.error
@@ -377,7 +378,7 @@ def test_prune_keeps_the_responses(tmp_path):
     conn.executemany(meter._SAVE, [{"message_id": "m1", "session_id": "s-1", "at": NOW - 60 * 86400, "model": "x", "input": 1, "output": 1, "cache_read": 1, "cache_write": 1, "subagent": 0, "cwd": None}])
     conn.commit()
     conn.close()
-    assert meter.prune(db=db, now=NOW) == {"statusline": 1, "telemetry": 0}
+    assert meter.prune(db=db, now=NOW) == {"statusline": 1, "telemetry": 0, "standing": 0}
     assert len(rows(db, "SELECT 1 FROM responses")) == 1
 
 
@@ -508,3 +509,150 @@ def test_an_empty_window_splits_into_nothing(tmp_path):
     got = meter.by_cause(db=tmp_path / "m.sqlite3", since=1.0, until=2.0)
     assert got["weighted"] == 0 and got["responses"] == 0 and got["chats"] == []
     assert set(got["causes"]) == set(meter.CAUSES), "every cause is there, at nothing"
+
+
+CONTEXT = """## Context Usage
+
+**Model:** claude-opus-9
+**Tokens:** 41.4k / 1m (4%)
+
+### Estimated usage by category
+
+| Category | Tokens | Percentage |
+|----------|--------|------------|
+| System prompt | 3.5k | 0.3% |
+| MCP tools (deferred) | 45.3k | 4.5% |
+| Memory files | 30k | 3% |
+| Skills | 1.2k | 0.1% |
+| Free space | 876.9k | 87.7% |
+
+### MCP Tools
+
+| Tool | Server | Tokens |
+|------|--------|--------|
+| mcp__docs__read | docs | 300 |
+
+### Memory Files
+
+| Type | Path | Tokens |
+|------|------|--------|
+| User | /home/user/.claude/CLAUDE.md | 20k |
+| Project | /work/app/CLAUDE.md | 10k |
+
+### Skills
+
+| Skill | Source | Tokens |
+|-------|--------|--------|
+| big | User | ~1.1k |
+| small | User | ~90 |
+| tiny | Built-in | < 20 |
+"""
+
+
+def _answers(text, seen=None):
+    def run(argv, **kw):
+        if seen is not None:
+            seen.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"type": "result", "result": text}), stderr="")
+    return run
+
+
+def test_context_tables_read_as_parts():
+    parts = meter.standing_parts(CONTEXT)
+    assert ("category", "Skills", 1200) in parts and ("category", "Memory files", 30000) in parts
+    assert ("file", "/home/user/.claude/CLAUDE.md", 20000) in parts and ("file", "/work/app/CLAUDE.md", 10000) in parts
+    assert ("skill", "big", 1100) in parts and ("skill", "tiny", 20) in parts
+    assert not [p for p in parts if p[1] in ("Tokens", "mcp__docs__read", "Path", "Skill")]
+
+
+def test_a_standing_read_runs_no_hooks_and_saves_no_session(tmp_path):
+    db, seen = tmp_path / "m.sqlite3", []
+    assert meter.read_standing(tmp_path, db=db, now=100.0, run=_answers(CONTEXT, seen), env={"PATH": "/x"})
+    argv, kw = seen[0]
+    assert argv[:3] == ["claude", "-p", "/context"] and "--no-session-persistence" in argv and "--strict-mcp-config" in argv
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": True}
+    assert kw["cwd"] == str(tmp_path) and kw["env"] == {"PATH": "/x"} and kw["stdin"] == subprocess.DEVNULL
+    got = meter.standing(db=db)[str(tmp_path)]
+    assert got["at"] == 100.0 and ("file", "/work/app/CLAUDE.md", 10000) in got["parts"]
+
+
+def test_a_standing_read_that_says_nothing_keeps_nothing(tmp_path):
+    db = tmp_path / "m.sqlite3"
+
+    def refused(argv, **kw):
+        raise OSError("no such program")
+
+    def late(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    def broken(argv, **kw):
+        return subprocess.CompletedProcess(argv, 1, stdout="not json", stderr="")
+
+    assert meter.read_standing(tmp_path / "gone", db=db, run=_answers(CONTEXT)) is None
+    for run in (refused, late, broken, _answers("no tables here")):
+        assert meter.read_standing(tmp_path, db=db, run=run) is None
+    assert meter.standing(db=db) == {}
+
+
+def test_the_newest_standing_reading_of_a_folder_wins_and_old_ones_go(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    meter.read_standing(tmp_path, db=db, now=100.0, run=_answers(CONTEXT))
+    meter.read_standing(tmp_path, db=db, now=200.0, run=_answers(CONTEXT.replace("| 10k |", "| 7k |")))
+    assert ("file", "/work/app/CLAUDE.md", 7000) in meter.standing(db=db)[str(tmp_path)]["parts"]
+    assert ("file", "/work/app/CLAUDE.md", 10000) not in meter.standing(db=db)[str(tmp_path)]["parts"]
+    assert meter.prune(db=db, keep_days=1, now=86400 + 150.0)["standing"] > 0
+    assert meter.standing(db=db)[str(tmp_path)]["at"] == 200.0
+
+
+def test_carrying_prices_each_part_by_the_calls_of_its_folders(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    app, other, gone = tmp_path / "app", tmp_path / "other", tmp_path / "gone"
+    app.mkdir()
+    other.mkdir()
+    meter.read_standing(app, db=db, now=500.0, run=_answers(CONTEXT))
+    meter.read_standing(other, db=db, now=500.0, run=_answers(CONTEXT.replace("| Project | /work/app/CLAUDE.md | 10k |\n", "")))
+    conn = meter.connect(db)
+    opus, fable = "claude-opus-9", "claude-fable-9"
+    rows = [
+        # (id, session, at, model, input, output, read, write, subagent, cwd): the first call of a conversation pays the whole prefix
+        ("a1", "s-a", 1000.0, opus, 1, 10, 0, 100000, 0, str(app)),
+        ("a2", "s-a", 1010.0, opus, 1, 10, 100000, 500, 0, str(app)),
+        ("a3", "s-a", 1020.0, opus, 1, 10, 100500, 500, 0, str(app)),
+        ("h1", "s-a", 1030.0, opus, 1, 10, 0, 9000, 1, str(app)),
+        ("b1", "s-b", 1000.0, fable, 1, 10, 0, 80000, 0, str(other)),
+        ("c1", "s-c", 1000.0, opus, 1, 10, 900, 100, 0, str(gone)),
+        ("o1", "s-old", -2000000.0, opus, 1, 10, 900, 100, 0, str(app)),
+    ]
+    conn.executemany("INSERT INTO responses(message_id, session_id, at, model, input, output, cache_read, cache_write, subagent, cwd) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    assert meter.busiest_folders(db=db, days=1, now=2000.0, limit=2)[:1] == [str(app)]
+    got = meter.carrying(db=db, since=500.0, until=2000.0, now=2000.0)
+    assert (got["responses"], got["responses_read"]) == (5, 4)
+    by = {(p["kind"], p["name"]): p for p in got["parts"]}
+    # app: one call wrote it and two read it, on Opus. other: one call wrote it, on Fable
+    app_w, other_w = 12.5 * 5 + 2 * 5, 12.5 * 10
+    app_e, other_e = 1.25 + 2 * 0.1, 1.25
+    home = by[("file", "/home/user/.claude/CLAUDE.md")]
+    assert home["folders"] == {str(app): 20000, str(other): 20000}
+    assert home["weighted"] == 20000 * (app_w + other_w) and home["equivalents"] == 20000 * (app_e + other_e)
+    only = by[("file", "/work/app/CLAUDE.md")]
+    assert only["folders"] == {str(app): 10000} and only["weighted"] == 10000 * app_w
+    assert by[("skills", "Skills")]["tokens"] == 1200
+    # What a first call paid beyond the named parts: 100,001 less 31,200 in app and 80,001 less 21,200 in other. s-c's
+    # folder has no reading, so it is held against app, the busiest, which leaves 0. s-old is too old for either figure
+    assert (got["first_calls"], got["first_call"], got["rest"]) == (3, 80001, 58801)
+    assert by[("rest", "rest")]["folders"] == {str(app): 58801, str(other): 58801}
+    assert by[("rest", "rest")]["weighted"] == 58801 * (app_w + other_w)
+    assert got["carried"]["weighted"] == sum(p["weighted"] for p in got["parts"])
+    assert got["carried"]["equivalents"] == sum(p["equivalents"] for p in got["parts"])
+    assert got["parts"][0]["weighted"] == max(p["weighted"] for p in got["parts"])
+    assert got["folders"][str(app)] == {"at": 500.0, "responses": 3}
+    assert got["skills"][0] == ("big", 1100)
+
+
+def test_carrying_with_nothing_read_is_unknown_and_not_zero(tmp_path):
+    got = meter.carrying(db=tmp_path / "m.sqlite3", since=1.0, until=2.0)
+    assert got["parts"] == [] and got["rest"] is None and got["first_call"] is None and got["skills"] == []
+    assert got["responses_read"] == 0

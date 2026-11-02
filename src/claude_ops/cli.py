@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -277,6 +278,9 @@ def cmd_meter(a) -> int:
     if a.what == "prune":
         print(json.dumps(meter.prune()))
         return 0
+    if a.what == "standing":
+        print(json.dumps({"read": meter.read_standing(a.folder or os.getcwd()) is not None, **meter.carrying()}, indent=1))
+        return 0
     print(json.dumps(meter.report(since=time.time() - a.days * 86400), indent=1))
     return 0
 
@@ -432,7 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("meter", help="what each chat spends: keep the status line, read the transcripts, "
                                      "collect telemetry, report")
-    s.add_argument("what", choices=["statusline", "serve", "read", "env", "on", "prune", "report"])
+    s.add_argument("what", choices=["statusline", "serve", "read", "env", "on", "prune", "report", "standing"])
+    s.add_argument("--folder", help="standing: read what a chat started in this folder loads (default: this folder)")
     s.add_argument("--days", type=float, default=1.0, help="report over this many days, or read only files written "
                                                            "in them (0 reads every file)")
     s.add_argument("--port", type=int, default=4318)
