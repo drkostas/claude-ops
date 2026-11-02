@@ -368,7 +368,7 @@ event = cal.add("Team lunch", "2031-03-04T13:00", "2031-03-04T14:00", zone="Euro
 print(event["link"], event["minutes"], event["already"])
 ```
 
-The id comes from the title and the times, so a job that runs twice, or a retry after a failed answer whose insert did go through, leaves one event, and `already` says it was there before. An event a person has deleted comes back when it is asked for again. When the calendar holds something else under that id, for example an event a person has renamed or moved, `add` raises `NotConfirmed` and names the fields.
+The id comes from the title and the times, so a job that runs twice, or a retry after a failed answer whose insert did go through, leaves one event, and `already` says the insert met an event with that id that was already there. An event a person has deleted stays deleted, and `add` raises `NotConfirmed` naming its status, unless it is called with `revive=True`, for a job that knows the person asked for it again. `cal.can_write()` says whether the token's scopes, as Google reports them, let it add events at all. When the calendar holds something else under that id, for example an event a person has renamed or moved, `add` raises `NotConfirmed` and names the fields.
 
 `account` picks an entry from a token file that holds several accounts. `cal.last_like("lunch")` gives the newest earlier event matching some words, with its length in `minutes`, and `last_like_in({"work": cal, "home": other}, "lunch")` also says which account holds it, for a job that takes the calendar or the length from how the same thing went last time.
 

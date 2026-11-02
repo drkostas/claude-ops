@@ -30,6 +30,8 @@ from pathlib import Path
 from .accounts import retry_after_seconds
 
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+#: where Google says what an access token may do
+TOKEN_INFO = "https://oauth2.googleapis.com/tokeninfo"
 #: the answers worth asking again: Google failed, or it asks for fewer requests. A refusal stays one.
 ASKED_AGAIN = frozenset({429, 500, 502, 503, 504})
 #: the longest wait between tries, even when an answer's Retry-After names a longer one
@@ -119,3 +121,9 @@ class GoogleSession:
                 raise GoogleError(0, "the token answer held no access_token")
             self._access = out["access_token"]
         return self._access
+
+    def scopes(self) -> "frozenset[str]":
+        """The scopes Google says this session's access token holds, asked of Google, not read from the
+        token file, which can say more than was granted."""
+        url = TOKEN_INFO + "?" + urllib.parse.urlencode({"access_token": self.token()})
+        return frozenset((self._open(urllib.request.Request(url)).get("scope") or "").split())

@@ -105,13 +105,36 @@ def test_a_retry_after_a_failed_answer_does_not_double_the_event(tmp_path):
     assert len(google.events) == 1 and event["already"] is True
 
 
-def test_a_deleted_event_comes_back_when_it_is_asked_for_again(tmp_path):
+def test_a_deleted_event_stays_deleted_unless_it_is_revived(tmp_path):
     google = Google()
     cal = calendar(tmp_path, google)
     first = cal.add("Team lunch", START, END, zone="Europe/Paris")
     google.events[first["id"]]["status"] = "cancelled"
-    again = cal.add("Team lunch", START, END, zone="Europe/Paris")
+    with pytest.raises(NotConfirmed) as e:
+        cal.add("Team lunch", START, END, zone="Europe/Paris")
+    assert e.value.differs == ["status"] and google.events[first["id"]]["status"] == "cancelled"
+    assert "PUT" not in [r.get_method() for r in google.requests], "a person's delete stands"
+    again = cal.add("Team lunch", START, END, zone="Europe/Paris", revive=True)
     assert again["id"] == first["id"] and again["already"] is False and again["status"] == "confirmed"
+
+
+def test_can_write_asks_google_for_the_scopes(tmp_path):
+    class Scopes(Google):
+        def __init__(self, scope):
+            super().__init__()
+            self.scope = scope
+
+        def __call__(self, req, timeout=None):
+            if req.full_url.startswith("https://oauth2.googleapis.com/tokeninfo"):
+                self.requests.append(req)
+                return Answer({"scope": self.scope})
+            return super().__call__(req, timeout)
+    reader = Scopes("https://www.googleapis.com/auth/calendar.readonly openid")
+    assert calendar(tmp_path, reader).can_write() is False
+    assert "access_token=access-1" in reader.requests[-1].full_url
+    writer = Scopes("openid https://www.googleapis.com/auth/calendar.events")
+    assert calendar(tmp_path, writer).can_write() is True
+    assert calendar(tmp_path, writer).scopes() == {"openid", "https://www.googleapis.com/auth/calendar.events"}
 
 
 def test_two_spellings_of_one_time_are_the_same_moment(tmp_path):

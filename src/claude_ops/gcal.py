@@ -11,15 +11,14 @@ files a sign-in leaves on disk, and its token needs a scope that can write event
 
 `add` reads every event back by its id and raises `NotConfirmed` when the calendar holds something else.
 The id comes from the title and the times, so asking twice, or a retry after a failed answer whose insert
-did go through, gives the one event, with `already` true. An event a person has since deleted comes back
-when it is asked for again.
+did go through, gives the one event, with `already` true. An event a person has since deleted stays
+deleted: `add` raises `NotConfirmed` naming its status, unless it is told `revive=True`.
 
 `last_like` and `last_like_in` find the newest earlier event matching some words, for a job that takes
 the calendar or the length from how the same thing went last time.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import urllib.parse
@@ -35,6 +34,9 @@ API = "https://www.googleapis.com/calendar/v3/calendars/"
 LOOK_BACK_DAYS = 5 * 365
 #: the most events Google gives on one page
 PAGE = 250
+#: the scopes that let a token add events (the last one only to calendars the account owns)
+WRITE_SCOPES = frozenset({"https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events",
+                          "https://www.googleapis.com/auth/calendar.events.owned"})
 
 
 class NotConfirmed(Exception):
@@ -82,10 +84,9 @@ def _stamp(moment: dict) -> float:
 
 
 def event_id(title: str, start: dict, end: dict) -> str:
-    """Pure. The id an event with this title and these times gets, in the alphabet Google allows
+    """Pure. The id an event with this title and these times gets, inside the alphabet Google allows
     (0-9 and a-v), so the same event asked for twice has the same id."""
-    digest = hashlib.sha256(json.dumps([title, start, end], sort_keys=True).encode()).digest()
-    return base64.b32hexencode(digest).decode().lower().rstrip("=")
+    return hashlib.sha256(json.dumps([title, start, end], sort_keys=True).encode()).hexdigest()
 
 
 def view(event: dict) -> dict:
@@ -130,13 +131,20 @@ class Calendar(GoogleSession):
         """One event as Google gives it, a deleted one included (its `status` is "cancelled")."""
         return self._send("GET", self._url(calendar, "/" + urllib.parse.quote(event, safe="")))
 
+    def can_write(self) -> bool:
+        """Whether this account's token may add events, from the scopes Google says it holds."""
+        return bool(self.scopes() & WRITE_SCOPES)
+
     def add(self, title: str, start: str, end: str, *, zone: "str | None" = None, location: "str | None" = None,
-            calendar: str = "primary") -> dict:
+            calendar: str = "primary", revive: bool = False) -> dict:
         """Put an event on the calendar and read it back. `start` and `end` are ISO times (with an offset,
         or naming `zone`) or ISO days, where a whole-day event's `end` is the day after its last, as Google
-        counts it. Returns `view` of the event with `already` true when it was there before this call.
-        Raises ValueError before any request for times that cannot be an event, GoogleError for a refusal,
-        and NotConfirmed when the calendar holds something else, for example an event a person has moved."""
+        counts it. Returns `view` of the event with `already` true when the insert met an event with its id
+        that was already there (from an earlier call, or from an earlier try of this one whose answer was
+        lost). An event with that id that a person deleted stays deleted and raises NotConfirmed naming
+        "status", unless `revive` is true, which puts it back. Raises ValueError before any request for
+        times that cannot be an event, GoogleError for a refusal, and NotConfirmed when the calendar holds
+        something else, for example an event a person has moved."""
         first, last = _moment(start, zone), _moment(end, zone)
         if _is_day(start) != _is_day(end):
             raise ValueError("start and end must both be days or both be times")
@@ -153,6 +161,8 @@ class Calendar(GoogleSession):
             already = True
         event = self.get(asked["id"], calendar=calendar)
         if event.get("status") == "cancelled":
+            if not revive:
+                raise NotConfirmed(event, ["status"])
             self._send("PUT", self._url(calendar, "/" + asked["id"]), {**asked, "status": "confirmed"})
             event, already = self.get(asked["id"], calendar=calendar), False
         differs = _differs(event, asked)
