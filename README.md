@@ -356,6 +356,22 @@ A request Google fails (a 5xx) or asks to slow down (a 429) is asked again up to
 
 The `chat-watcher` skill explains the full pattern to Claude, including the launchd file.
 
+## Add an event to a Google calendar
+
+`claude_ops.gcal.Calendar` puts an event on a calendar from a job and reads it back by its id. It takes the same two files as the mailbox above, so the job needs no browser and no Google client library, and the token needs a scope that can write events:
+
+```python
+from claude_ops.gcal import Calendar, last_like_in
+
+cal = Calendar("/path/to/tokens.json", "/path/to/credentials.json", account="work")
+event = cal.add("Team lunch", "2031-03-04T13:00", "2031-03-04T14:00", zone="Europe/Paris", location="Cafe")
+print(event["link"], event["minutes"], event["already"])
+```
+
+The id comes from the title and the times, so a job that runs twice, or a retry after a failed answer whose insert did go through, leaves one event, and `already` says it was there before. An event a person has deleted comes back when it is asked for again. When the calendar holds something else under that id, for example an event a person has renamed or moved, `add` raises `NotConfirmed` and names the fields.
+
+`account` picks an entry from a token file that holds several accounts. `cal.last_like("lunch")` gives the newest earlier event matching some words, with its length in `minutes`, and `last_like_in({"work": cal, "home": other}, "lunch")` also says which account holds it, for a job that takes the calendar or the length from how the same thing went last time.
+
 ## Run something at a weekday time in a time zone
 
 `claude_ops.cron` reads a cron schedule in a named zone, so a loop that already runs every minute
