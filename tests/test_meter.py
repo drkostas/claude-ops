@@ -413,3 +413,32 @@ def test_per_call_around_says_nothing_across_a_model_change(tmp_path):
     conn.close()
     got = meter.per_call_around("s-1", NOW, calls=2, db=db)
     assert got["change"] is None and got["before"] > got["after"] and got["calls_after"] == 2
+
+
+def test_a_chats_day_is_its_own_curve_and_each_side_of_its_spend(tmp_path):
+    f = tmp_path / "a.jsonl"
+    f.write_bytes(b"".join([
+        _said("before", "2027-01-15T07:00:00Z", 1, 900000, 100, 500),
+        _said("one", "2027-01-15T09:00:00Z", 1, 1000, 2000, 100),
+        _said("two", "2027-01-15T09:01:00Z", 1, 3000, 500, 100),
+    ]))
+    db = tmp_path / "m.sqlite3"
+    conn = meter.connect(db)
+    meter.read_file(conn, f)
+    at = conn.execute("SELECT at FROM responses WHERE message_id = 'two'").fetchone()[0]
+    conn.execute("INSERT INTO responses(message_id, session_id, at, model, input, output, cache_read, cache_write, subagent) "
+                 "VALUES ('helper', 's-1', ?, 'claude-opus-9', 1, 10, 500000, 0, 1)", (at + 1,))
+    conn.execute("INSERT INTO compactions(session_id, at) VALUES ('s-1', ?)", (at + 2,))
+    conn.execute("INSERT INTO compactions(session_id, at) VALUES ('s-1', ?)", (at - 86400,))
+    conn.commit()
+    conn.close()
+
+    day = meter.chat_day("s-1", db=db, since=at - 3600, until=at + 3600)
+    assert [p for _, p in day["curve"]] == [3001, 3501], "only the chat's own calls in the window, the subagent's left out"
+    assert day["compactions"] == [at + 2], "a compaction outside the window is left out"
+    assert (day["chat"]["responses"], day["subagents"]["responses"]) == (2, 1)
+    assert day["subagents"]["weighted"] > 0 and day["chat"]["weighted"] > 0, "each side has its own spend"
+    assert day["growth"]["prompt"] == 3501, "the same reading as meter.growth"
+
+    empty = meter.chat_day("nobody", db=db, since=at - 3600, until=at + 3600)
+    assert empty["curve"] == [] and empty["compactions"] == [] and empty["chat"]["responses"] == 0 and empty["growth"] is None
