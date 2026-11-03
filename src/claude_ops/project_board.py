@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -53,10 +54,22 @@ LABEL_COLOR = "ededed"
 #: once it has written the body ("cannot retry err [stream error: ... REFUSED_STREAM ...] after
 #: Request.Body was written").
 REFUSED_STREAM = "REFUSED_STREAM"
-#: how many times a refused request is sent in all, and the seconds waited before each new try, times
-#: its number
+#: what gh prints when GitHub's front end answered for a server that did not. A read is sent again on
+#: any of the three. A write is sent again only on a 503 ("No server is currently available to service
+#: your request"), which no server took: after a 502 or a 504 the write may have been made, and making
+#: some of them twice (a new issue) cannot be undone.
+UNAVAILABLE = re.compile(r"\bHTTP 50[234]\b")
+UNAVAILABLE_WRITE = re.compile(r"\bHTTP 503\b")
+#: how many times a refused or unserved request is sent in all, and the seconds waited before each new
+#: try, times its number
 REFUSED_TRIES = 3
 REFUSED_WAIT = 2.0
+
+
+def _try_again(stderr: str, write: bool) -> bool:
+    """Whether a failed request may be sent again: one GitHub refused or no server took, and a read
+    GitHub's own servers failed to answer."""
+    return REFUSED_STREAM in stderr or bool((UNAVAILABLE_WRITE if write else UNAVAILABLE).search(stderr))
 
 
 class BoardError(RuntimeError):
@@ -129,7 +142,7 @@ class Board:
         request = json.dumps({"query": query, "variables": variables or {}})
         for attempt in range(1, REFUSED_TRIES + 1):
             out = self._gh(["api", "graphql", "--input", "-"], request)
-            if out.returncode == 0 or REFUSED_STREAM not in (out.stderr or "") or attempt == REFUSED_TRIES:
+            if out.returncode == 0 or attempt == REFUSED_TRIES or not _try_again(out.stderr or "", write):
                 break
             self.sleep(REFUSED_WAIT * attempt)
         try:

@@ -343,13 +343,57 @@ def test_a_stream_refused_every_time_is_an_error_after_the_last_try():
     assert waits == [project_board.REFUSED_WAIT * n for n in range(1, project_board.REFUSED_TRIES)]
 
 
-def test_any_other_failure_is_not_sent_again():
-    calls = []
+UNSERVED = ("gh: No server is currently available to service your request. Sorry about that. Please try "
+            "resubmitting your request and contact us if the problem persists. (HTTP 503)")
+
+
+def failing(*errors, then=None):
+    """A gh that fails with each of `errors` in turn and then answers `then` (an empty reply)."""
+    calls, left = [], list(errors)
 
     def gh(args, stdin=None):
-        calls.append(args)
-        return run(1, "", "HTTP 502: Bad Gateway")
+        calls.append(stdin)
+        if left:
+            return run(1, "", left.pop(0))
+        return then(args, stdin) if then else run(0, json.dumps({"data": {}}))
+    return gh, calls
+
+
+def test_a_read_github_did_not_answer_is_sent_again():
+    gh, waits = FakeGitHub(), []
+    flaky, calls = failing("gh: HTTP 504", UNSERVED, then=gh)
+    project = board(flaky, sleep=waits.append).ensure()
+    assert project["number"] and [w for w in waits if w] == [project_board.REFUSED_WAIT,
+                                                            project_board.REFUSED_WAIT * 2]
+    assert gh.ops[0] == "repository"          # the third try reached GitHub
+    assert calls[0] == calls[1] == calls[2]
+
+
+def test_a_read_github_never_answers_is_an_error_after_the_last_try():
+    gh, calls = failing(*["HTTP 502: Bad Gateway"] * project_board.REFUSED_TRIES)
     with pytest.raises(BoardError, match="502"):
+        board(gh, sleep=lambda s: None).ensure()
+    assert len(calls) == project_board.REFUSED_TRIES
+
+
+@pytest.mark.parametrize("error", ["HTTP 502: Bad Gateway", "gh: HTTP 504"])
+def test_a_write_is_not_sent_again_after_a_gateway_error(error):
+    # GitHub may have made it before the gateway gave up, and a second createIssue is a second issue
+    gh, calls = failing(error)
+    with pytest.raises(BoardError, match=error.split(":")[-1].strip()):
+        board(gh, sleep=lambda s: None).graphql("mutation { x }", write=True)
+    assert len(calls) == 1
+
+
+def test_a_write_no_server_took_is_sent_again():
+    gh, calls = failing(UNSERVED)
+    assert board(gh, sleep=lambda s: None).graphql("mutation { x }", write=True) == {}
+    assert len(calls) == 2
+
+
+def test_any_other_failure_is_not_sent_again():
+    gh, calls = failing("HTTP 401: Bad credentials", "HTTP 500: x")
+    with pytest.raises(BoardError, match="401"):
         board(gh, sleep=lambda s: None).ensure()
     assert len(calls) == 1
 
