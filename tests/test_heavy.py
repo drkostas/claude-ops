@@ -368,3 +368,128 @@ def test_heavy_queue(monkeypatch):
     check("slot: free" in st, "and the slot is free after it")
 
     assert not failures, failures
+
+
+def test_heavy_hook(monkeypatch):
+    """HEAVY_HOOK is told asked, admitted, released and withdrawn, and never holds up a job."""
+    failures = []
+    for k in [k for k in os.environ if k.startswith("HEAVY_")]:
+        monkeypatch.delenv(k)
+    STATE = Path(tempfile.mkdtemp(prefix="heavy-hook-test-"))
+    told = STATE / "hook.txt"
+    fake = STATE / "hook.sh"
+    fake.write_text(f'printf "%s|" "$@" >> {told}; echo >> {told}\n')
+
+    def check(cond, msg):
+        if not cond:
+            failures.append(msg)
+
+    def env(**extra):
+        e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+             "HEAVY_DIR": str(STATE), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_POLL": "0.2", "PYTHONPATH": SRC,
+             "HEAVY_HOOK": f"bash {fake}"}
+        e.update(extra)
+        return e
+
+    def heavy(*args, timeout=60, **extra):
+        r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", *args], capture_output=True,
+                           text=True, timeout=timeout, env=env(**extra))
+        return r.returncode, r.stdout + r.stderr
+
+    def start(*args, **extra):
+        return subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", *args], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, env=env(**extra))
+
+    def lines():
+        got = told.read_text().splitlines() if told.exists() else []
+        told.unlink(missing_ok=True)
+        return [ln.rstrip("|").split("|") for ln in got]
+
+    def wait_for(cond, s=20):
+        t0 = time.time()
+        while time.time() - t0 < s and not cond():
+            time.sleep(0.1)
+        return cond()
+
+    # --- a job it runs: asked, admitted, released, all for the same pid ---------------------------
+    rc, out = heavy("h-chat", "job one", "--", "true")
+    got = lines()
+    check(rc == 0 and [g[:3] for g in got] == [["asked", "h-chat", "job one"], ["admitted", "h-chat", "job one"],
+                                                ["released", "h-chat", "job one"]]
+          and len({g[3] for g in got}) == 1, f"⭐ a job it runs is asked, admitted and released, in that order: {got}")
+
+    # --- a hold for a process that already runs, and its release -----------------------------------
+    worker = subprocess.Popen(["sleep", "60"])
+    rc, _ = heavy("hold", "ci-runner", "CI job", "--pid", str(worker.pid))
+    got = lines()
+    check(rc == 0 and got == [["asked", "ci-runner", "CI job", str(worker.pid)],
+                              ["admitted", "ci-runner", "CI job", str(worker.pid)]],
+          f"a hold is asked and admitted for the pid it holds for, not the waiter's: {got}")
+    heavy("release", "--pid", str(worker.pid))
+    heavy("release", "--pid", str(worker.pid))
+    got = lines()
+    check(got == [["released", "ci-runner", "CI job", str(worker.pid)]],
+          f"⭐ and released once, however many times it is given back: {got}")
+
+    # --- a waiter that stops without the slot is withdrawn -------------------------------------------
+    heavy("hold", "ci-runner", "first", "--pid", str(worker.pid))
+    lines()
+    second = subprocess.Popen(["sleep", "60"])
+    waiter = start("hold", "other", "second", "--pid", str(second.pid))
+    check(wait_for(lambda: told.exists() and "asked|other|second" in told.read_text()), "the second waiter asks")
+    second.kill()
+    second.wait()
+    out = waiter.communicate(timeout=30)[0]
+    got = lines()
+    check(waiter.returncode == 1 and got == [["asked", "other", "second", str(second.pid)],
+                                              ["withdrawn", "other", "second", str(second.pid)]],
+          f"⭐ a waiter whose holder ended is withdrawn: {got} {out[-80:]!r}")
+    third = subprocess.Popen(["sleep", "60"])
+    waiter = start("hold", "other", "third", "--pid", str(third.pid))
+    check(wait_for(lambda: told.exists() and "asked|other|third" in told.read_text()), "the third waiter asks")
+    waiter.terminate()
+    waiter.communicate(timeout=30)
+    got = lines()
+    check(got[-1:] == [["withdrawn", "other", "third", str(third.pid)]],
+          f"and so is a waiter that was stopped, as a CI hook stops one that waited too long: {got}")
+    third.kill()
+    heavy("release", "--pid", str(worker.pid))
+    worker.kill()
+    lines()
+
+    # --- a job past its turn is released when it ends --------------------------------------------------
+    for k, v in {"HEAVY_DIR": str(STATE), "HEAVY_HOOK": f"bash {fake}"}.items():
+        monkeypatch.setenv(k, v)
+    sys.modules.pop("claude_ops.heavy", None)
+    from claude_ops import heavy as h
+    h.PAST.mkdir(parents=True, exist_ok=True)
+    (h.PAST / "424242.json").write_text(json.dumps({"chat": "p-chat", "what": "long job", "pid": 424242}))
+    check(h.release(424242) is False and lines() == [["released", "p-chat", "long job", "424242"]]
+          and not (h.PAST / "424242.json").exists(),
+          "a job past its turn holds no slot, and is still released when it ends")
+
+    # --- a job inside a heavy job takes no slot and tells nothing ------------------------------------
+    inner = f"{sys.executable} -m claude_ops.heavy h-chat inner -- true"
+    rc, out = heavy("h-chat", "outer", "--", "bash", "-c", inner)
+    got = lines()
+    check(rc == 0 and [g[:3] for g in got] == [["asked", "h-chat", "outer"], ["admitted", "h-chat", "outer"],
+                                                ["released", "h-chat", "outer"]],
+          f"a job run inside a heavy job tells nothing: {got}")
+
+    # --- a hook that fails or hangs never holds up a job ------------------------------------------------
+    bad = STATE / "bad.sh"
+    bad.write_text("echo nobody home >&2; exit 3\n")
+    rc, out = heavy("h-chat", "job two", "--", "bash", "-c", "echo ran-anyway", HEAVY_HOOK=f"bash {bad}")
+    check(rc == 0 and "ran-anyway" in out and out.count("was not told") == 1 and "nobody home" in out,
+          f"⭐ a hook that fails is said once, and the job runs: {out.strip()[-200:]!r}")
+    slow = STATE / "slow.sh"
+    slow.write_text("sleep 30\n")
+    t0 = time.time()
+    rc, out = heavy("h-chat", "job three", "--", "true", HEAVY_HOOK=f"bash {slow}", HEAVY_HOOK_TIMEOUT="0.3")
+    check(rc == 0 and time.time() - t0 < 15 and "longer than 0.3 s" in out,
+          f"and one that hangs is left behind after HEAVY_HOOK_TIMEOUT ({time.time() - t0:.1f} s): {out.strip()[-120:]!r}")
+    rc, out = heavy("h-chat", "job four", "--", "true", HEAVY_HOOK="")
+    check(rc == 0 and not told.exists() and "HEAVY_HOOK" not in out, "without HEAVY_HOOK nobody is told and nothing is said")
+
+    assert not failures, "\n".join(failures)
+

@@ -273,7 +273,9 @@ slot up after its turn (`HEAVY_TURN_MIN`, 60) while it keeps running. A CI runne
 for a job's worker and `release` it. `--notify` runs `HEAVY_NOTIFY` with the chat's name and a line
 saying how the job ended and what it took. A job that fails the same way three times in a row
 (over the cap, at its `--max-hold`, or with one exit code) says so, and `status` lists it, so a
-caller that retries a failing job is noticed. Every caller must share `HEAVY_DIR`. macOS only.
+caller that retries a failing job is noticed. `HEAVY_HOOK` names a command told when a job is
+asked, admitted, released or withdrawn, for a machine whose other work is queued somewhere else.
+Every caller must share `HEAVY_DIR`. macOS only.
 
 ## Start chats inside tmux
 

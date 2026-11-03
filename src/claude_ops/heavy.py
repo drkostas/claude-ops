@@ -57,6 +57,16 @@ given HEAVY_HELD, and a caller whose ancestor holds the slot (a step of a CI job
 runner can hold the slot for a job from its job-started hook (`hold ... --pid <worker>`) to its
 job-completed hook (`release`), and a worker that dies frees it.
 
+ANOTHER RECORD OF THE MACHINE'S JOBS. A machine whose other work is queued somewhere else (a
+scheduler that also gives out test slots, say) needs to know when a heavy job waits and when it runs,
+so a running heavy job can count against that work too. HEAVY_HOOK names a command that is run with
+the event, the chat, the job and the pid that holds or would hold the slot appended: `asked` when a
+job starts to wait, `admitted` when it takes the slot, `released` when it gives back a slot it held
+(or ends after it was past its turn), and `withdrawn` when it stops waiting without the slot (its
+holder ended, or the waiter was stopped). A job run inside another heavy job tells nothing, since it
+takes no slot. The hook is told and never asked: it runs for at most HEAVY_HOOK_TIMEOUT seconds (5),
+and a hook that fails, hangs or is missing never holds up or stops a job. The first failure is said.
+
 The state lives in HEAVY_DIR (/tmp/claude-ops-heavy). Every caller on the machine must use the same.
 macOS only: the memory readings come from vm_stat, sysctl and proc_pid_rusage.
 """
@@ -111,6 +121,8 @@ OWN_LIMIT_NOTE_MIN = _num("HEAVY_OWN_LIMIT_NOTE_MIN", 60)
 REPEAT_FAILS = int(_num("HEAVY_REPEAT_FAILS", 3))
 #: how far back `status` and failing() look for such a run of failures
 REPEAT_HOURS = _num("HEAVY_REPEAT_HOURS", 24)
+#: how long the HEAVY_HOOK command may take before it is left behind
+HOOK_TIMEOUT = _num("HEAVY_HOOK_TIMEOUT", 5)
 #: what the system tools need, and nothing from the caller's environment
 TOOLS_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin"}
 
@@ -286,6 +298,8 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
     """Wait for this caller's turn, then take the slot for `holder_pid`. False when `holder_pid`
     ended while it waited (a CI worker that was cancelled)."""
     ticket = _ticket(chat, what, holder_pid)
+    hook("asked", chat, what, holder_pid)
+    took = False
     said = ""
     # A limit out of reach is said, once: a job that asks for more free memory than the machine
     # ever has would otherwise wait for hours with only its first waiting line. While its own limits
@@ -337,6 +351,8 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
                      "at": time.time(), "session": _session()}))
                 LAST.mkdir(parents=True, exist_ok=True)
                 (LAST / chat).touch()
+                took = True
+                hook("admitted", chat, what, holder_pid)
                 return True
             if not why:
                 h = holder()
@@ -350,14 +366,26 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
             time.sleep(POLL)
     finally:
         ticket.unlink(missing_ok=True)
+        if not took:
+            hook("withdrawn", chat, what, holder_pid)
 
 
 def release(pid: int) -> bool:
-    (PAST / f"{pid}.json").unlink(missing_ok=True)     # a job past its turn holds nothing to give back
+    """Give back the slot `pid` holds. True when it held it. A job past its turn holds nothing to give
+    back, and its record goes; the HEAVY_HOOK command is told `released` in both cases, once."""
+    past = PAST / f"{pid}.json"
+    try:
+        was = json.loads(past.read_text())
+    except (OSError, ValueError):
+        was = None
+    past.unlink(missing_ok=True)
     h = holder()
     if h is not None and int(h["pid"]) == pid:
         shutil.rmtree(SLOT, ignore_errors=True)
+        hook("released", h.get("chat", ""), h.get("what", ""), pid)
         return True
+    if was is not None:
+        hook("released", was.get("chat", ""), was.get("what", ""), pid)
     return False
 
 
@@ -676,6 +704,33 @@ def status() -> int:
 USAGE = ("usage: claude-ops heavy <chat> <what> [--max-hold <minutes>] [--notify] -- <command...> |"
          " claude-ops heavy hold <chat> <what> --pid <pid> |"
          " claude-ops heavy release --pid <pid> | claude-ops heavy status")
+
+
+_hook_said = [False]
+
+
+def hook(event: str, chat: str, what: str, pid: int) -> bool:
+    """Tell the HEAVY_HOOK command that this job was `asked`, `admitted`, `released` or `withdrawn`,
+    with the chat, the job and the pid that holds or would hold the slot. Without HEAVY_HOOK nobody is
+    told. It is only told: a hook that fails, hangs past HOOK_TIMEOUT or cannot start returns False
+    and the job goes on, and the first such failure in a process is said."""
+    cmd = os.environ.get("HEAVY_HOOK", "").split()
+    if not cmd:
+        return False
+    why = ""
+    try:
+        r = subprocess.run([*cmd, event, chat, what, str(pid)], capture_output=True, text=True,
+                           timeout=HOOK_TIMEOUT)
+        if r.returncode != 0:
+            why = f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[-160:]}"
+    except subprocess.TimeoutExpired:
+        why = f"it took longer than {HOOK_TIMEOUT:g} s"
+    except (OSError, subprocess.SubprocessError) as e:
+        why = str(e)
+    if why and not _hook_said[0]:
+        _hook_said[0] = True
+        say(f"the HEAVY_HOOK command was not told that {what} was {event} ({why}); the job goes on")
+    return not why
 
 
 def _quit(signum, _frame):
