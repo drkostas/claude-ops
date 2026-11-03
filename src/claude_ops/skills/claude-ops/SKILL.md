@@ -522,7 +522,9 @@ needs more. Give a job that should end by itself `--max-hold <minutes>`. With `-
 `HEAVY_NOTIFY` command, the result reaches the chat instead of a polling loop. `claude-ops heavy
 status` says who holds the slot and who waits, and why. A job that fails the same way three times in a row (`HEAVY_REPEAT_FAILS`)
 says so with `AGAIN:`, and `status` lists it under "failing the same way": fix the cause (often the
-cap it needs) before it runs again.
+cap it needs) before it runs again. When the machine also queues other work elsewhere (test slots, say),
+set `HEAVY_HOOK` to a command that records each job as asked, admitted, released or withdrawn, so a
+running heavy job counts against that work too. The hook never holds up a job.
 
 ## Tell chats apart in a shared window by tab color
 
