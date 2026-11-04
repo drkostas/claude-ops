@@ -105,3 +105,48 @@ def test_peer_online_is_none_when_it_cannot_be_told():
         raise FileNotFoundError(argv[0])
     assert ssh.peer_online("host", run=broken) is None
     assert ssh.peer_online("host", run=lambda argv, **k: subprocess.CompletedProcess(argv, 0, "", "")) is None
+
+
+def _said(code, err, seen=None):
+    def run(argv, **k):
+        if seen is not None:
+            seen.append((argv, k))
+        return subprocess.CompletedProcess(argv, code, "", err)
+    return run
+
+
+def test_greet_asks_with_no_command_and_never_prompts():
+    seen = []
+    r = ssh.greet("git@example.org", env={"PATH": "/bin"},
+                  run=_said(1, "Hi user! You've successfully authenticated, but there is no shell access.\n", seen))
+    argv, k = seen[0]
+    assert argv[:2] == ["ssh", "-T"] and "BatchMode=yes" in argv and argv[-1] == "git@example.org"
+    assert k["stdin"] is subprocess.DEVNULL and k["env"] == {"PATH": "/bin"}
+    assert r.returncode == 1 and "successfully authenticated" in r.stderr
+
+
+def test_greet_passes_on_a_refusal_with_its_words():
+    r = ssh.greet("git@example.org", run=_said(255, "git@example.org: Permission denied (publickey).\n"))
+    assert r.returncode == ssh.UNREACHABLE and "Permission denied (publickey)" in r.stderr
+
+
+@pytest.mark.parametrize("exc", [subprocess.TimeoutExpired("ssh", 1), FileNotFoundError("ssh")])
+def test_greet_that_cannot_finish_comes_back_as_255_never_raised(exc):
+    def broken(argv, **k):
+        raise exc
+    r = ssh.greet("git@example.org", run=broken)
+    assert r.returncode == ssh.UNREACHABLE and type(exc).__name__ in r.stderr
+
+
+def test_identity_files_in_ssh_order_with_home_expanded(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/u")
+    out = "user git\nidentityfile ~/.ssh/id_ed25519\nidentityfile /keys/other\nport 22\n"
+    files = ssh.identity_files("example.org", run=lambda argv, **k: subprocess.CompletedProcess(argv, 0, out, ""))
+    assert files == ["/home/u/.ssh/id_ed25519", "/keys/other"]
+
+
+def test_identity_files_is_empty_when_ssh_cannot_say():
+    def broken(argv, **k):
+        raise FileNotFoundError(argv[0])
+    assert ssh.identity_files("example.org", run=broken) == []
+    assert ssh.identity_files("example.org", run=lambda argv, **k: subprocess.CompletedProcess(argv, 255, "", "bad")) == []
