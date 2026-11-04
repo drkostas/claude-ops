@@ -26,7 +26,9 @@ without a person, and a real conflict still stops it:
   refused.
 - in a Python file, a union that defines a top-level name twice (def, class, or NAME =) where
   neither side did is refused: the later copy would silently win. Each side is the measure, not
-  zero, so a file that defines a name twice on purpose still settles.
+  zero, so a file that defines a name twice on purpose still settles. The same holds for a key a
+  dict display (`{...}`) repeats, set files included: two branches that each changed or added the
+  same entry would both be kept, and Python keeps only the last.
 - anything else, a block that changes a line both sides had, exits 1 so the caller aborts the
   rebase and a person resolves it.
 
@@ -119,6 +121,32 @@ def defined_twice(result: str, ours: str | None, theirs: str | None) -> list[str
         raise Refused("the kept result is not valid Python")
     sides = [top_names(s) or Counter() for s in (ours, theirs) if s is not None]
     return sorted(n for n, k in got.items() if k > 1 and all(s[n] < 2 for s in sides))
+
+
+def keys_repeated(text: str) -> Counter | None:
+    """Pure. For each constant key that some dict display (`{...}`) in a Python file holds more than once,
+    how many extra times, summed over the file; None when it does not parse."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    seen: Counter = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            keys = Counter(repr(k.value) for k in node.keys if isinstance(k, ast.Constant))
+            seen.update({k: n - 1 for k, n in keys.items() if n > 1})
+    return seen
+
+
+def repeated_keys(result: str, ours: str | None, theirs: str | None) -> list[str]:
+    """Pure. The keys a dict display in the union repeats more often than either side does: each
+    side's entry for one key kept, of which Python keeps only the last. A result that does not parse
+    is refused as a whole."""
+    got = keys_repeated(result)
+    if got is None:
+        raise Refused("the kept result is not valid Python")
+    sides = [keys_repeated(s) or Counter() for s in (ours, theirs) if s is not None]
+    return sorted(k for k, n in got.items() if all(n > s[k] for s in sides))
 
 
 _GONE = object()          # a key one side does not have
@@ -218,6 +246,9 @@ def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tu
                         ast.parse(settled[f])
                     except SyntaxError as e:
                         raise Refused(f"the merged set does not parse ({e.msg}, line {e.lineno})") from None
+                    keys = repeated_keys(settled[f], ours, theirs)
+                    if keys:
+                        raise Refused(f"the merged set holds the key {', '.join(keys)} twice in one dict")
             elif f.endswith(".json"):
                 ours, theirs = _stage(wt, 2, f, env), _stage(wt, 3, f, env)
                 if ours is None or theirs is None:
@@ -229,6 +260,9 @@ def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tu
                     twice = defined_twice(settled[f], _stage(wt, 2, f, env), _stage(wt, 3, f, env))
                     if twice:
                         raise Refused(f"keeping both sides defines {', '.join(twice)} twice")
+                    keys = repeated_keys(settled[f], _stage(wt, 2, f, env), _stage(wt, 3, f, env))
+                    if keys:
+                        raise Refused(f"keeping both sides holds the key {', '.join(keys)} twice in one dict")
         except Refused as e:
             settled.pop(f, None)
             refused.append(f)
