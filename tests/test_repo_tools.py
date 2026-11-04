@@ -82,6 +82,32 @@ def test_union_refuses_a_name_defined_twice(tmp_path, capsys):
     assert union.defined_twice("H = 1\nH = 2\nX = 3\n", "H = 1\nH = 2\n", "H = 1\nH = 2\nX = 3\n") == []
 
 
+def test_union_refuses_a_key_both_sides_added_to_one_dict(tmp_path, capsys):
+    d = rebasing(tmp_path, {"r.py": REASONS},
+                 {"r.py": REASONS.replace('"first",\n', '"first",\n    "m": "upstream",\n')},
+                 {"r.py": REASONS.replace('"first",\n', '"first",\n    "m": "branch",\n')})
+    assert union.settle_tree(d, env=ENV) == 1
+    assert "'m' twice in one dict" in capsys.readouterr().err
+    assert "<<<<<<<" in (d / "r.py").read_text()
+
+
+def test_union_set_refuses_one_entry_both_sides_changed(tmp_path, capsys):
+    why = 'WHY = {\n    "a": "first",\n    "b": "second",\n}\n'
+    d = rebasing(tmp_path, {"why.py": why}, {"why.py": why.replace('"first"', '"first, upstream"')},
+                 {"why.py": why.replace('"first"', '"first, branch"')})
+    assert union.settle_tree(d, sets=("why.py",), env=ENV) == 1
+    assert "'a' twice in one dict" in capsys.readouterr().err
+
+
+def test_union_repeated_keys_measures_each_side():
+    twice = 'X = {\n    "a": 1,\n    "a": 2,\n}\n'
+    assert union.repeated_keys(twice, twice, 'X = {\n    "a": 1,\n}\n') == []
+    assert union.repeated_keys(twice, 'X = {\n    "a": 1,\n}\n', 'X = {\n    "a": 2,\n}\n') == ["'a'"]
+    assert union.repeated_keys('X = {"a": 1}\nY = {"a": 2}\n', None, None) == []
+    with pytest.raises(union.Refused):
+        union.repeated_keys("X = {\n", None, None)
+
+
 DEBT = "DEBT = [\n    (\"a.py\", \"f\"),\n    (\"b.py\", \"g\"),\n    (\"c.py\", \"h\"),\n]\n"
 
 
