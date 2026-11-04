@@ -48,6 +48,9 @@ def test_merges_squashes_and_direct_commits_oldest_first(repo):
         "#7 Read the config once", "#8 Fix the parser", "a commit pushed straight to main",
         "#9 Retry on a timeout"]
     assert got[0].branch == "owner/first" and got[2].number is None
+    stamps = git(repo, "log", "--first-parent", "--format=%cI", f"{start}..HEAD").splitlines()
+    assert [c.committed for c in got] == list(reversed(stamps))
+    assert all(changelog.ISO_TIME.match(c.committed) for c in got)
 
 
 def test_an_empty_range_and_an_unknown_commit(repo):
@@ -59,7 +62,19 @@ def test_an_empty_range_and_an_unknown_commit(repo):
 def test_a_merge_with_no_body_is_named_by_its_branch():
     log = f"abc{changelog.FIELD}Merge pull request #3 from owner/topic{changelog.FIELD}{changelog.RECORD}"
     (c,) = changelog.parse(log)
-    assert (c.number, c.title) == (3, "owner/topic")
+    assert (c.number, c.title, c.committed) == (3, "owner/topic", None)
+
+def test_the_commit_time_is_read_when_the_log_carries_it():
+    F, R = changelog.FIELD, changelog.RECORD
+    log = (f"abc{F}Merge pull request #3 from owner/topic{F}Read it once{F}2026-01-02T03:04:05+02:00{R}"
+           f"def{F}Fix the parser (#4){F}{F}2026-01-02T04:00:00Z{R}"
+           f"0aa{F}pushed straight{F}a body{F}with a separator{F}2026-01-03T00:00:00-05:00{R}"
+           f"0bb{F}an older log{F}no time here{R}")
+    a, b, c, d = changelog.parse(log)
+    assert (a.number, a.title, a.committed) == (3, "Read it once", "2026-01-02T03:04:05+02:00")
+    assert (b.number, b.title, b.committed) == (4, "Fix the parser", "2026-01-02T04:00:00Z")
+    assert (c.title, c.committed) == ("pushed straight", "2026-01-03T00:00:00-05:00")
+    assert (d.title, d.committed) == ("an older log", None)
 
 
 def test_web_url():
@@ -72,5 +87,6 @@ def test_cli(repo, capsys):
     start = git(repo, "rev-parse", "HEAD")
     pull_request(repo, 4, "x", "Add the export")
     assert changelog.main([start, "HEAD", "--repo", str(repo), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)[0]["title"] == "Add the export"
+    first = json.loads(capsys.readouterr().out)[0]
+    assert first["title"] == "Add the export" and changelog.ISO_TIME.match(first["committed"])
     assert changelog.main(["nope", "HEAD", "--repo", str(repo)]) == 2

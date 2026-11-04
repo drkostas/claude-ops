@@ -11,6 +11,9 @@ commits inside each pull request) and reads each one the way the host wrote it:
 - anything else (a commit pushed straight to the branch, a merge of another branch) by its subject,
   with no number
 
+Each change also carries its commit time. For the host's merge commit that is when the pull request
+was merged, so a deploy can say how long each change waited between its merge and the deploy.
+
     claude-ops changelog v1.2.0 HEAD                 # one line per change, oldest first
     claude-ops changelog 4f1c2e0 origin/main --repo ~/src/app --json
 """
@@ -29,6 +32,8 @@ MERGE = re.compile(r"^Merge pull request #(\d+) from (\S+)")
 SQUASH = re.compile(r"^(.*\S)\s+\(#(\d+)\)$")
 #: between fields and between records of the git log format below
 FIELD, RECORD = "\x1f", "\x1e"
+#: the commit time git prints for %cI (strict ISO 8601, with its offset)
+ISO_TIME = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|[+-]\d\d:\d\d)$")
 
 
 @dataclass
@@ -39,27 +44,35 @@ class Change:
     number: int | None = None
     #: the branch a merge commit names, when it names one
     branch: str | None = None
+    #: the commit's committer time, ISO 8601 with its offset (for the host's merge commit, when the
+    #: pull request was merged), None when the log did not carry it
+    committed: str | None = None
 
 
 def parse(log: str) -> list[Change]:
-    """Changes from `git log --format=%H%x1f%s%x1f%b%x1e` output, in the order given."""
+    """Changes from `git log --format=%H%x1f%s%x1f%b%x1f%cI%x1e` output, in the order given. The
+    commit time may be left out (`%H%x1f%s%x1f%b%x1e`), and then each change's `committed` is None."""
     out: list[Change] = []
     for rec in log.split(RECORD):
         rec = rec.strip("\n")
         if not rec.strip():
             continue
-        sha, subject, body = (rec.split(FIELD) + ["", ""])[:3]
+        parts = rec.split(FIELD)
+        committed = parts[-1].strip() if len(parts) >= 4 and ISO_TIME.match(parts[-1].strip()) else None
+        if committed:
+            parts = parts[:2] + [FIELD.join(parts[2:-1])]
+        sha, subject, body = (parts + ["", ""])[:3]
         subject = subject.strip()
         m = MERGE.match(subject)
         if m:
             first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
-            out.append(Change(sha.strip(), first or m.group(2), int(m.group(1)), m.group(2)))
+            out.append(Change(sha.strip(), first or m.group(2), int(m.group(1)), m.group(2), committed))
             continue
         m = SQUASH.match(subject)
         if m:
-            out.append(Change(sha.strip(), m.group(1), int(m.group(2))))
+            out.append(Change(sha.strip(), m.group(1), int(m.group(2)), committed=committed))
             continue
-        out.append(Change(sha.strip(), subject))
+        out.append(Change(sha.strip(), subject, committed=committed))
     return out
 
 
@@ -68,7 +81,7 @@ def merged(old: str, new: str, repo: str = ".", env: dict | None = None) -> list
 
     Raises ValueError when git cannot read the range (an unknown commit, not a repository)."""
     p = subprocess.run(
-        ["git", "-C", repo, "log", "--first-parent", f"--format=%H{FIELD}%s{FIELD}%b{RECORD}",
+        ["git", "-C", repo, "log", "--first-parent", f"--format=%H{FIELD}%s{FIELD}%b{FIELD}%cI{RECORD}",
          f"{old}..{new}"],
         capture_output=True, text=True, env=env, check=False)
     if p.returncode != 0:
