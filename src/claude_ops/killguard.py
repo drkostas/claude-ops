@@ -25,7 +25,9 @@ started, and `--max N` changes the number of targets allowed.
 from __future__ import annotations
 
 import os
+import re
 import signal as _signal
+import subprocess
 import sys
 from collections.abc import Callable, Iterable
 
@@ -75,6 +77,54 @@ def kill(targets: Iterable[int], sig: int = _signal.SIGTERM, own_groups: Iterabl
             os.killpg(-p, sig)
         else:
             os.kill(p, sig)
+
+
+#: a process-table row: pid -> (parent pid, process group, command)
+Table = dict
+
+
+def process_table() -> Table | None:
+    """Every process as pid -> (ppid, pgid, command), or None when `ps` cannot be read."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,command="], capture_output=True, text=True,
+                             timeout=5, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    table: Table = {}
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) >= 3 and all(x.isdigit() for x in parts[:3]):
+            table[int(parts[0])] = (int(parts[1]), int(parts[2]), parts[3] if len(parts) > 3 else "")
+    return table
+
+
+def ancestors(pid: int, table: Table) -> list[int]:
+    """The parents of `pid`, nearest first."""
+    chain: list[int] = []
+    while pid in table and table[pid][0] > 1 and table[pid][0] not in chain:
+        pid = table[pid][0]
+        chain.append(pid)
+    return chain
+
+
+def session_root(table: Table, start: int | None = None) -> int | None:
+    """The Claude Code process that runs the caller: the nearest ancestor whose program is `claude`."""
+    for pid in ancestors(os.getpid() if start is None else start, table):
+        first = table[pid][2].split(None, 1)[0] if table[pid][2].strip() else ""
+        if re.fullmatch(r"(?:.*/)?claude(?:-code)?", first):
+            return pid
+    return None
+
+
+def started_groups(table: Table, root: int | None = None) -> set[int]:
+    """The process groups that hold a process descended from the session `root` (this caller's own
+    Claude Code process by default): groups the session started, such as a background task.
+    A group of the session's own process, which is also the terminal's, is not one of them."""
+    root = session_root(table) if root is None else root
+    if root is None:
+        return set()
+    groups = {g for pid, (_, g, _) in table.items() if root in ancestors(pid, table)}
+    return {g for g in groups if g > 1 and g != table[root][1]}
 
 
 def main(argv: list[str] | None = None) -> int:

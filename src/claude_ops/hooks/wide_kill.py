@@ -5,8 +5,9 @@ includes the ones the machine's own remote access depends on (the network, the S
 sharing server). Nothing can be done from the outside once they are gone. This hook refuses the wide
 shapes and has no approval path, because a person who is away cannot give one:
 
-- `kill -1`, `kill 0`, `kill 1`, a negative pid (a process group), and a negative pid built from a
-  variable (only `-$!`, the group of a job the same command started, is let through);
+- `kill -1`, `kill 0`, `kill 1`, a negative pid (a process group) unless a process of that group
+  descends from the Claude Code process running the hook (a background task the session started),
+  and a negative pid built from a variable (only `-$!` is let through; write the group's number);
 - `killall`, `killall5`, `skill`, `pkill -u`/`-U` (a whole user) and `pkill -v` (everything else);
 - a pattern kill (`pkill`, or `pgrep`, `ps` or `pidof` feeding `kill` through `$(...)`, backticks or
   `xargs`) whose pattern matches a protected process, or matches more than a few processes. The
@@ -92,7 +93,7 @@ def max_targets(cfg: dict) -> int:
 
 def processes(args: list[str]) -> list[str] | None:
     """The processes `pgrep args` lists (a line each, after the pid), or None when it cannot be read.
-    Lines that belong to the search itself are left out."""
+    Only this hook's own process and its parent are left out (`pgrep` never lists itself)."""
     flag = "-l" if sys.platform == "darwin" else "-a"
     try:
         out = subprocess.run(["pgrep", flag, *args], capture_output=True, text=True,
@@ -105,7 +106,7 @@ def processes(args: list[str]) -> list[str] | None:
     lines = []
     for line in out.stdout.splitlines():
         pid, _, rest = line.strip().partition(" ")
-        if pid in mine or re.search(r"\b(pkill|pgrep|killall|grep)\b|claude_ops", rest):
+        if pid in mine:
             continue
         lines.append(rest)
     return lines
@@ -243,15 +244,25 @@ def kill_targets(args: list[str], stdin: bool = False) -> list[str]:
     return targets
 
 
-def check_kill(args: list[str], cfg: dict, stdin: bool = False) -> str | None:
+def session_groups() -> set[int]:
+    """The process groups this session started (read once, when a command names a group)."""
+    table = killguard.process_table()
+    return killguard.started_groups(table) if table else set()
+
+
+GROUP_HINT = "write the group's number; a group this session started is allowed"
+
+
+def check_kill(args: list[str], cfg: dict, stdin: bool = False, owns: Callable[[], set[int]] = session_groups) -> str | None:
     targets = kill_targets(args, stdin)
     literal: list[int] = []
     for t in targets:
         if re.fullmatch(r"-?\d+", t):
             literal.append(int(t))
         elif t.startswith("-") and "$" in t and t != "-$!":
-            return f"`kill {t}` signals a process group this command did not start"
-    why = killguard.check(literal, max_targets=max_targets(cfg))
+            return f"`kill {t}` signals a process group this command did not start ({GROUP_HINT})"
+    own = owns() if any(p < -1 for p in literal) else set()
+    why = killguard.check(literal, own_groups=own, max_targets=max_targets(cfg))
     if why:
         return why
     if len(targets) > max_targets(cfg):
@@ -381,7 +392,8 @@ def shell_script(words: list[str]) -> str | None:
     return None
 
 
-def check_command(command: str, cfg: dict, resolve: Resolver, depth: int = 0) -> str | None:
+def check_command(command: str, cfg: dict, resolve: Resolver, depth: int = 0,
+                  owns: Callable[[], set[int]] = session_groups) -> str | None:
     if "kill" not in command or depth > MAX_DEPTH:
         return None
     text, subs = split_substitutions(command)
@@ -398,7 +410,7 @@ def check_command(command: str, cfg: dict, resolve: Resolver, depth: int = 0) ->
             return f"`{prog}` signals every process of that name"
         if prog == "kill":
             kills = True
-            why = check_kill(args, cfg)
+            why = check_kill(args, cfg, owns=owns)
             direct.update(int(m) for t in args for m in re.findall(r"__sub(\d+)__", t))
             var_target = var_target or any("$" in t and t != "-$!" for t in kill_targets(args))
         elif prog == "pkill":
@@ -418,14 +430,14 @@ def check_command(command: str, cfg: dict, resolve: Resolver, depth: int = 0) ->
                     k -= 1
                 why = producers([st["words"] for st in steps[k:i]], cfg, resolve) if k < i else None
                 if why is None:
-                    why = check_kill(run[1:], cfg, stdin=True)
+                    why = check_kill(run[1:], cfg, stdin=True, owns=owns)
         else:
             script = shell_script(words)
-            why = check_command(script, cfg, resolve, depth + 1) if script else None
+            why = check_command(script, cfg, resolve, depth + 1, owns) if script else None
         if why:
             return why
     for n, sub in enumerate(subs):
-        why = check_command(sub, cfg, resolve, depth + 1)
+        why = check_command(sub, cfg, resolve, depth + 1, owns)
         if why:
             return why
         if kills:
@@ -436,10 +448,11 @@ def check_command(command: str, cfg: dict, resolve: Resolver, depth: int = 0) ->
     return None
 
 
-def check(payload: dict, cfg: dict, resolve: Resolver = processes) -> str | None:
+def check(payload: dict, cfg: dict, resolve: Resolver = processes,
+          owns: Callable[[], set[int]] = session_groups) -> str | None:
     if payload.get("tool_name", "") != "Bash":
         return None
-    return check_command(str((payload.get("tool_input") or {}).get("command", "")), cfg, resolve)
+    return check_command(str((payload.get("tool_input") or {}).get("command", "")), cfg, resolve, owns=owns)
 
 
 def main(argv: list[str] | None = None) -> int:

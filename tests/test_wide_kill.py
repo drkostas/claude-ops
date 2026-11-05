@@ -27,8 +27,9 @@ def fake(lines=None):
     return resolve
 
 
-def run(command, lines=(), cfg=CFG):
-    return hook.check({"tool_name": "Bash", "tool_input": {"command": command}}, cfg, fake(list(lines)))
+def run(command, lines=(), cfg=CFG, groups=()):
+    return hook.check({"tool_name": "Bash", "tool_input": {"command": command}}, cfg, fake(list(lines)),
+                      lambda: set(groups))
 
 
 @pytest.mark.parametrize("command", [
@@ -198,3 +199,24 @@ def test_a_search_that_does_not_feed_the_kill_is_only_checked_for_protected_proc
     assert run("kill 4242; echo $(pgrep -f sshd)", ["/usr/sbin/sshd -D"])
     assert run("P=$(pgrep -f worker); kill $P", many)
     assert run("pkill -f worker -P $(pgrep -f parent | head -1)", many) is None
+
+
+def test_a_group_the_session_started_is_allowed_when_written_as_a_number():
+    assert run("kill -TERM -- -4321", groups=[4321]) is None
+    assert run("kill -9 -4321", groups=[4321]) is None
+    assert run("kill -TERM -- -4322", groups=[4321])
+    assert run("kill -TERM -- -1", groups=[1])
+    assert "write the group's number" in run("kill -TERM -$pg", groups=[4321])
+
+
+def test_lines_holding_the_packages_own_name_are_read_like_any_other():
+    four = [f"python3 -m claude_ops.tavily {i}" for i in range(4)]
+    assert "4 processes" in run("pkill -f claude_ops", four)
+    assert "4 processes" in run("pkill -f tavily", four)
+
+
+def test_the_process_listing_leaves_out_only_the_hook_and_its_parent(monkeypatch):
+    import os
+    out = f"{os.getpid()} python3 -m claude_ops.hooks.chain\n{os.getppid()} claude\n7 python3 -m claude_ops.tavily\n"
+    monkeypatch.setattr(hook.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    assert hook.processes(["-f", "x"]) == ["python3 -m claude_ops.tavily"]
