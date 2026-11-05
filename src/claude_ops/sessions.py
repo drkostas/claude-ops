@@ -27,7 +27,23 @@ from datetime import datetime
 from pathlib import Path
 
 from .paths import PROJECTS as ROOT  # noqa: E402
-CACHE = Path(os.environ.get("CLAUDE_OPS_CACHE", Path.home() / ".cache" / "claude-ops" / "sessions.json"))
+
+
+def default_cache(projects: Path = ROOT) -> Path:
+    """Where the session index of `projects` is kept: CLAUDE_OPS_CACHE when set, else the shared cache
+    for Claude Code's own folder, else a file beside the folder. The index is keyed by the transcripts'
+    paths, so one cache file serving two folders is rewritten by each in turn: a test that points
+    CLAUDE_OPS_PROJECTS at fixtures replaced the real index with theirs, and the next read of the
+    real folder read every transcript again (about 50 seconds for 15,000 of them)."""
+    named = os.environ.get("CLAUDE_OPS_CACHE")
+    if named:
+        return Path(named)
+    if projects == Path.home() / ".claude" / "projects":
+        return Path.home() / ".cache" / "claude-ops" / "sessions.json"
+    return projects.parent / "claude-ops-sessions.json"
+
+
+CACHE = default_cache()
 LIVE_WINDOW = 15 * 60
 
 
