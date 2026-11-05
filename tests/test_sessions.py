@@ -180,3 +180,15 @@ def test_the_index_follows_a_conversation_that_moved(tmp_path):
     assert again["cwd"] == "/tmp/second", again
     fresh = sessions.read_meta(path)
     assert fresh["cwd"] == "/tmp/second"
+
+
+def test_cache_follows_the_transcript_folder(tmp_path, monkeypatch):
+    """A folder other than Claude Code's own gets an index file of its own, so reading it never replaces
+    the index of the real folder."""
+    monkeypatch.delenv("CLAUDE_OPS_CACHE", raising=False)
+    fixtures = tmp_path / "projects"
+    real = sessions.Path.home() / ".claude" / "projects"
+    assert sessions.default_cache(real) == sessions.Path.home() / ".cache" / "claude-ops" / "sessions.json"
+    assert sessions.default_cache(fixtures) == tmp_path / "claude-ops-sessions.json"
+    monkeypatch.setenv("CLAUDE_OPS_CACHE", str(tmp_path / "named.json"))
+    assert sessions.default_cache(fixtures) == tmp_path / "named.json"
