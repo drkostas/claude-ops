@@ -145,7 +145,9 @@ def read_meta(path: Path, prev: dict | None = None) -> dict:
     return out
 
 
-def build_index(root: Path = ROOT, cache: Path = CACHE, force: bool = False) -> list[dict]:
+def build_index(root: Path = ROOT, cache: Path | None = None, force: bool = False) -> list[dict]:
+    if cache is None:
+        cache = default_cache(root)  # the index of another folder never replaces this folder's
     old = {}
     if cache.exists() and not force:
         try:
