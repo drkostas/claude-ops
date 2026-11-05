@@ -213,3 +213,44 @@ def test_review_pr_reads_gh_json():
           "author": BOT, "files": [{"path": "web/package.json"}, {"path": "web/package-lock.json"}]}
     assert db.review_pr(pr, up_to="minor").ok
     assert not db.review_pr(pr, up_to="patch").ok
+
+
+def test_review_diff_checks_version_registry_and_install_scripts():
+    title = "chore(deps): bump next from 16.3.8 to 16.4.1 in /web"
+    files = ["web/package.json", "web/package-lock.json"]
+    # the clean bump passes, with the resolved url changing version under the same registry host
+    assert db.review(title, "", files, BOT, up_to="minor", diff=NPM_DIFF).ok
+    # the lockfile lands on a version the text does not name, though the move is within the level
+    mismatch = NPM_DIFF.replace('"version": "16.4.1"', '"version": "16.4.9"')
+    v = db.review(title, "", files, BOT, up_to="minor", diff=mismatch)
+    assert not v.ok and "moves next to 16.4.9" in v.reason and "name 16.4.1" in v.reason
+    # the lockfile re-points the package at another registry host
+    swap = NPM_DIFF.replace("https://registry.example.org/next/-/next-16.4.1.tgz",
+                            "https://evil.example.net/next/-/next-16.4.1.tgz")
+    v = db.review(title, "", files, BOT, up_to="minor", diff=swap)
+    assert not v.ok and "points next at evil.example.net instead of registry.example.org" in v.reason
+    # the lockfile newly marks the package as running an install script
+    lock_script = NPM_DIFF.replace('+      "version": "16.4.1",',
+                                   '+      "version": "16.4.1",\n+      "hasInstallScript": true,')
+    v = db.review(title, "", files, BOT, up_to="minor", diff=lock_script)
+    assert not v.ok and "next in web/package-lock.json as running an install script" in v.reason
+    # a package that already ran an install script is not flagged when only its version moves
+    kept = lock_script.replace('-      "version": "16.3.8",',
+                               '-      "version": "16.3.8",\n-      "hasInstallScript": true,')
+    assert db.review(title, "", files, BOT, up_to="minor", diff=kept).ok
+    # a manifest that adds a lifecycle script under scripts is refused
+    manifest_script = """diff --git a/web/package.json b/web/package.json
+--- a/web/package.json
++++ b/web/package.json
+@@ -10,6 +10,9 @@
+   "dependencies": {
+-    "next": "16.3.8"
++    "next": "16.4.1"
+   },
++  "scripts": {
++    "postinstall": "node ./evil.js"
++  }
+ }
+"""
+    v = db.review(title, "", ["web/package.json"], BOT, up_to="minor", diff=manifest_script)
+    assert not v.ok and "adds the install script postinstall in web/package.json" in v.reason
