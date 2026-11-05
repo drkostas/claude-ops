@@ -35,7 +35,9 @@ HOOKS = {
                    {"matcher": "Bash",
                     "hooks": [{"type": "command", "command": "claude-ops hook conflict-markers"}]},
                    {"matcher": "Bash|mcp__github__.*",
-                    "hooks": [{"type": "command", "command": "claude-ops hook guarded-labels"}]}],
+                    "hooks": [{"type": "command", "command": "claude-ops hook guarded-labels"}]},
+                   {"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+                    "hooks": [{"type": "command", "command": "claude-ops hook kept-out"}]}],
 }
 
 
@@ -161,6 +163,9 @@ def cmd_hook(a) -> int:
     if a.name == "guarded-labels":
         from .hooks import guarded_labels
         return guarded_labels.main([])
+    if a.name == "kept-out":
+        from .hooks import kept_out
+        return kept_out.main([])
     if a.name == "mail-guard":
         from .hooks import mail_guard
         return mail_guard.main([])
@@ -458,7 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
-                                    "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "mail-guard",
+                                    "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "mail-guard",
                                     "chain"))
     s.set_defaults(func=cmd_hook)
 
