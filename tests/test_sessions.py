@@ -192,3 +192,11 @@ def test_cache_follows_the_transcript_folder(tmp_path, monkeypatch):
     assert sessions.default_cache(fixtures) == tmp_path / "claude-ops-sessions.json"
     monkeypatch.setenv("CLAUDE_OPS_CACHE", str(tmp_path / "named.json"))
     assert sessions.default_cache(fixtures) == tmp_path / "named.json"
+
+
+def test_build_index_of_another_folder_leaves_the_default_cache_alone(chat_tree, tmp_path, monkeypatch):
+    """Asking for the index of a folder without naming a cache file keeps it beside that folder."""
+    monkeypatch.delenv("CLAUDE_OPS_CACHE", raising=False)
+    sessions.build_index(chat_tree)
+    assert sessions.default_cache(chat_tree).exists()
+    assert sessions.default_cache(chat_tree) != sessions.CACHE
