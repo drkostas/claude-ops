@@ -108,6 +108,8 @@ with lock(Path("/tmp/my-watch.lock")) as got:
                          target="my-chat"))
 ```
 
+To follow a GitHub project you do not own, `claude_ops.github_watch.release_tags(repo)` and `pull_request_fingerprint(repo, number)` are ready-made sources for `run_source`. They read the public API with no token, and the fingerprint changes when somebody comments on or reviews the pull request, or when it is closed or merged.
+
 A job that fires on a calendar has no source to read. `claude_ops.watch.remind(state_file, period,
 text, target, send=...)` sends one message per period (`"2026-W45"`, `"2026-11"`), opens it with the
 period so a queue keeps a new week apart from last week's open message, and counts the period as done
