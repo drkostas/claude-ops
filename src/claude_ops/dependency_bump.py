@@ -14,8 +14,10 @@ gh prints for them; a caller may name more), never any bot: every GitHub App wit
 is a bot too. Every changed file is a lockfile or a dependency manifest (LOCKFILES, MANIFESTS,
 `requirements*.txt`). Every bump the title or body names ("bump X from A to B", "Updates `X` from
 A to B") moves at most by the level asked, and, when the diff is given, every package a manifest or a
-lockfile moves is one the text names and moves within the level too; a package the diff adds or
-removes, or moves without the text naming it (a transitive dependency across a major), is refused.
+lockfile moves is one the text names, moves to the version the text names and within the level, and
+keeps the same registry. A package the diff adds or removes, moves without the text naming it (a
+transitive dependency across a major), lands on a version the text does not name, is pointed at
+another registry host, or is newly marked to run an install script, is refused.
 The formats read are npm's (package.json, package-lock.json, npm-shrinkwrap.json), yarn.lock, Python's
 (pyproject.toml, requirements*.txt, uv.lock, poetry.lock, pdm.lock), Cargo's, go.mod and composer's;
 a lockfile in another format contributes nothing, so for it the text is the only check. A version is
@@ -161,6 +163,33 @@ _STRUCTURAL = frozenset({"", "dependencies", "devDependencies", "peerDependencie
 _TOML_STRUCTURAL = frozenset({"name", "version", "description", "readme", "license", "edition", "python",
                               "requires-python", "build-backend", "authors", "source", "checksum",
                               "resolution-markers", "requires-dist", "url", "hash", "size", "upload-time"})
+#: the line that names where a package is fetched from, in an npm lockfile and in yarn.lock
+_JSON_RESOLVED = re.compile(r'^(?P<sign>[-+])\s*"resolved":\s*"(?P<url>[^"]+)"')
+_YARN_RESOLVED = re.compile(r'^(?P<sign>[-+])\s+resolved\s+"(?P<url>[^"]+)"')
+#: a lifecycle script in a manifest, and the mark npm writes for a package that runs one
+_INSTALL_KEY = re.compile(r'^\+\s*"(?P<key>preinstall|install|postinstall|prepare|prepublish'
+                          r'|prepublishOnly|prepack|postpack|preuninstall|postuninstall)"\s*:')
+_HAS_INSTALL = re.compile(r'^(?P<sign>[-+])\s*"hasInstallScript":\s*(?P<val>true|false)')
+
+
+def _host(url: str | None) -> str | None:
+    """The host of a URL ("https://registry.npmjs.org/x/-/x-1.0.0.tgz" is "registry.npmjs.org"),
+    or None when there is no scheme and host to read."""
+    m = re.match(r"[A-Za-z][A-Za-z0-9+.\-]*://([^/]+)", url or "")
+    return m.group(1).lower() if m else None
+
+
+def _canon(version: str) -> tuple[int, ...] | str:
+    """A version in a form two spellings of the same release share. "v1.4.0", "1.4.0" and "1.4"
+    all become (1, 4). A version that is not numbers keeps its cleaned string, so it only ever
+    equals the same string."""
+    n = numbers(version)
+    if n is None:
+        return clean_version(version)
+    parts = list(n)
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def _kind(path: str) -> str | None:
@@ -255,10 +284,93 @@ def moves(diff: str) -> tuple[Move, ...]:
     return tuple(Move(f, n, o, w) for (f, n), (o, w) in out.items())
 
 
+def _registry_hazard(diff: str) -> str | None:
+    """A package the diff re-points to a different registry host, which a bump to a new version from
+    the same registry never does. Reads the `resolved` line of an npm lockfile and of yarn.lock. A
+    change of only the version in the URL keeps the host, so this fires only on a host that moved."""
+    host: dict[tuple[str, str], list] = {}
+    file = kind = current = None
+    for line in diff.splitlines():
+        m = _DIFF_FILE.match(line)
+        if m:
+            file, kind, current = m.group("b"), _kind(m.group("b")), None
+            continue
+        if not file or kind is None or line.startswith(_SKIP) or not line:
+            continue
+        if kind == "json-lock":
+            m = _JSON_OBJ.match(line)
+            if m:
+                key = m.group("key")
+                current = key.rsplit("node_modules/", 1)[-1] if key not in _STRUCTURAL else None
+                continue
+            m = _JSON_NAME.match(line)
+            if m:
+                current = m.group("name")
+                continue
+            m = _JSON_RESOLVED.match(line)
+        elif kind == "yarn":
+            if line[1:2] not in (" ", "\t") and line.rstrip().endswith(":"):
+                mh = _YARN_HEADER.match(line)
+                current = mh.group("name") if mh else None
+                continue
+            m = _YARN_RESOLVED.match(line)
+        else:
+            continue
+        if m and current:
+            slot = host.setdefault((file, current), [None, None])
+            slot[0 if m.group("sign") == "-" else 1] = _host(m.group("url"))
+    for (file, name), (old, new) in host.items():
+        if old and new and old != new:
+            return f"the diff points {name} at {new} instead of {old} in {file}"
+    return None
+
+
+def _install_hazard(diff: str) -> str | None:
+    """An install script the diff adds. In a manifest that is a lifecycle key under scripts
+    (postinstall and the rest), which runs a command on install. In an npm lockfile it is a package
+    newly marked hasInstallScript. A package that already ran one shows the mark on both sides of the
+    diff, so only a mark the diff adds counts."""
+    had: set[tuple[str, str]] = set()
+    gained: list[tuple[str, str]] = []
+    file = kind = current = None
+    for line in diff.splitlines():
+        m = _DIFF_FILE.match(line)
+        if m:
+            file, kind, current = m.group("b"), _kind(m.group("b")), None
+            continue
+        if not file or kind is None or line.startswith(_SKIP) or not line:
+            continue
+        if kind == "json-manifest":
+            m = _INSTALL_KEY.match(line)
+            if m:
+                return f"the diff adds the install script {m.group('key')} in {file}"
+        elif kind == "json-lock":
+            m = _JSON_OBJ.match(line)
+            if m:
+                key = m.group("key")
+                current = key.rsplit("node_modules/", 1)[-1] if key not in _STRUCTURAL else None
+                continue
+            m = _JSON_NAME.match(line)
+            if m:
+                current = m.group("name")
+                continue
+            m = _HAS_INSTALL.match(line)
+            if m and current and m.group("val") == "true":
+                (had.add if m.group("sign") == "-" else gained.append)((file, current))
+    for file, name in gained:
+        if (file, name) not in had:
+            return f"the diff marks {name} in {file} as running an install script"
+    return None
+
+
 def _diff_verdict(found: tuple[Bump, ...], diff: str, up_to: str) -> str | None:
-    """Why the diff refuses the update, or None when every package it moves is named and within the
-    level."""
+    """Why the diff refuses the update, or None when every package it moves is named, moves to the
+    version the text names and within the level, from the same registry, and the diff adds no install
+    script."""
     named = {b.name.lower() for b in found}
+    named_new: dict[str, set] = {}
+    for b in found:
+        named_new.setdefault(b.name.lower(), set()).add(_canon(b.new))
     for mv in moves(diff):
         old = clean_version(mv.old) if mv.old is not None else None
         new = clean_version(mv.new) if mv.new is not None else None
@@ -276,7 +388,10 @@ def _diff_verdict(found: tuple[Bump, ...], diff: str, up_to: str) -> str | None:
             return f"the move of {mv.name} from {old} to {new} in {mv.file} cannot be read"
         if LEVELS.index(lv) > LEVELS.index(up_to):
             return f"{lv} move in {mv.file}: {mv.name} {old} to {new} (allowed up to {up_to})"
-    return None
+        if _canon(new) not in named_new.get(mv.name.lower(), set()):
+            want = " or ".join(dict.fromkeys(b.new for b in found if b.name.lower() == mv.name.lower()))
+            return (f"the diff moves {mv.name} to {new} in {mv.file}, but the title and body name {want}")
+    return _registry_hazard(diff) or _install_hazard(diff)
 
 
 def review(title: str | None, body: str | None, files, author=None, *, up_to: str = "minor",
