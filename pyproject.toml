@@ -21,8 +21,9 @@ Homepage = "https://github.com/drkostas/claude-ops"
 claude-ops = "claude_ops.cli:main"
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pyyaml>=5"]
 iterm = ["iterm2>=2.7"]
+yaml = ["pyyaml>=5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

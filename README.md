@@ -118,6 +118,48 @@ claude-ops layering /path/to/project --package app --marker psycopg --marker app
 A good use is a test in the private project that keeps a reviewed list of the modules that stay, each
 with its reason, and fails on every new candidate.
 
+## Find scheduled workflows that break on a fork
+
+A workflow that runs on a schedule or on workflow_dispatch also runs in every fork of the
+repository. When such a workflow reads or writes the repository's issues, pull requests or comments,
+the copy in a fork acts on the fork, not on the original, and a fork with issues turned off fails the
+job for everyone who forked the project. `fork-guard` finds the jobs that need a guard and do not
+have it:
+
+```bash
+claude-ops fork-guard .github/workflows      # exits 1 on a hit
+claude-ops fork-guard . --json
+```
+
+The guard limits the job to the original repository, so every fork skips it:
+
+```yaml
+jobs:
+  watch:
+    if: github.repository == 'owner/name'
+```
+
+Wire it into a repository's continuous integration, so a pull request that adds an unguarded job
+fails:
+
+```yaml
+name: Fork guard
+on: pull_request
+jobs:
+  fork-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install 'claude-ops[yaml]'
+      - run: claude-ops fork-guard .github/workflows
+```
+
+It reads the shell of a `run` step and the script of an actions/github-script step. A third party
+action that touches issues through its own inputs is not seen.
+
 ## Tools for a repository many chats change
 
 ```bash
