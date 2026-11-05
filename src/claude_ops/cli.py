@@ -169,6 +169,9 @@ def cmd_hook(a) -> int:
     if a.name == "mail-guard":
         from .hooks import mail_guard
         return mail_guard.main([])
+    if a.name == "wide-kill":
+        from .hooks import wide_kill
+        return wide_kill.main([])
     if a.name == "chain":
         from .hooks import chain
         return chain.main([])
@@ -463,7 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
-                                    "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "mail-guard",
+                                    "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "mail-guard", "wide-kill",
                                     "chain"))
     s.set_defaults(func=cmd_hook)
 
