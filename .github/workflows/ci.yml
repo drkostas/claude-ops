@@ -19,4 +19,5 @@ jobs:
       - run: pip install -e '.[test]'
       - run: python -m compileall -q src
       - run: pytest -q
+      - run: claude-ops fork-guard .github/workflows
       - run: bash -n src/claude_ops/rover/harness.sh && bash -n src/claude_ops/rover/netwatchdog.sh

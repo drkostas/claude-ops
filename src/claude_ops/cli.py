@@ -503,7 +503,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "changelog": ("changelog", "the pull requests merged between two commits, oldest first"),
          "mcp-park": ("mcp_park", "move MCP servers between the configuration and a parked file, or keep only some"),
          "instructions": ("instruction_history", "what changed in the instruction files a chat loaded, from kept copies"),
-         "pr-changes": ("pr_changes", "what the open pull requests change, by file and function, against a text")}
+         "pr-changes": ("pr_changes", "what the open pull requests change, by file and function, against a text"),
+         "fork-guard": ("fork_guard", "scheduled workflows that act on the repository without a fork guard")}
 
 
 def main(argv: list[str] | None = None) -> int:
