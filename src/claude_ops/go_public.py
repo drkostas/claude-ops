@@ -395,9 +395,10 @@ def turn_on_reporting(repo: str, ref: str | None = None, run=sh) -> bool:
 
 def add_files(repo: str, branch: str, reference: str, *, files: tuple[str, ...] = FILES,
               workflow: str = WORKFLOW, ci_branch: str = BRANCH, title: str = TITLE,
-              body: str = BODY, message: str = MESSAGE, run=sh, wait=time.sleep) -> None:
+              body: str = BODY, message: str = MESSAGE, run=sh, wait=time.sleep) -> str:
     """Copy `files` from `reference` onto a new branch of `repo`, open a pull request with `title`
-    and `body`, wait for `workflow`'s checks on it and merge it with --merge. Only that workflow
+    and `body`, wait for `workflow`'s checks on it, merge it with --merge and return the pull
+    request's address. Only that workflow
     counts: a repository's own older CI may be long broken, and that is not what this pull request
     changes. The defaults install the private-terms check; `add_fork_guard` passes the fork guard's."""
     head = run(["gh", "api", f"repos/{repo}/git/ref/heads/{branch}", "--jq", ".object.sha"]).stdout.strip()
@@ -429,24 +430,74 @@ def add_files(repo: str, branch: str, reference: str, *, files: tuple[str, ...] 
     else:
         raise Refused(f"the {workflow} check did not finish on {url} within ten minutes")
     run(["gh", "pr", "merge", number, "-R", repo, "--merge", "--delete-branch"])
+    return url
 
 
-def add_fork_guard(repo: str, branch: str, reference: str, *, run=sh, wait=time.sleep) -> None:
+def workflow_texts(repo: str, branch: str | None = None, run=sh) -> dict[str, str]:
+    """{file name: text} of the YAML files in `repo`'s .github/workflows on `branch` (the default
+    branch when None), read through the API; empty when the folder is not there."""
+    q = f"repos/{repo}/contents/.github/workflows" + (f"?ref={branch}" if branch else "")
+    r = run(["gh", "api", q], check=False)
+    if r.returncode != 0:
+        if "404" in (r.stderr + r.stdout) or "Not Found" in (r.stderr + r.stdout):
+            return {}
+        raise Refused(f"could not list the workflows of {repo}: {(r.stderr or r.stdout).strip()[:200]}")
+    names = [e["name"] for e in json.loads(r.stdout or "[]")
+             if e.get("type") == "file" and e.get("name", "").endswith((".yml", ".yaml"))]
+    return {n: api_file(repo, f".github/workflows/{n}", branch, run) or "" for n in sorted(names)}
+
+
+def fork_guard_survey(repo: str, branch: str | None = None, run=sh) -> dict:
+    """What the fork guard would say about `repo`, with nothing cloned or changed: {"repo",
+    "installed" (the fork guard workflow is there), "triggers" (the files that run on a schedule or
+    on workflow_dispatch), "hits" ([{"file", "job"}] the lint flags, so its own pull request would
+    fail), "unreadable" ([{"file", "error"}])}. It needs the `yaml` extra."""
+    import yaml   # noqa: PLC0415 - lazy, as in fork_guard
+    from claude_ops import fork_guard   # noqa: PLC0415
+    texts = workflow_texts(repo, branch, run)
+    installed = all(Path(f).name in texts for f in FORK_GUARD_FILES)
+    triggers = []
+    for name, text in texts.items():
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError:
+            continue                   # scan below names it as unreadable
+        if isinstance(doc, dict):
+            on_value = doc.get("on", doc.get(True))
+            if fork_guard._triggers(on_value) & fork_guard.FORK_TRIGGERS:
+                triggers.append(name)
+    with tempfile.TemporaryDirectory(prefix="fork-guard-") as tmp:
+        for name, text in texts.items():
+            (Path(tmp) / name).write_text(text)
+        out = fork_guard.scan(Path(tmp))
+    return {"repo": repo, "installed": installed, "triggers": triggers,
+            "hits": [{"file": Path(h["file"]).name, "job": h["job"]} for h in out["hits"]],
+            "unreadable": [{"file": Path(u["file"]).name, "error": u["error"]} for u in out["unreadable"]]}
+
+
+def add_fork_guard(repo: str, branch: str, reference: str, *, run=sh, wait=time.sleep) -> str:
     """Install the fork guard workflow into `repo` from `reference`, through a merged pull request,
-    the way `add_files` installs the private-terms check. `reference` is a repository that holds the
-    workflow at the same path (`FORK_GUARD_FILES`)."""
-    add_files(repo, branch, reference, files=FORK_GUARD_FILES, workflow=FORK_GUARD_WORKFLOW,
+    the way `add_files` installs the private-terms check, and return its address. `reference` is a
+    repository that holds the workflow at the same path (`FORK_GUARD_FILES`)."""
+    return add_files(repo, branch, reference, files=FORK_GUARD_FILES, workflow=FORK_GUARD_WORKFLOW,
               ci_branch=FORK_GUARD_BRANCH, title=FG_TITLE, body=FG_BODY, message=FG_MESSAGE,
               run=run, wait=wait)
+
+
+def public_repos(owner: str, run=sh, *, forks: bool = True) -> list[str]:
+    """The public, unarchived repositories of `owner`, as owner/name, without forks when `forks` is
+    False (a commit on a fork's default branch moves it away from the project it follows)."""
+    keep = "(.isArchived | not)" + ("" if forks else " and (.isFork | not)")
+    return run(["gh", "repo", "list", owner, "--visibility", "public", "--limit", "500",
+                "--json", "nameWithOwner,isArchived,isFork",
+                "--jq", f".[] | select({keep}) | .nameWithOwner"]).stdout.split()
 
 
 def refresh(owner: str, *, terms_for, allow: list[str], secrets: tuple[str, str] = SECRETS,
             run=sh, say=print) -> list[str]:
     """Set the secrets again on every public, unarchived repository of `owner` that already has the
     first one, with `terms_for(repo)` and `allow`. Returns the repositories it set."""
-    names = run(["gh", "repo", "list", owner, "--visibility", "public", "--limit", "500",
-                 "--json", "nameWithOwner,isArchived",
-                 "--jq", ".[] | select(.isArchived | not) | .nameWithOwner"]).stdout.split()
+    names = public_repos(owner, run)
     joined = "\n".join(allow)
     done = []
     for repo in names:
