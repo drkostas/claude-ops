@@ -90,7 +90,15 @@ class SignIn:
               popen=subprocess.Popen, run=subprocess.run) -> "SignIn":
         """Run `claude auth login --claudeai` (with `--email` when given, which fills in the address
         on the page) in a new folder. `account` is the keychain account Claude Code writes under,
-        the user's name by default. `env` adds to or replaces the program's few variables."""
+        the user's name by default. `env` adds to or replaces the program's few variables, except
+        PATH: a PATH in `env` (else the caller's own) is only where `claude` is looked up, and the
+        program's PATH is always the stand-in's folder first. Raises SignInFailed, and leaves no
+        folder, when the program is not found or does not start."""
+        # the program is found on the CALLER's PATH: the child's PATH is only the stand-in's folder and
+        # the system's, where a bare `claude` (often in ~/.local/bin) is not
+        program = shutil.which(claude, path=(env or {}).get("PATH") or os.environ.get("PATH"))
+        if program is None:
+            raise SignInFailed(f"no {claude!r} program on PATH")
         base = Path(os.path.realpath(folder or tempfile.mkdtemp(prefix="claude-sign-in-")))
         (base / "bin").mkdir(parents=True, exist_ok=True)
         (base / "config").mkdir(exist_ok=True)
@@ -102,11 +110,15 @@ class SignIn:
         child = {"HOME": os.path.expanduser("~"), "USER": account, "LANG": "en_US.UTF-8", "TERM": "dumb",
                  "PATH": f"{base / 'bin'}:/usr/bin:/bin", "BROWSER": str(opener),
                  "CLAUDE_CONFIG_DIR": config, "CLAUDE_SECURESTORAGE_CONFIG_DIR": config}
-        child.update(env or {})
-        args = [claude, "auth", "login", "--claudeai"] + (["--email", email] if email else [])
-        with open(base / "output", "wb") as out:
-            proc = popen(args, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                         env=child, cwd=str(base))
+        child.update({k: v for k, v in (env or {}).items() if k != "PATH"})
+        args = [program, "auth", "login", "--claudeai"] + (["--email", email] if email else [])
+        try:
+            with open(base / "output", "wb") as out:
+                proc = popen(args, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                             env=child, cwd=str(base))
+        except OSError as e:
+            shutil.rmtree(base, ignore_errors=True)
+            raise SignInFailed(f"could not start {program}: {e}") from None
         return cls(proc, base, account, email, run, {"PATH": "/usr/bin:/bin", "HOME": child["HOME"]})
 
     def output(self, last: int = 600) -> str:
@@ -162,7 +174,9 @@ class SignIn:
         block = read_account(self.config / ".claude.json")
         self._cleanup()
         if not login:
-            raise SignInFailed(f"claude auth login said it signed in, but {self.service} holds no login")
+            # the folder string is how someone finds a login Claude Code wrote under another name
+            raise SignInFailed(f"claude auth login said it signed in, but {self.service} (named after "
+                               f"{str(self.config)!r}) holds no login")
         got = account_email(block)
         if self.email and (got or "").lower() != self.email.lower():
             raise WrongAccount(self.email, got)

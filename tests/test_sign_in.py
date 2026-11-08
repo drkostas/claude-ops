@@ -153,11 +153,35 @@ def test_nobody_allowing_it_ends_the_program_and_keeps_nothing(claude, tmp_path)
     assert not s.running() and not s.folder.exists()
 
 
-def test_a_sign_in_that_left_no_login_is_a_failure(claude, tmp_path):
+def test_a_sign_in_that_left_no_login_names_the_item_and_the_folder_it_was_named_after(claude, tmp_path):
     keychain = Keychain()
     s = start(claude, tmp_path, keychain)
     s.url(timeout=10)
     (s.folder / "allow").write_text("")
-    with pytest.raises(sign_in.SignInFailed, match="holds no login"):
+    with pytest.raises(sign_in.SignInFailed, match="holds no login") as e:
         s.wait(timeout=20)
+    assert s.service in str(e.value) and str(s.config) in str(e.value)
     assert LIVE_SERVICE not in keychain.services()
+
+
+def test_the_default_program_name_is_found_on_the_callers_path(claude, tmp_path):
+    keychain = Keychain()
+    s = sign_in.SignIn.start(None, account="someone", env={"PATH": str(Path(claude).parent), "STUB_MODE": "hang"},
+                             folder=tmp_path / "work", run=keychain)
+    assert s.url(timeout=10) == URL
+    env = json.loads((s.folder / "env").read_text())
+    assert env["PATH"].split(":")[0] == str(s.folder / "bin")   # the child's PATH is still the stand-in's
+    s.cancel()
+
+
+def test_a_program_that_is_missing_or_does_not_start_leaves_no_folder(tmp_path):
+    with pytest.raises(sign_in.SignInFailed, match="no 'claude' program"):
+        sign_in.SignIn.start(None, env={"PATH": str(tmp_path / "empty")}, folder=tmp_path / "work")
+    assert not (tmp_path / "work").exists()
+
+    def broken(*args, **kw):
+        raise PermissionError("not allowed")
+
+    with pytest.raises(sign_in.SignInFailed, match="could not start"):
+        sign_in.SignIn.start(None, claude=sys.executable, folder=tmp_path / "work2", popen=broken)
+    assert not (tmp_path / "work2").exists()
