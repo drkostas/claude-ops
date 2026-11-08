@@ -24,7 +24,7 @@ THE RESULT is a dict with `status` and `detail`.
 
 A recipe that cannot be applied never guesses: it changes nothing and says why.
 
-THE WRITE keeps the file's permission bits, goes through a temporary file in the same folder and a
+THE WRITE follows a symbolic link to the file it names, so the link stays a link, and keeps the file's permission bits, goes through a temporary file in the same folder and a
 rename, so a program reading the file never sees half of it. With `backup_suffix` the original is
 copied to <path><backup_suffix> first, unless a copy is already there (the first one is the
 original, and a later re-apply must not overwrite it with an already changed file).
@@ -41,7 +41,7 @@ def apply(path, find: str, replace: str, contains: str, *, backup_suffix: str | 
           dry_run: bool = False) -> dict:
     """Make one recipe's change in `path`, once. See the module text for the statuses. With `dry_run`
     nothing is written and a change that could be made answers `would_apply`."""
-    p = Path(path)
+    p = Path(path).resolve()          # a link is followed: the rename below would replace the link itself
     if not find or contains not in replace:
         return {"status": "failed", "path": str(p),
                 "detail": "the recipe is wrong: `find` is empty or `replace` does not hold `contains`"}

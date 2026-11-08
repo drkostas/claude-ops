@@ -77,3 +77,12 @@ def test_a_dry_run_says_what_would_happen_and_writes_nothing(tmp_path):
     assert file_patch.apply(f, **recipe(find="nothing like this"), dry_run=True)["status"] == "not_found"
     file_patch.apply(f, **recipe())
     assert file_patch.apply(f, **recipe(), dry_run=True)["status"] == "present"
+
+
+def test_a_symbolic_link_stays_a_link_and_its_target_is_changed(tmp_path):
+    real = make(tmp_path)
+    link = tmp_path / "link.js"
+    link.symlink_to(real)
+    assert file_patch.apply(link, **recipe(), backup_suffix=".bak-quiet")["status"] == "applied"
+    assert link.is_symlink() and "quiet: true" in real.read_text()
+    assert (tmp_path / "tool.js.bak-quiet").read_text() == ORIGINAL
