@@ -472,6 +472,20 @@ accounts.choose("a", {"a": usage_a, "b": usage_b}, now)            # "b", or Non
 - The keychain item is not the whole login. Claude Code also names the signed-in account, without any secret, in the `oauthAccount` block of `~/.claude.json`, and `/login` writes both. A switch that writes only the keychain leaves the config naming the old account: Claude Code then records the old account as the owner of every new Remote Control session, and `config.login_digest` does not move. `accounts.read_account(path)` gives the block, `accounts.write_account(path, block, backup=...)` replaces it and nothing else (written beside the file and renamed over it only while the file still holds what was read, since running chats rewrite it every minute or two; an equal block is not written), and `accounts.account_block(profile)` builds one from `accounts.profile(token)` for an account whose block was never kept.
 - A chat whose login stopped working stays open and answers every message with "Login expired · Please run /login", and the app that lists Remote Control sessions drops it. `update.login_lost(screen)` reads that answer from the chat's screen, and `update.remote_control_state(transcript)` reads whether the session's Remote Control is active, off, disconnected or unavailable from its own system records, so a supervisor can say so instead of counting the chat as running and its messages as delivered.
 
+A saved copy whose refresh token stopped working needs a new sign-in, but `/login` replaces the login every session uses. `claude_ops.sign_in` signs one account in on the side, in a config folder of its own:
+
+```python
+from claude_ops import accounts, sign_in
+s = sign_in.SignIn.start("a@example.org")            # runs `claude auth login --claudeai` in a new folder
+page = s.url()                                       # the sign-in page; show it where the person is signed in
+got = s.wait(timeout=600)                            # SignedIn(login, block, email), once the person allows it
+accounts.write_item("my-saved-login-a", "<mac user>", got.login)
+```
+
+- The program runs with `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` set to that folder, so its login goes to a keychain item named after the folder (`sign_in.side_service(folder)`) and its `oauthAccount` block to the folder's own `.claude.json`. The live item and `~/.claude.json` are never read or written.
+- A stand-in `open` comes first on its PATH, so no browser opens. `url()` is the address the program asked to open, with the program's own local listener as the place the page returns to, so the person's Allow on that page completes the sign-in.
+- `wait` raises `SignInFailed` when the program fails or nobody allows it in time, and `WrongAccount` when the page was signed in to another account than the email given. Every way out, `cancel()` too, deletes the side item and the folder, so the new login exists only in what `wait` returned. Where it goes next (a saved copy, or the live item when the live login is dead) is the caller's decision.
+
 A Remote Control session keeps the title it was first made with. `claude_ops.remote.set_title` gives it a new one through the sessions API, with the login of the account that owns the session, and reads it back, so no browser has to be signed in to that account:
 
 ```python
