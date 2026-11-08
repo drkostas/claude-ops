@@ -103,6 +103,78 @@ jobs:
       - run: gh api "repos/$GITHUB_REPOSITORY/issues/1/comments" -f body=hi
 """
 
+# actions/stale closes stale issues and pull requests through its own inputs, on a schedule, no guard.
+STALE = """
+name: Stale
+on:
+  schedule:
+    - cron: "0 0 * * *"
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          stale-issue-message: "This has been quiet for a while."
+"""
+
+# dessant/lock-threads locks old issues and pull requests, on a schedule, with no guard.
+LOCK = """
+name: Lock
+on:
+  schedule:
+    - cron: "0 0 * * *"
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dessant/lock-threads@v5
+"""
+
+# peter-evans/create-issue-from-file opens an issue, on a schedule, with no guard.
+CREATE_ISSUE = """
+name: Report
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: Weekly report
+          content-filepath: ./report.md
+"""
+
+# A scheduled job whose actions only check out the code and set up Python touches no issues.
+CHECKOUT_ONLY = """
+name: Nightly
+on:
+  schedule:
+    - cron: "0 3 * * *"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+"""
+
+# actions/stale with the job guard, so only the original repository runs it.
+STALE_GUARDED = """
+name: Stale
+on:
+  schedule:
+    - cron: "0 0 * * *"
+jobs:
+  stale:
+    if: github.repository == 'owner/name'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+"""
+
 
 def write(tmp_path, name, text):
     p = tmp_path / name
@@ -182,3 +254,23 @@ def test_main_json(tmp_path, capsys):
     import json
     data = json.loads(capsys.readouterr().out)
     assert data["hits"][0]["job"] == "watch"
+
+
+def test_a_stale_action_on_a_schedule_is_flagged():
+    assert fork_guard.unguarded(yaml.safe_load(STALE)) == ["stale"]
+
+
+def test_a_lock_threads_action_is_flagged():
+    assert fork_guard.unguarded(yaml.safe_load(LOCK)) == ["lock"]
+
+
+def test_a_create_issue_action_is_flagged():
+    assert fork_guard.unguarded(yaml.safe_load(CREATE_ISSUE)) == ["report"]
+
+
+def test_an_action_that_does_not_touch_the_repo_is_not_flagged():
+    assert fork_guard.unguarded(yaml.safe_load(CHECKOUT_ONLY)) == []
+
+
+def test_the_job_guard_clears_a_stale_action():
+    assert fork_guard.unguarded(yaml.safe_load(STALE_GUARDED)) == []
