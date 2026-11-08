@@ -26,7 +26,7 @@ def test_applies_once_and_reads_it_back(tmp_path):
     assert f.read_text() == 'start();\nrun(args, {quiet: true});\nstop();\n'
     assert (tmp_path / "tool.js.bak-quiet").read_text() == ORIGINAL
     assert oct(f.stat().st_mode & 0o777) == "0o755"
-    assert [p.name for p in tmp_path.iterdir()] == ["tool.js", "tool.js.bak-quiet"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tool.js", "tool.js.bak-quiet"]
 
 
 def test_a_second_apply_changes_nothing(tmp_path):
