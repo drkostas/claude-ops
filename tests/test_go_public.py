@@ -344,3 +344,56 @@ def test_edit_history_asks_fifty_nodes_a_query():
     asked = [c for c in world.cmds if c[:3] == ["gh", "api", "graphql"]]
     assert [sum(a.startswith("ids[]=") for a in c) for c in asked] == [50, 50, 20]
     assert len(got) == 120 and got[0] == {"place": "comment", "url": "u0", "text": "x", "edit": "t"}
+
+
+class ForkGuardWorld:
+    """gh as a fake `run` for add_fork_guard: it serves the reference workflow, records the branch
+    the files land on and the ref it created, and reports the checks given to it, so a test reads
+    what add_fork_guard did."""
+
+    def __init__(self, *, checks=(("Fork guard", "pass"),)):
+        self.cmds = []
+        self.branch_files = set()
+        self.branch_refs = []
+        self.checks = [{"workflow": w, "bucket": b} for w, b in checks]
+        self.merged = False
+
+    def __call__(self, args, *, stdin=None, cwd=None, check=True):
+        self.cmds.append(args)
+        out, rc = "", 0
+        if args[:2] == ["gh", "api"] and len(args) > 2 and "/git/ref/heads/" in args[2]:
+            out = "abc123\n"
+        elif args[:4] == ["gh", "api", "-X", "POST"] and args[4].endswith("/git/refs"):
+            self.branch_refs += [a.split("=", 1)[1] for a in args if a.startswith("ref=")]
+        elif args[:2] == ["gh", "api"] and "/contents/" in args[-1] and "-X" not in args:
+            out = json.dumps({"content": base64.b64encode(b"name: Fork guard\n").decode()})
+        elif args[:4] == ["gh", "api", "-X", "PUT"]:
+            self.branch_files.add(args[4].split("/contents/")[1])
+        elif args[:3] == ["gh", "pr", "create"]:
+            out = "https://github.com/example/repo/pull/9\n"
+        elif args[:3] == ["gh", "pr", "checks"] and "--json" in args:
+            out = json.dumps(self.checks)
+        elif args[:3] == ["gh", "pr", "merge"]:
+            self.merged = True
+        if check and rc:
+            raise g.Refused(f"{args[:3]} failed: {out}")
+        return subprocess.CompletedProcess(args, rc, out, "")
+
+
+def test_add_fork_guard_installs_the_workflow_through_a_merged_pull_request():
+    world = ForkGuardWorld()
+    g.add_fork_guard("example/repo", "main", REFERENCE, run=world, wait=lambda s: None)
+    assert ".github/workflows/fork-guard.yml" in world.branch_files
+    assert "refs/heads/ci/fork-guard" in world.branch_refs
+    assert world.merged
+    merge = next(c for c in world.cmds if c[:3] == ["gh", "pr", "merge"])
+    assert "--merge" in merge
+    create = next(c for c in world.cmds if c[:3] == ["gh", "pr", "create"])
+    assert ":" not in create[create.index("--title") + 1]   # a public pull request title has no colon
+
+
+def test_add_fork_guard_stops_when_its_check_fails_on_the_pull_request():
+    world = ForkGuardWorld(checks=(("Fork guard", "fail"),))
+    with pytest.raises(g.Refused, match="failed on its own pull request"):
+        g.add_fork_guard("example/repo", "main", REFERENCE, run=world, wait=lambda s: None)
+    assert not world.merged

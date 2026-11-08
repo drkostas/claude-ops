@@ -56,6 +56,25 @@ SECRETS = ("PRIVATE_TERMS", "PRIVATE_ALLOW")
 #: the workflow's name, as `gh pr checks` reports it
 WORKFLOW = "Private terms"
 BRANCH = "ci/private-terms"
+#: the pull request `add_files` opens for the private-terms check, and the commit it writes
+TITLE = "Check each pull request for terms that must not appear here"
+BODY = ("Adds the private-terms workflow: it reads the pull request title, "
+        "description, commit messages and added lines, and fails on any term "
+        "from the PRIVATE_TERMS secret. The list is kept in the secret, not in "
+        "the repository, and the log never prints the matched text.")
+MESSAGE = "ci: check each pull request for terms that must not appear here"
+
+#: the fork guard check: its file, its workflow name, its branch, and the pull request that installs it
+FORK_GUARD_FILES = (".github/workflows/fork-guard.yml",)
+FORK_GUARD_WORKFLOW = "Fork guard"
+FORK_GUARD_BRANCH = "ci/fork-guard"
+FG_TITLE = "Add the fork guard check for scheduled workflows"
+FG_BODY = ("Adds the fork guard workflow. It runs the claude-ops fork-guard lint on every pull "
+           "request and fails one that adds a scheduled or workflow_dispatch job which acts on this "
+           "repository's issues, pull requests or comments without a guard that limits the job to "
+           "this repository. Such a job runs in every fork too, where it acts on the wrong "
+           "repository or fails because the fork has issues turned off.")
+FG_MESSAGE = "ci: add the fork guard check for scheduled workflows"
 
 
 #: where GitHub looks for a security policy
@@ -375,27 +394,25 @@ def turn_on_reporting(repo: str, ref: str | None = None, run=sh) -> bool:
 
 
 def add_files(repo: str, branch: str, reference: str, *, files: tuple[str, ...] = FILES,
-              workflow: str = WORKFLOW, run=sh, wait=time.sleep) -> None:
-    """Copy `files` from `reference` onto a new branch of `repo`, open a pull request, wait for
-    `workflow`'s checks on it and merge it with --merge. Only that workflow counts: a repository's own
-    older CI may be long broken, and that is not what this pull request changes."""
+              workflow: str = WORKFLOW, ci_branch: str = BRANCH, title: str = TITLE,
+              body: str = BODY, message: str = MESSAGE, run=sh, wait=time.sleep) -> None:
+    """Copy `files` from `reference` onto a new branch of `repo`, open a pull request with `title`
+    and `body`, wait for `workflow`'s checks on it and merge it with --merge. Only that workflow
+    counts: a repository's own older CI may be long broken, and that is not what this pull request
+    changes. The defaults install the private-terms check; `add_fork_guard` passes the fork guard's."""
     head = run(["gh", "api", f"repos/{repo}/git/ref/heads/{branch}", "--jq", ".object.sha"]).stdout.strip()
-    run(["gh", "api", "-X", "POST", f"repos/{repo}/git/refs", "-f", f"ref=refs/heads/{BRANCH}",
+    run(["gh", "api", "-X", "POST", f"repos/{repo}/git/refs", "-f", f"ref=refs/heads/{ci_branch}",
          "-f", f"sha={head}"])
     for path in files:
         text = api_file(reference, path, None, run)
         if text is None:
             raise Refused(f"the reference copy {reference}:{path} is gone; nothing to copy")
         run(["gh", "api", "-X", "PUT", f"repos/{repo}/contents/{path}",
-             "-f", "message=ci: check each pull request for terms that must not appear here",
-             "-f", f"branch={BRANCH}",
+             "-f", f"message={message}",
+             "-f", f"branch={ci_branch}",
              "-f", f"content={base64.b64encode(text.encode()).decode()}"])
-    url = run(["gh", "pr", "create", "-R", repo, "--base", branch, "--head", BRANCH,
-               "--title", "Check each pull request for terms that must not appear here",
-               "--body", "Adds the private-terms workflow: it reads the pull request title, "
-                         "description, commit messages and added lines, and fails on any term "
-                         "from the PRIVATE_TERMS secret. The list is kept in the secret, not in "
-                         "the repository, and the log never prints the matched text."]).stdout.strip()
+    url = run(["gh", "pr", "create", "-R", repo, "--base", branch, "--head", ci_branch,
+               "--title", title, "--body", body]).stdout.strip()
     number = url.rstrip("/").rsplit("/", 1)[-1]
     # the check registers a few seconds after the push, so "none yet" is waiting, never a pass
     for _ in range(60):
@@ -405,13 +422,22 @@ def add_files(repo: str, branch: str, reference: str, *, files: tuple[str, ...] 
         except ValueError:
             ours = []
         if any(c.get("bucket") in ("fail", "cancel") for c in ours):
-            raise Refused(f"the private-terms check failed on its own pull request: {url}")
+            raise Refused(f"the {workflow} check failed on its own pull request: {url}")
         if ours and all(c.get("bucket") == "pass" for c in ours):
             break
         wait(10)
     else:
-        raise Refused(f"the private-terms check did not finish on {url} within ten minutes")
+        raise Refused(f"the {workflow} check did not finish on {url} within ten minutes")
     run(["gh", "pr", "merge", number, "-R", repo, "--merge", "--delete-branch"])
+
+
+def add_fork_guard(repo: str, branch: str, reference: str, *, run=sh, wait=time.sleep) -> None:
+    """Install the fork guard workflow into `repo` from `reference`, through a merged pull request,
+    the way `add_files` installs the private-terms check. `reference` is a repository that holds the
+    workflow at the same path (`FORK_GUARD_FILES`)."""
+    add_files(repo, branch, reference, files=FORK_GUARD_FILES, workflow=FORK_GUARD_WORKFLOW,
+              ci_branch=FORK_GUARD_BRANCH, title=FG_TITLE, body=FG_BODY, message=FG_MESSAGE,
+              run=run, wait=wait)
 
 
 def refresh(owner: str, *, terms_for, allow: list[str], secrets: tuple[str, str] = SECRETS,

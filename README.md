@@ -157,8 +157,12 @@ jobs:
       - run: claude-ops fork-guard .github/workflows
 ```
 
-It reads the shell of a `run` step and the script of an actions/github-script step. A third party
-action that touches issues through its own inputs is not seen.
+It reads the shell of a `run` step and the script of an actions/github-script step, and it knows a
+few third party actions that act on the repository through their own inputs (`actions/stale`,
+`dessant/lock-threads`, `peter-evans/create-issue-from-file`). Another such action is not seen.
+
+`go_public.add_fork_guard` installs this workflow into a repository through a merged pull request,
+the way `go_public` installs the private-terms check.
 
 ## Tools for a repository many chats change
 

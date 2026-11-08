@@ -23,8 +23,9 @@ while neither the job nor the acting step carries a `github.repository ==` guard
 The exit status is 1 when it finds an unguarded job, so a continuous integration step can fail a
 pull request that adds one. It needs PyYAML (pip install 'claude-ops[yaml]').
 
-It reads the shell of a `run` step and the script of an actions/github-script step. A third party
-action that touches issues through its own inputs is not seen.
+It reads the shell of a `run` step and the script of an actions/github-script step, and it knows a
+few third party actions that act on the repository through their own inputs (actions/stale,
+dessant/lock-threads, peter-evans/create-issue-from-file). Another such action is not seen.
 """
 from __future__ import annotations
 
@@ -41,6 +42,13 @@ ACTS_ON_REPO = re.compile(
     r"|\bgh\s+api\b[^\n]*(issues|pulls|comments)"   # gh api .../issues|pulls|comments
     r"|github\.(rest\.)?(issues|pulls)\."           # actions/github-script
     r"|/repos/[^\s'\"]+/(issues|pulls)",            # a REST path to issues or pull requests
+    re.IGNORECASE,
+)
+
+#: third party actions whose own inputs act on the repository's issues, pull requests or comments,
+#: matched against a step's `uses:`. A `run` step that only names one of these slugs is not a use of it.
+ACTS_ON_REPO_ACTIONS = re.compile(
+    r"^(actions/stale|dessant/lock-threads|peter-evans/create-issue-from-file)(?=[/@]|$)",
     re.IGNORECASE,
 )
 
@@ -96,7 +104,10 @@ def unguarded(doc: dict) -> list:
         for step in steps:
             if not isinstance(step, dict):
                 continue
-            if ACTS_ON_REPO.search(_step_text(step)) and not UPSTREAM_GUARD.search(str(step.get("if", ""))):
+            uses = step.get("uses")
+            acts = ACTS_ON_REPO.search(_step_text(step)) or (
+                isinstance(uses, str) and ACTS_ON_REPO_ACTIONS.search(uses.strip()))
+            if acts and not UPSTREAM_GUARD.search(str(step.get("if", ""))):
                 hits.append(str(name))
                 break
     return hits
