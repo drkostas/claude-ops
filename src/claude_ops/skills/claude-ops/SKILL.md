@@ -417,6 +417,10 @@ accounts.write_account(accounts.CLAUDE_JSON, block, backup="/path/to/claude.json
   again after the next rewrite (`changed_since`) to see that it was kept.
 - Never renew the login in use (`accounts.renew` is for a saved copy): a renewal replaces the
   refresh token, and the chats holding the old one are signed out.
+- A saved copy that no longer renews needs a new sign-in, and `/login` would replace the login in
+  use. `sign_in.SignIn.start(email)` signs that account in on the side, in a config folder of its
+  own: show `url()` where the person is signed in, and `wait()` returns the new login for
+  `write_item`. It never reads or writes the live item or `~/.claude.json`.
 - Running chats move to the new login by themselves; their Remote Control sessions do not. Send
   each chat `/remote-control` again.
 - A chat whose Remote Control is still on answers `/remote-control` with a menu: its link, then
