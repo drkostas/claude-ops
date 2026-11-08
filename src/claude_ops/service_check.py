@@ -1,4 +1,4 @@
-"""Whether a service on this Mac is up, read from launchd and from a real connection.
+"""Whether a service on a Mac is up, read from launchd and from a real connection.
 
 A launchd label that says "running" can still be a service that does not answer, and a service that
 answers can have no process launchd calls running (a socket-activated daemon starts on demand). So
@@ -7,8 +7,7 @@ and the state follows the answer:
 
 - `up`       the service answered a connection.
 - `down`     it was asked and did not answer (refused, timed out, no such socket).
-- `unknown`  nothing could be asked (the spec names no port or socket, or the address is not one
-             this check may connect to).
+- `unknown`  nothing could be asked (the spec names no port or socket).
 
 A caller that restarts services acts only on `down`, never on `up` or `unknown`, so a restart is
 never aimed at a service that is working.
@@ -68,8 +67,10 @@ def launchd_state(spec: Spec, run: Callable[..., "subprocess.CompletedProcess[st
         r = run(["launchctl", "print", f"{domain}/{spec.label}"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if r.returncode != 0:
+    if r.returncode == 113:          # launchd: could not find the service
         return "not loaded"
+    if r.returncode != 0:
+        return None                  # refused or failed, so launchd was not read
     return parse_launchd(r.stdout)
 
 

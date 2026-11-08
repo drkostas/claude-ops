@@ -1,5 +1,6 @@
 """Readings of a service. Only throwaway listeners the test opens are connected to."""
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -34,9 +35,11 @@ def test_a_unix_socket_is_read_the_same_way():
     s = socket.socket(socket.AF_UNIX); s.bind(path); s.listen(1)
     try:
         assert sc.check(sc.Spec("t", socket_path=path), run=_run()).state == sc.UP
+        s.close()
+        assert sc.check(sc.Spec("t", socket_path=path), run=_run()).state == sc.DOWN
     finally:
         s.close()
-    assert sc.check(sc.Spec("t", socket_path=path), run=_run()).state == sc.DOWN
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_nothing_to_ask_is_unknown_and_never_down():
@@ -53,6 +56,7 @@ def test_launchd_states():
     assert sc.launchd_state(sc.Spec("t", label="x"), _run("pid = 7")) == "running"
     assert sc.launchd_state(sc.Spec("t", label="x"), _run("state = waiting")) == "waiting"
     assert sc.launchd_state(sc.Spec("t", label="x"), _run("", 113)) == "not loaded"
+    assert sc.launchd_state(sc.Spec("t", label="x"), _run("", 1)) is None
     assert sc.launchd_state(sc.Spec("t"), _run()) is None
 
 
