@@ -16,6 +16,7 @@ THE RECIPE.
 THE RESULT is a dict with `status` and `detail`.
   present    `contains` is already in the file, so nothing was changed
   applied    the file was changed and `contains` was read back from it
+  would_apply  (only with dry_run=True) the change could be made, and nothing was written
   not_found  `find` is not in the file, so the update changed the text the recipe knew; nothing was changed
   ambiguous  `find` appears more than once, so the recipe cannot say where; nothing was changed
   failed     the file could not be read or written, or the written file lacks `contains`; the original
@@ -36,8 +37,10 @@ import tempfile
 from pathlib import Path
 
 
-def apply(path, find: str, replace: str, contains: str, *, backup_suffix: str | None = None) -> dict:
-    """Make one recipe's change in `path`, once. See the module text for the statuses."""
+def apply(path, find: str, replace: str, contains: str, *, backup_suffix: str | None = None,
+          dry_run: bool = False) -> dict:
+    """Make one recipe's change in `path`, once. See the module text for the statuses. With `dry_run`
+    nothing is written and a change that could be made answers `would_apply`."""
     p = Path(path)
     if not find or contains not in replace:
         return {"status": "failed", "path": str(p),
@@ -53,6 +56,8 @@ def apply(path, find: str, replace: str, contains: str, *, backup_suffix: str | 
         return {"status": "not_found", "path": str(p), "detail": "the text to replace is not in the file"}
     if n > 1:
         return {"status": "ambiguous", "path": str(p), "detail": f"the text to replace appears {n} times"}
+    if dry_run:
+        return {"status": "would_apply", "path": str(p), "detail": "the text to replace appears once"}
     backup = None
     try:
         if backup_suffix:

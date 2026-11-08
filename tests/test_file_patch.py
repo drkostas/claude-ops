@@ -68,3 +68,12 @@ def test_the_first_backup_is_kept_when_applied_again_after_an_update(tmp_path):
     f.write_text("start();\nrun(args);\nstop();\n// update\n")        # an update replaced the file
     assert file_patch.apply(f, **recipe(), backup_suffix=".bak-quiet")["status"] == "applied"
     assert (tmp_path / "tool.js.bak-quiet").read_text() == ORIGINAL
+
+
+def test_a_dry_run_says_what_would_happen_and_writes_nothing(tmp_path):
+    f = make(tmp_path)
+    assert file_patch.apply(f, **recipe(), backup_suffix=".bak-quiet", dry_run=True)["status"] == "would_apply"
+    assert f.read_text() == ORIGINAL and [p.name for p in tmp_path.iterdir()] == ["tool.js"]
+    assert file_patch.apply(f, **recipe(find="nothing like this"), dry_run=True)["status"] == "not_found"
+    file_patch.apply(f, **recipe())
+    assert file_patch.apply(f, **recipe(), dry_run=True)["status"] == "present"
