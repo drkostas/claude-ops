@@ -14,5 +14,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install "claude-ops[yaml] @ git+https://github.com/drkostas/claude-ops@main"
+      # Pinned to the commit that added this check, so every copy of this file runs the same lint.
+      - run: pip install "claude-ops[yaml] @ git+https://github.com/drkostas/claude-ops@aaf17d07715aea84a563640129aa8b6d97106184"
       - run: claude-ops fork-guard .github/workflows
