@@ -1,5 +1,6 @@
 """Telling chats apart in a shared iTerm2 window by tab color."""
 import json
+import subprocess
 
 import pytest
 
@@ -120,8 +121,10 @@ def test_set_bounds_returns_the_frame_read_back(monkeypatch):
 
 
 class FakeProcs:
-    def __init__(self, apps=(100,), servers=(877,), held=21, own=0, dies=True, opens=True, answers_after=1):
+    def __init__(self, apps=(100,), servers=(877,), held=21, own=0, dies=True, opens=True, answers_after=1,
+                 server_is_child=False):
         self.apps, self.servers, self.held, self.own = list(apps), list(servers), held, own
+        self.server_is_child = server_is_child
         self.dies, self.opens, self.answers_after = dies, opens, answers_after
         self.killed, self.opened, self.asked = [], 0, 0
 
@@ -131,8 +134,11 @@ class FakeProcs:
     def server(self):
         return self.servers
 
-    def children(self, pid):
-        return self.held if pid in self.servers else self.own
+    def children(self, pid, besides=()):
+        if pid in self.servers:
+            return self.held
+        child_servers = [s for s in self.servers if s not in besides] if self.server_is_child else []
+        return self.own + len(child_servers)
 
     def kill(self, pid):
         self.killed.append(pid)
@@ -163,6 +169,25 @@ def test_restart_refuses_when_the_terminals_would_end():
     for p in (FakeProcs(servers=()), FakeProcs(held=0), FakeProcs(own=2), FakeProcs(apps=(1, 2))):
         outcome, detail = iterm.restart_app(procs=p)
         assert outcome == "failure" and p.killed == [] and "nothing was stopped" in detail["message"]
+
+
+def test_restart_does_not_count_the_session_server_as_the_apps_own():
+    # the app started its session server, so the server is the app's child; stopping the app does
+    # not end it, so it must not read as a process the restart would end
+    p = FakeProcs(server_is_child=True)
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "success" and p.killed == [100], detail
+    p = FakeProcs(server_is_child=True, own=1)
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "failure" and p.killed == [] and "holds 1 process" in detail["message"]
+
+
+def test_children_leaves_out_the_pids_it_is_told_to():
+    ps = "  1     0\n 100     1\n 877   100\n 901   100\n 950   877\n"
+    run = lambda *a, **k: subprocess.CompletedProcess(a, 0, ps, "")
+    assert iterm._children(100, None, run=run) == 2
+    assert iterm._children(100, None, besides=(877,), run=run) == 1
+    assert iterm._children(877, None, run=run) == 1
 
 
 def test_restart_that_never_answers_is_a_failure():

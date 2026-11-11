@@ -548,12 +548,19 @@ def _pids(argv: Sequence[str], env: Mapping[str, str] | None) -> list[int]:
     return [int(x) for x in r.stdout.split() if x.isdigit()]
 
 
-def _children(pid: int, env: Mapping[str, str] | None) -> int:
+def _children(pid: int, env: Mapping[str, str] | None, besides: Sequence[int] = (), run=subprocess.run) -> int:
+    """How many processes have `pid` as their parent, leaving out the pids in `besides`. -1 when ps
+    does not answer."""
     try:
-        r = subprocess.run(["/bin/ps", "-Ao", "ppid="], capture_output=True, text=True, timeout=10, env=env)
+        r = run(["/bin/ps", "-Ao", "pid=,ppid="], capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return -1
-    return sum(1 for x in r.stdout.split() if x.isdigit() and int(x) == pid)
+    n = 0
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            n += int(parts[1]) == pid and int(parts[0]) not in besides
+    return n
 
 
 class Processes:
@@ -568,8 +575,8 @@ class Processes:
     def server(self) -> list[int]:
         return _pids(["/usr/bin/pgrep", "-f", SERVER_MARK], self.env)
 
-    def children(self, pid: int) -> int:
-        return _children(pid, self.env)
+    def children(self, pid: int, besides: Sequence[int] = ()) -> int:
+        return _children(pid, self.env, besides)
 
     def kill(self, pid: int) -> None:
         import os, signal   # noqa: E401, PLC0415
@@ -608,7 +615,8 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
     with SIGKILL, because an app that stopped answering usually ignores a polite quit too.
 
     Refused, with nothing stopped, unless exactly one iTerm2 and one iTermServer run, the server
-    holds at least one terminal and the app itself holds none (stopping it would end those).
+    holds at least one terminal and the app itself holds none (stopping it would end those). The
+    server is not counted as the app's own when the app started it.
     Returns (outcome, detail): "success" when iTerm2 answers again and the server still holds as
     many terminals as before, "partial" when it holds fewer, "failure" otherwise; detail carries
     "message", "terminals_before" and "terminals_after"."""
@@ -620,7 +628,9 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
         return "failure", {"message": "iTerm2's session server is not running (or more than one is), so "
                                       "stopping the app would end its terminals; nothing was stopped"}
     app, server = apps[0], servers[0]
-    held, own = p.children(server), p.children(app)
+    # the app may have started the server itself, so the server can be the app's own child. Stopping
+    # the app does not end the server (that is what it is for), so it is not counted as the app's
+    held, own = p.children(server), p.children(app, besides=(server,))
     if held <= 0:
         return "failure", {"message": "iTerm2's session server holds no terminal, so they belong to the "
                                       "app and would end with it; nothing was stopped"}
