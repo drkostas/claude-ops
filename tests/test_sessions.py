@@ -200,3 +200,60 @@ def test_build_index_of_another_folder_leaves_the_default_cache_alone(chat_tree,
     sessions.build_index(chat_tree)
     assert sessions.default_cache(chat_tree).exists()
     assert sessions.default_cache(chat_tree) != sessions.CACHE
+
+
+def test_index_max_age_reuses_a_recent_answer_and_default_does_not(chat_tree, tmp_path, monkeypatch):
+    cache = tmp_path / "cache.json"
+    sessions._RECENT.clear()
+    stats = []
+    real = type(chat_tree).glob
+    monkeypatch.setattr(type(chat_tree), "glob", lambda self, pat: stats.append(pat) or real(self, pat))
+    first = sessions.build_index(chat_tree, cache, max_age=60)
+    again = sessions.build_index(chat_tree, cache, max_age=60)
+    assert [e["id"] for e in again] == [e["id"] for e in first]
+    assert len(stats) == 1  # the second answer did not list the folder
+    sessions.build_index(chat_tree, cache)
+    sessions.build_index(chat_tree, cache, force=True, max_age=60)
+    assert len(stats) == 3  # no max_age and force both ask again
+
+
+def test_index_max_age_gives_each_caller_its_own_entries(chat_tree, tmp_path):
+    cache = tmp_path / "cache.json"
+    sessions._RECENT.clear()
+    one = sessions.build_index(chat_tree, cache, max_age=60)
+    one[0]["maybe_live"] = True
+    two = sessions.build_index(chat_tree, cache, max_age=60)
+    assert "maybe_live" not in two[0]
+
+
+def test_index_max_age_runs_out(chat_tree, tmp_path, monkeypatch):
+    cache = tmp_path / "cache.json"
+    sessions._RECENT.clear()
+    clock = [1000.0]
+    monkeypatch.setattr(sessions.time, "monotonic", lambda: clock[0])
+    sessions.build_index(chat_tree, cache, max_age=5)
+    with (chat_tree / "-work-beta" / "bbb.jsonl").open("a") as f:
+        f.write('{"type":"user","message":{"content":"more"}}\n')
+    assert sessions.build_index(chat_tree, cache, max_age=5)[0]["id"] == "bbb"
+    clock[0] += 6
+    calls = []
+    real = sessions.read_meta
+    monkeypatch.setattr(sessions, "read_meta", lambda p, prev=None: calls.append(p) or real(p, prev))
+    sessions.build_index(chat_tree, cache, max_age=5)
+    assert [p.stem for p in calls] == ["bbb"]  # after 5 seconds the folder is read again and the change is seen
+
+
+def test_live_folders_max_age_runs_the_process_list_once(monkeypatch):
+    sessions._RECENT.clear()
+    runs = []
+
+    def fake_run(cmd, **kw):
+        runs.append(cmd[0])
+        return subprocess.CompletedProcess(cmd, 0, "123\n" if cmd[0] == "pgrep" else "p123\nn/work/alpha\n", "")
+
+    monkeypatch.setattr(sessions.subprocess, "run", fake_run)
+    assert sessions.live_folders(max_age=30) == {"/work/alpha"}
+    assert sessions.live_folders(max_age=30) == {"/work/alpha"}
+    assert runs == ["pgrep", "lsof"]
+    sessions.live_folders()
+    assert runs == ["pgrep", "lsof", "pgrep", "lsof"]
