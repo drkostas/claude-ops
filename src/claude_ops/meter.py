@@ -306,7 +306,8 @@ class Marks:
     `prompt` is a regular expression looked for in the text of each prompt, whose first group is an id (a pasted
     ticket that starts with "Ticket ABC-12", say). `calls` maps a tool's name to the fields of its input that hold
     an id. An id is kept only when the whole of it matches `id`. `skip` lists windows of a conversation, each
-    {"session", "from", "to"} with ISO times, where nothing is marked and no prompt is kept. With no prompt and no
+    {"session", "from", "to"} with ISO times, where nothing is marked, no prompt is kept and every response is
+    unattributed. With no prompt and no
     calls, the reader still keeps the turns and the work started in the background, which name no item."""
 
     def __init__(self, prompt: str = "", calls: "dict | None" = None, id: str = ID, skip=()) -> None:  # noqa: A002
@@ -1061,7 +1062,10 @@ class _Turns:
     """One conversation's turns and marks, to say which items a moment of it was for."""
 
     def __init__(self, conn: sqlite3.Connection, session_id: str, key) -> None:
-        self.starts = [r[0] for r in conn.execute("SELECT at FROM prompts WHERE session_id = ? ORDER BY at", (session_id,))]
+        self.skips = _skips(conn, session_id)
+        # a skipped window starts a turn of its own, so what follows it is not read as the turn before it
+        self.starts = sorted({r[0] for r in conn.execute("SELECT at FROM prompts WHERE session_id = ?", (session_id,))}
+                             | {start for start, _end in self.skips})
         first = dict(conn.execute("SELECT message_id, at FROM responses WHERE session_id = ? AND at IS NOT NULL", (session_id,)))
         self.started: dict[str, float] = {}
         self.notices: dict[int, list[str]] = {}
@@ -1083,7 +1087,7 @@ class _Turns:
     def at(self, when: float, depth: int = 0) -> tuple[tuple, str]:
         """The items a moment was for, and how sure that is (KINDS)."""
         turn = self.turn(when)
-        if turn < 0:
+        if turn < 0 or any(start <= when < end for start, end in self.skips):
             return (), "unattributed"
         events = self.named.get(turn)
         if events:
@@ -1102,6 +1106,16 @@ class _Turns:
         return (tuple(sorted(got)), "linked") if got else ((), "unattributed")
 
 
+def _skips(conn: sqlite3.Connection, session_id: str) -> list[tuple[float, float]]:
+    """The windows of a conversation the store was told to leave unmarked (`Marks.skip`)."""
+    row = conn.execute("SELECT value FROM settings WHERE name = 'marks'").fetchone()
+    try:
+        skip = json.loads(row[0]).get("skip") if row else None
+    except (ValueError, AttributeError):
+        skip = None
+    return [(float(start), float(end)) for sid, start, end in skip or () if sid == session_id]
+
+
 def _window(since, until, now) -> tuple[float, float]:
     now = time.time() if now is None else now
     return (now - 86400 if since is None else since), (now if until is None else until)
@@ -1114,8 +1128,9 @@ def assignments(session_id: str, *, since: "float | None" = None, until: "float 
     (`measured`). When it names several, each response is for the last item named at or before it, and the first
     named before that (`split`), shared evenly when that naming held several items at once, as a prompt that
     pasted several does (`shared`). A turn that names none but is a background job's notice is for what the turn
-    that started the job was doing (`linked`). Any other response is `unattributed`. A subagent's responses are
-    placed where the call that started it was made. `key` maps a matched id to the one it stands for, for a scheme
+    that started the job was doing (`linked`). Any other response is `unattributed`, and so is every response in
+    a skipped window (`Marks.skip`), which starts a turn of its own. A subagent's responses are placed where the
+    call that started it was made. `key` maps a matched id to the one it stands for, for a scheme
     with short forms, and is the identity by default. Each answer gives the response's time, its turn (the prompt's
     time, None before the first), model, the four counts, whether a subagent made it, its items and its kind."""
     since, until = _window(since, until, now)

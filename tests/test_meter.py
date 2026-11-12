@@ -818,8 +818,12 @@ def test_a_skipped_window_keeps_no_prompt_or_mark_and_still_counts_the_spend(tmp
                        skip=[{"session": "s-1", "from": iso(9), "to": iso(35)}])
     meter.read_all(root=root, db=db, marks=skip)
     assert rows(db, "SELECT count(*) FROM marks WHERE at >= %s AND at < %s" % (BASE.timestamp() + 9, BASE.timestamp() + 35)) == [(0,)]
-    got = {a["message_id"]: (a["items"], a["kind"]) for a in meter.assignments("s-1", since=0, until=NOW * 2, db=db)}
-    assert got["m3"] == got["m7"] == (["TKT-1"], "measured"), "no prompt is kept there, so turn A runs on"
+    answers = meter.assignments("s-1", since=0, until=NOW * 2, db=db)
+    got = {a["message_id"]: (a["items"], a["kind"]) for a in answers}
+    assert all(got[m] == ([], "unattributed") for m in ("m3", "m4", "m5", "m6", "m7")), "never the turn before the window"
+    assert got["m2"] == (["TKT-1"], "measured") and got["m11"] == (["TKT-5"], "measured")
+    assert next(a["turn"] for a in answers if a["message_id"] == "m3") == BASE.timestamp() + 9, "the window is a turn of its own"
+    assert meter.attribute("s-1", since=0, until=NOW * 2, db=db)["unattributed"]["responses"] == 7
     assert rows(db, "SELECT count(*) FROM responses") == [(13,)]
 
 
