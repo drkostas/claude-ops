@@ -175,6 +175,31 @@ def last_checked_out(root: Path, branches, *, env: Env = None) -> dict[str, tupl
     return found
 
 
+def change_id(root: Path, head: str, base: str, *, env: Env = None) -> str | None:
+    """The id of `head`'s own change: `git patch-id --stable` of its diff from where it left `base`
+    (their merge base). The same change made again on another base, as a rebase with no edit makes it,
+    has the same id, and any edit to the change gives another. None when a commit cannot be read or the
+    change is empty.
+
+    Use it to tell whether a branch was only rebased since someone read it: keep the id from the read,
+    and compare it with the id of the branch's new head against its new base."""
+    try:
+        start = _git(root, "merge-base", base, head, env=env)
+    except (RuntimeError, OSError):
+        return None
+    try:
+        diff = subprocess.run([GIT, "-C", str(root), "diff", "--no-color", "--no-ext-diff", start, head],
+                              capture_output=True, timeout=120, env=env)
+        if diff.returncode != 0 or not diff.stdout.strip():
+            return None
+        ids = subprocess.run([GIT, "-C", str(root), "patch-id", "--stable"], input=diff.stdout,
+                             capture_output=True, timeout=120, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    words = ids.stdout.decode(errors="replace").split()
+    return words[0] if ids.returncode == 0 and words else None
+
+
 def prepare(folder: Path, name: str, *, worktrees: Path = WORKTREES,
             projects: Path = PROJECTS, env: Env = None) -> dict:
     """Where a chat named `name` asked to work in `folder` should start, and what was linked.

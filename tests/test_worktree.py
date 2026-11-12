@@ -241,3 +241,67 @@ def test_last_checked_out_carries_the_env(world, monkeypatch):
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]}
     cw.last_checked_out(world["repo"], ["master"], env=env)
     assert seen and all(e is env for e in seen)
+
+
+def _on(repo, branch, name, text, *, start=None):
+    if start:
+        git(repo, "checkout", "-q", "-b", branch, start)
+    else:
+        git(repo, "checkout", "-q", branch)
+    (repo / name).write_text(text)
+    git(repo, "add", name)
+    commit(repo, f"{branch}: {name}")
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
+def test_change_id_holds_through_a_rebase_and_changes_with_an_edit(world):
+    repo = world["repo"]
+    read = _on(repo, "topic", "b.txt", "one\n", start="master")
+    seen = cw.change_id(repo, read, "master")
+    assert seen and len(seen) == 40
+    _on(repo, "master", "c.txt", "elsewhere\n")                     # the base moves on
+    git(repo, "checkout", "-q", "topic")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", "master")
+    rebased = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    assert rebased != read and cw.change_id(repo, rebased, "master") == seen
+    edited = _on(repo, "topic", "b.txt", "one\ntwo\n")             # a new commit after the read
+    assert cw.change_id(repo, edited, "master") not in (None, seen)
+
+
+def test_change_id_of_a_stacked_branch_holds_when_the_one_below_is_rebased(world):
+    repo = world["repo"]
+    _on(repo, "low", "low.txt", "low\n", start="master")
+    high = _on(repo, "high", "high.txt", "high\n", start="low")
+    seen = cw.change_id(repo, high, "low")
+    _on(repo, "master", "c.txt", "elsewhere\n")
+    git(repo, "checkout", "-q", "low")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", "master")
+    old_low = subprocess.run(["git", "-C", str(repo), "rev-parse", "low@{1}"], capture_output=True, text=True).stdout.strip()
+    git(repo, "checkout", "-q", "high")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", "--onto", "low", old_low)
+    moved = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    assert moved != high and seen and cw.change_id(repo, moved, "low") == seen
+
+
+def test_change_id_is_none_for_no_change_or_an_unknown_commit(world):
+    repo = world["repo"]
+    assert cw.change_id(repo, "master", "master") is None
+    assert cw.change_id(repo, "0" * 40, "master") is None
+
+
+def test_change_id_carries_the_env(world, monkeypatch):
+    repo = world["repo"]
+    head = _on(repo, "topic", "b.txt", "one\n", start="master")
+    seen = []
+    real = subprocess.run
+
+    def spy(argv, **k):
+        if argv and argv[0] == cw.GIT:
+            seen.append(k.get("env"))
+        return real(argv, **k)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    import os
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]}
+    assert cw.change_id(repo, head, "master", env=env)
+    assert len(seen) == 3 and all(e is env for e in seen)
