@@ -45,6 +45,15 @@ def main(argv=None):
     print(json.dumps({{"hookSpecificOutput": {{"hookEventName": "PreToolUse", "additionalContext": "{name} says hi"}}}}))
     return 0
 '''
+REWRITE = '''
+import json, sys
+def main(argv=None):
+    p = json.load(sys.stdin)
+    ti = dict(p["tool_input"])
+    ti["command"] = ti["command"] + " " + " ".join(argv or [])
+    print(json.dumps({{"hookSpecificOutput": {{"hookEventName": "PreToolUse", "updatedInput": ti}}}}))
+    return 0
+'''
 EXIT2 = '''
 import sys
 def main(argv=None):
@@ -58,7 +67,7 @@ def hooks(tmp_path, monkeypatch):
     """A folder of hook modules on sys.path, and the file each one marks when it runs."""
     marker = str(tmp_path / "ran.txt")
     for name, body in (("h_allow", ALLOW), ("h_refuse", REFUSE), ("h_noargv", NO_ARGV), ("h_broken", BROKEN),
-                       ("h_context", CONTEXT), ("h_exit2", EXIT2), ("h_after", ALLOW)):
+                       ("h_context", CONTEXT), ("h_exit2", EXIT2), ("h_after", ALLOW), ("h_rewrite", REWRITE)):
         (tmp_path / f"{name}.py").write_text(body.format(marker=marker, name=name))
     monkeypatch.syspath_prepend(str(tmp_path))
     for name in list(sys.modules):
@@ -120,6 +129,18 @@ def test_answers_are_merged_and_a_deny_stops_the_chain(hooks, tmp_path):
     rc, out, _ = chain.chain(call(), [{"command": [str(deny)]}, {"module": "h_after"}])
     assert rc == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert ran(hooks[1]) == []
+
+
+def test_a_step_that_changes_the_call_changes_it_for_the_steps_after_it(hooks):
+    _, marker = hooks
+    raw = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                      "tool_input": {"command": "ls", "description": "list"}, "cwd": "/"})
+    rc, out, _ = chain.chain(raw, [{"module": "h_rewrite", "args": ["-a"]}, {"module": "h_rewrite", "args": ["-l"]}])
+    assert rc == 0 and json.loads(out)["hookSpecificOutput"]["updatedInput"] == {"command": "ls -a -l",
+                                                                                 "description": "list"}
+    rc, _, err = chain.chain(call(), [{"module": "h_rewrite", "args": ["bad"]}, {"module": "h_refuse"},
+                                      {"module": "h_after"}])
+    assert rc == 2 and "the command says bad" in err and ran(marker) == ["h_refuse"]
 
 
 def test_a_command_step_gets_the_call_and_the_modules_that_passed_and_its_output_goes_on(hooks, tmp_path):

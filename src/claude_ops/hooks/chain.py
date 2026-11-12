@@ -15,6 +15,9 @@ interpreter:
   after the steps before it allowed the call. Its exit 2 refuses only when its text starts with
   "Blocked:", because exit 2 is also how a broken interpreter fails. What it prints on standard
   output (an `updatedInput`, for example) is passed on.
+- a step that changes the call (an `updatedInput` in its answer) changes it for the steps after it:
+  they read the changed input, so a later check judges what will run, and a later rewrite builds on
+  the earlier one. The chain answers with the last `updatedInput`, which holds every change.
 - each step names the tools it applies to (`tools`, a regular expression matched against the whole
   tool name, as settings.json's `matcher` is) and, optionally, the hook events (`events`).
 
@@ -175,6 +178,11 @@ def chain(raw: str, steps: list[dict]) -> tuple[int, str, str]:
             return 0, json.dumps(ans), ""
         if ans is not None:
             answers.append(ans)
+            spec = ans.get("hookSpecificOutput")
+            updated = spec.get("updatedInput") if isinstance(spec, dict) else None
+            if isinstance(updated, dict):     # the steps after this one read the changed call
+                payload["tool_input"] = updated
+                raw = json.dumps(payload)
         elif out.strip():
             plain.append(out.strip())
         if step.get("module") and rc == 0:
