@@ -167,3 +167,77 @@ def test_every_git_call_carries_the_env(world, monkeypatch):
     cw.unsafe(wt, env=env)
     cw.remove(wt, projects=world["projects"], env=env)
     assert seen and all(e is env for e in seen)
+
+
+T0 = 1700000000      # git takes a raw time only from about 1973 on
+
+
+def at(cwd, when, *a):
+    """git at T0 + `when` seconds, which its HEAD log records for the move"""
+    import os
+    env = {**os.environ, "GIT_COMMITTER_DATE": f"{T0 + when} +0000", "GIT_AUTHOR_DATE": f"{T0 + when} +0000"}
+    subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True, env=env)
+
+
+def test_last_checked_out_names_the_folder_a_branch_was_left_in(world):
+    repo, base = world["repo"], world["base"]
+    one, two = base / "one", base / "two"
+    at(repo, 1000, "worktree", "add", "-q", "-b", "topic", str(one), "master")
+    at(one, 1100, "checkout", "-q", "-b", "later-work")       # one moves on, topic is held nowhere
+    at(repo, 1200, "worktree", "add", "-q", "--detach", str(two), "master")
+    at(two, 1300, "checkout", "-q", "-b", "other")
+    assert cw.checked_out_at(repo, "topic") is None
+    got = cw.last_checked_out(repo, ["topic", "other", "never-made"])
+    assert got["topic"] == (str(one), T0 + 1100.0)                 # it left topic at 1100
+    assert got["other"] == (str(two), T0 + 1300.0)
+    assert "never-made" not in got and cw.last_checked_out(repo, []) == {}
+
+
+def test_the_newest_folder_wins_and_the_main_checkout_counts(world):
+    repo, base = world["repo"], world["base"]
+    one = base / "one"
+    at(repo, 1000, "checkout", "-q", "-b", "shared")
+    at(repo, 1100, "checkout", "-q", "master")
+    at(repo, 1200, "worktree", "add", "-q", str(one), "shared")
+    at(one, 1300, "checkout", "-q", "-b", "next")
+    assert cw.last_checked_out(repo, ["shared"])["shared"] == (str(one), T0 + 1300.0)
+    git(repo, "worktree", "remove", str(one))                # a removed worktree takes its log with it
+    assert cw.last_checked_out(repo, ["shared"])["shared"] == (str(repo), T0 + 1100.0)
+
+
+def test_one_move_between_two_wanted_branches_names_both(world):
+    repo, one = world["repo"], world["base"] / "one"
+    at(repo, 1000, "worktree", "add", "-q", "-b", "a-branch", str(one), "master")
+    at(one, 1100, "checkout", "-q", "-b", "b-branch")
+    got = cw.last_checked_out(one, ["a-branch", "b-branch"])  # asked from inside a worktree too
+    assert got == {"a-branch": (str(one), T0 + 1100.0), "b-branch": (str(one), T0 + 1100.0)}
+
+
+def test_a_rebase_that_ends_on_a_branch_counts(world):
+    repo, one = world["repo"], world["base"] / "one"
+    at(repo, 1000, "worktree", "add", "-q", "-b", "rebased", str(one), "master")
+    (one / "r.txt").write_text("r")
+    git(one, "add", "r.txt")
+    at(one, 1100, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "r")
+    (repo / "m.txt").write_text("m")
+    git(repo, "add", "m.txt")
+    at(repo, 1150, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "m")  # master moves on
+    at(one, 1200, "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", "master")
+    # no checkout names the branch after 1000, so only the rebase's last line can give 1200
+    assert cw.last_checked_out(repo, ["rebased"])["rebased"] == (str(one), T0 + 1200.0)
+
+
+def test_last_checked_out_carries_the_env(world, monkeypatch):
+    seen = []
+    real = subprocess.run
+
+    def spy(argv, **k):
+        if argv and argv[0] == cw.GIT:
+            seen.append(k.get("env"))
+        return real(argv, **k)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    import os
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]}
+    cw.last_checked_out(world["repo"], ["master"], env=env)
+    assert seen and all(e is env for e in seen)
