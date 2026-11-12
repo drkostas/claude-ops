@@ -134,6 +134,21 @@ def test_a_resumes_note_of_stopped_tasks_is_not_activity(tmp_path):
     t.write_text(json.dumps({"type": "user", "timestamp": "2026-10-09T19:00:00Z", "message": {"content": note}}) + "\n")
     assert cu.last_activity(t).hour == 19         # while a background task's own notification counts
 
+
+def test_a_real_queued_message_is_activity(tmp_path):
+    # a message typed while the session worked is written as enqueue, dequeue and its own user record;
+    # the dequeue is skipped, so the user record that follows is what counts
+    t = tmp_path / "queued.jsonl"
+    t.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "assistant", "timestamp": "2026-10-09T16:02:48Z"},
+        {"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-09T16:05:00Z",
+         "content": "please check the deploy"},
+        {"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-10-09T16:10:00Z"},
+        {"type": "user", "timestamp": "2026-10-09T16:10:01Z",
+         "message": {"content": "please check the deploy"}}]) + "\n")
+    assert cu.last_activity(t) == dt.datetime(2026, 10, 9, 16, 10, 1, tzinfo=dt.timezone.utc)
+
+
 def test_last_activity_reads_past_a_long_run_of_bookkeeping(tmp_path):
     t = tmp_path / "deep.jsonl"
     with open(t, "w") as f:
