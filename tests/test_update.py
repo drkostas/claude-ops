@@ -111,6 +111,29 @@ def test_a_local_command_is_not_activity(tmp_path):
     assert cu.last_activity(t).hour == 17
 
 
+
+#: what a resumed session writes about the background tasks the restart stopped (the ids are invented)
+ORPHAN = ("<task-notification>\n<task-id>b0000001</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n"
+          "<status>stopped</status>\n</task-notification>")
+
+
+def test_a_resumes_note_of_stopped_tasks_is_not_activity(tmp_path):
+    t = tmp_path / "resumed.jsonl"
+    t.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "assistant", "timestamp": "2026-10-09T16:02:48Z"},
+        {"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-09T17:59:22Z", "content": ORPHAN},
+        {"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-10-09T17:59:22Z"},
+        {"type": "user", "timestamp": "2026-10-09T17:59:22Z", "message": {"content": ORPHAN}},
+        {"type": "system", "subtype": "bridge_status", "timestamp": "2026-10-09T17:59:25Z"}]) + "\n")
+    # the resume starts no turn, so the session is as quiet as its last turn left it
+    assert cu.last_activity(t) == dt.datetime(2026, 10, 9, 16, 2, 48, tzinfo=dt.timezone.utc)
+    with open(t, "a") as f:                       # a turn that does follow is seen by its own records
+        f.write(json.dumps({"type": "assistant", "timestamp": "2026-10-09T18:00:00Z"}) + "\n")
+    assert cu.last_activity(t).hour == 18
+    note = ORPHAN.replace("__orphan_summary__:shell", "b0000002")
+    t.write_text(json.dumps({"type": "user", "timestamp": "2026-10-09T19:00:00Z", "message": {"content": note}}) + "\n")
+    assert cu.last_activity(t).hour == 19         # while a background task's own notification counts
+
 def test_last_activity_reads_past_a_long_run_of_bookkeeping(tmp_path):
     t = tmp_path / "deep.jsonl"
     with open(t, "w") as f:
