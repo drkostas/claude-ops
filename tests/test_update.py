@@ -167,6 +167,26 @@ def test_empty_prompt():
     assert not cu.empty_prompt(None)[0]
 
 
+
+def test_a_paste_held_in_the_input_line_is_seen_with_its_size():
+    # Claude Code shows a long paste it has not sent as one stand-in in its input line
+    held = "⏺ Done.\n───\n❯ [Pasted text #24 +20 lines]\n───\n  ⏵⏵ bypass permissions on"
+    assert cu.held_paste(held) == 20
+    assert cu.empty_prompt(held) == (False, cu.TYPED)
+    # the no-break space Claude Code draws after the glyph, and a long paste of one line, which
+    # names no count
+    assert cu.held_paste("───\n❯\xa0[Pasted text #3 +1 lines]\n───") == 1
+    assert cu.held_paste("───\n❯ [Pasted text #3]\n───") == 0
+    # a stand-in beside typed words is somebody's message, and so is plain text
+    assert cu.held_paste("───\n❯ please read [Pasted text #3 +5 lines]\n───") is None
+    assert cu.held_paste("───\n❯ [Pasted text #3 +5 lines] and this\n───") is None
+    assert cu.held_paste("───\n❯ half a sentence\n───") is None
+    # an empty input line, a stand-in only in the conversation above it, and no screen hold none
+    assert cu.held_paste("⏺ It showed [Pasted text #2 +4 lines]\n───\n❯ \n───") is None
+    assert cu.held_paste(None) is None and cu.held_paste("") is None
+    # a stand-in answered as a dialog's choice is not the input line either
+    assert cu.held_paste("Pick one\n❯ 1. [Pasted text #3 +5 lines]\nEnter to select") is None
+
 #: the menu a session opens for /remote-control while its Remote Control is on (the link is invented)
 RC_MENU_SCREEN = """⏺ Done, the tests pass.
 
