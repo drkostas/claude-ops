@@ -118,6 +118,63 @@ def checked_out_at(root: Path, branch: str, *, env: Env = None) -> str | None:
     return None
 
 
+def _head_logs(root: Path, env: Env) -> list[tuple[str, Path]]:
+    """(folder, its HEAD log) for the main checkout and each linked worktree of the repo at `root`."""
+    try:
+        common = Path(_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", env=env))
+    except (RuntimeError, OSError):
+        return []
+    listed = _git(root, "worktree", "list", "--porcelain", check=False, env=env).splitlines()
+    main = next((x[len("worktree "):] for x in listed if x.startswith("worktree ")), None)
+    logs = [(main, common / "logs" / "HEAD")] if main else []
+    admin = common / "worktrees"
+    for d in sorted(admin.iterdir()) if admin.is_dir() else []:
+        try:
+            gitdir = (d / "gitdir").read_text().strip()
+        except OSError:
+            continue
+        logs.append((str(Path(gitdir).parent), d / "logs" / "HEAD"))
+    return logs
+
+
+def last_checked_out(root: Path, branches, *, env: Env = None) -> dict[str, tuple[str, float]]:
+    """For each of `branches`, the folder whose checkout last moved to or from it, and when (epoch
+    seconds), read from the HEAD log of the main checkout and of each linked worktree. A branch no
+    log names is left out. For a branch that no worktree has checked out now, it is the folder the
+    branch was last worked on in, so its owner can be found after the folder moved to other work.
+
+    A log line counts when it is a checkout from or to the branch, or a rebase that returned to it.
+    A worktree that was removed takes its log with it, and a folder deleted without `git worktree
+    remove` is still named until `git worktree prune`."""
+    wanted = set(branches)
+    if not wanted:
+        return {}
+    alt = "|".join(re.escape(b) for b in sorted(wanted))
+    patterns = [re.compile(rf"^checkout: moving from ({alt}) to "),     # it left the branch
+                re.compile(rf"^checkout: moving from \S+ to ({alt})$"),  # it came to the branch
+                re.compile(rf"returning to refs/heads/({alt})$")]        # a rebase ended on it
+    found: dict[str, tuple[str, float]] = {}
+    for folder, log in _head_logs(root, env):
+        try:
+            lines = log.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            head, _, message = line.partition("\t")
+            hits = [m.group(1) for p in patterns if (m := p.search(message))]
+            if not hits:
+                continue
+            words = head.split()
+            try:
+                when = float(words[-2])
+            except (IndexError, ValueError):
+                continue
+            for b in hits:
+                if b not in found or when >= found[b][1]:
+                    found[b] = (folder, when)
+    return found
+
+
 def prepare(folder: Path, name: str, *, worktrees: Path = WORKTREES,
             projects: Path = PROJECTS, env: Env = None) -> dict:
     """Where a chat named `name` asked to work in `folder` should start, and what was linked.
