@@ -397,6 +397,34 @@ def test_the_command_is_read_when_a_part_of_it_cannot_be(cfg, public):
     assert pv.check(bash(f"git -C {public} commit -m 'plain words'", public.parent), cfg) is None
 
 
+def test_a_temporary_path_in_the_command_is_not_published_but_its_text_is_checked(cfg, public, tmp_path):
+    for command in ("git commit -m ok 2>/tmp/zorblax/commit.err", "git commit -m ok >/tmp/zorblax/out 2>&1",
+                    "git commit -m ok 2>>/private/tmp/zorblax/a.err", "git commit -m ok </var/tmp/zorblax/in",
+                    "git commit -m ok >$TMPDIR/zorblax/out.log", "git commit -m ok -F/tmp/zorblax/none.txt",
+                    f"git commit -m ok 2>{tmp_path}/zorblax.err"):
+        assert pv.check(bash(command, public), cfg) is None, command
+    message = tmp_path / "zorblax-scratch" / "message.txt"
+    message.parent.mkdir()
+    message.write_text("plain words\n")
+    assert pv.check(bash(f"git commit -F {message}", public), cfg) is None
+    message.write_text("a message for zorblax\n")
+    assert pv.check(bash(f"git commit -F {message}", public), cfg) == "'zorblax' in the commit message"
+    assert pv.check(bash("gh pr comment 1 --body 'see /tmp/zorblax/x'", public), cfg) == "'zorblax' in the gh pr text"
+    got = pv.check(bash("git commit -m ok 2>/home/someone/tmp/zorblax.err", public), cfg)
+    assert got and got.startswith("'zorblax' in the command")       # only a temporary folder is left out
+
+
+def test_the_email_git_is_configured_with_may_be_given_for_one_command(cfg, public):
+    git(public, "config", "user.email", "jane.zorblax@example.org")
+    for command in ("git -c user.email=jane.zorblax@example.org -c user.name=jane commit -m ok",
+                    "git -c 'user.email=jane.zorblax@example.org' commit -m ok"):
+        assert pv.check(bash(command, public), cfg) is None, command
+    got = pv.check(bash("git -c user.email=other.zorblax@example.org commit -m ok", public), cfg)
+    assert got and got.startswith("'zorblax' in the command")
+    assert pv.check(bash("git commit -m 'mail jane.zorblax@example.org'", public), cfg) == \
+        "'zorblax' in the commit message"
+
+
 def test_more_gh_forms(cfg, public, private):
     assert pv.check(bash("gh -R example-owner/thing pr create --title t --body zorblax", private), cfg) is not None
     assert pv.check(bash("gh pr -R example-owner/thing create --title t --body zorblax", private), cfg) is not None
