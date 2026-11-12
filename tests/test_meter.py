@@ -884,3 +884,32 @@ def test_meter_items_prints_a_chats_split(tmp_path, monkeypatch, capsys):
     assert {i["item"] for i in json.loads(capsys.readouterr().out)["items"]} == {"TKT-1", "TKT-2", "TKT-3", "TKT-4", "TKT-5"}
     with pytest.raises(SystemExit, match="--session"):
         cli.main(["meter", "items"])
+
+
+def test_jobs_say_when_background_work_started_and_came_back(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    meter.read_all(root=root, db=db, marks=MARKS)
+    got = meter.jobs("s-1", since=0, until=NOW * 2, db=db)
+    assert [(j["tool_use_id"], j["started"] - BASE.timestamp(), j["noticed"] and j["noticed"] - BASE.timestamp(),
+             j["last"] and j["last"] - BASE.timestamp()) for j in got] == [("toolu_agent", 2, None, 51), ("toolu_bg", 21, 30, None)]
+    assert meter.jobs("s-1", since=BASE.timestamp() + 10, until=NOW * 2, db=db)[0]["tool_use_id"] == "toolu_bg"
+
+
+def test_a_read_that_is_stopped_keeps_each_file_it_finished(tmp_path, monkeypatch):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    (root / "p").mkdir(parents=True)
+    for n in range(3):
+        (root / "p" / f"s-{n}.jsonl").write_bytes(said(f"m{n}", n, sid=f"s-{n}"))
+    real, seen = meter.read_file, []
+
+    def stop_at_the_third(conn, path, marks=None):
+        if len(seen) == 2:
+            raise KeyboardInterrupt
+        seen.append(path)
+        return real(conn, path, marks)
+
+    monkeypatch.setattr(meter, "read_file", stop_at_the_third)
+    with pytest.raises(KeyboardInterrupt):
+        meter.read_all(root=root, db=db, marks=MARKS)
+    assert rows(db, "SELECT count(*) FROM responses") == [(2,)] and rows(db, "SELECT count(*) FROM positions") == [(2,)]

@@ -488,7 +488,8 @@ def _settle(conn: sqlite3.Connection, marks: Marks) -> None:
 def read_all(*, root: "Path | None" = None, db: "Path | str | None" = None, since: "float | None" = None,
              marks: "Marks | None" = None) -> dict:
     """Read every transcript under `root` that changed, a session's subagents included. With `since`, files
-    last written before it are passed over. `marks` says what the turns name (`Marks.load()` when None). After it
+    last written before it are passed over. Each file is committed when it is read, so a read stopped halfway keeps
+    what it finished. `marks` says what the turns name (`Marks.load()` when None). After it
     changes, every file is read again, and the ids in a file older than `since` come back with a read that has no
     `since`. Returns {"files", "responses"}."""
     from .paths import PROJECTS  # noqa: PLC0415
@@ -508,8 +509,8 @@ def read_all(*, root: "Path | None" = None, db: "Path | str | None" = None, sinc
                     continue
                 files += 1
                 responses += got
-                if files % 50 == 0:
-                    conn.commit()
+                # each file on its own, so a read that is stopped keeps every file it finished
+                conn.commit()
         conn.commit()
     finally:
         conn.close()
@@ -1155,6 +1156,31 @@ def assignments(session_id: str, *, since: "float | None" = None, until: "float 
                     "input": input_, "output": output, "cache_read": read, "cache_write": write, "subagent": bool(sub),
                     "items": list(items), "kind": kind})
     return out
+
+
+def jobs(session_id: str, *, since: "float | None" = None, until: "float | None" = None,
+         db: "Path | str | None" = None, now: "float | None" = None) -> list[dict]:
+    """The work a chat's calls started to run on after them (run in the background, or a subagent), for the calls made
+    in a window, oldest first. Each gives the call's id, when it was made, when its notice came back (None while none
+    has, and for a subagent the chat waited for) and, for a subagent, its last response."""
+    since, until = _window(since, until, now)
+    conn = connect(db)
+    try:
+        first = dict(conn.execute("SELECT message_id, at FROM responses WHERE session_id = ? AND at IS NOT NULL", (session_id,)))
+        noticed = dict(conn.execute("SELECT tag, min(at) FROM marks WHERE session_id = ? AND place = 'notice' GROUP BY tag",
+                                    (session_id,)))
+        last = dict(conn.execute("SELECT a.tool_use_id, max(r.at) FROM agents a JOIN responses r ON r.session_id = a.session_id "
+                                 "AND r.agent = a.agent_id WHERE a.session_id = ? GROUP BY a.tool_use_id", (session_id,)))
+        started = conn.execute("SELECT tag, at, message_id FROM marks WHERE session_id = ? AND place = 'started'",
+                               (session_id,)).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for tag, at, mid in started:
+        at = min(at, first.get(mid, at)) if mid else at
+        if since <= at < until:
+            out.append({"tool_use_id": tag, "started": at, "noticed": noticed.get(tag), "last": last.get(tag)})
+    return sorted(out, key=lambda j: j["started"])
 
 
 def _shares(n: int, parts: int) -> list[int]:
