@@ -24,6 +24,7 @@ started, and `--max N` changes the number of targets allowed.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal as _signal
@@ -161,3 +162,84 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# --- groups started by `claude-ops detach` -------------------------------------------------------
+# A command started with detach leads a session of its own and is re-parented to the init process,
+# so it does not descend from the session that started it and started_groups cannot see it. detach
+# writes the group it started to a small file for the session, and a caller that wants to signal the
+# group later reads it back here. A recorded group counts only while the process that led it is the
+# one detach started (same start time), so a pid the system reuses never inherits the allowance.
+
+def state_dir() -> str:
+    """The folder claude-ops keeps its state in (CLAUDE_OPS_STATE_DIR, else the XDG state folder)."""
+    return (os.environ.get("CLAUDE_OPS_STATE_DIR")
+            or os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                            "claude-ops"))
+
+
+def process_start(pid: int) -> str | None:
+    """When the process with this pid started (as `ps` prints it), or None when there is none."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out or None
+
+
+def _session_file(root: int, start_of: Callable[[int], str | None]) -> str | None:
+    started = start_of(root)
+    if started is None:
+        return None
+    key = re.sub(r"[^0-9A-Za-z]+", "-", f"{root}-{started}")
+    return os.path.join(state_dir(), "detached-groups", f"{key}.json")
+
+
+def _read(path: str) -> list[dict]:
+    try:
+        with open(path) as f:
+            rows = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("group"), int)] \
+        if isinstance(rows, list) else []
+
+
+def record_group(group: int, root: int | None = None, *, table: Table | None = None,
+                 start_of: Callable[[int], str | None] | None = None) -> bool:
+    """Remember that the session `root` (this caller's Claude Code process by default) started the
+    process group `group`, whose leader is the process of that number. Returns whether it was
+    recorded; it is not when there is no such session, and a failure to write is not an error."""
+    start_of = start_of or process_start
+    table = process_table() if table is None else table
+    root = (session_root(table) if table else None) if root is None else root
+    led = start_of(group)
+    path = _session_file(root, start_of) if root is not None else None
+    if path is None or led is None:
+        return False
+    rows = [r for r in _read(path) if r["group"] != group and start_of(r["group"]) == r.get("started")]
+    rows.append({"group": group, "started": led})
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(rows, f)
+        os.replace(tmp, path)
+    except OSError:
+        return False
+    return True
+
+
+def recorded_groups(root: int | None = None, *, table: Table | None = None,
+                    start_of: Callable[[int], str | None] | None = None) -> set[int]:
+    """The groups detach started for the session `root` whose leader is still the process it
+    started. A group whose leader has gone, or whose pid now belongs to another process, is not one."""
+    start_of = start_of or process_start
+    if root is None:
+        table = process_table() if table is None else table
+        root = session_root(table) if table else None
+    path = _session_file(root, start_of) if root is not None else None
+    if path is None:
+        return set()
+    return {r["group"] for r in _read(path) if r["group"] > 1 and start_of(r["group"]) == r.get("started")}

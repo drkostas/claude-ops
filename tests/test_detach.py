@@ -91,3 +91,22 @@ def test_the_command_line(tmp_path, capsys):
     pid = int(capsys.readouterr().out.strip())
     assert pid > 0 and _wait_for(log, "cli")
     assert cli.main(["detach", "--log", str(log)]) == 2
+
+
+def test_the_started_group_is_recorded_for_the_session(monkeypatch, tmp_path):
+    from claude_ops import killguard
+    seen = []
+    monkeypatch.setattr(killguard, "record_group", lambda group, *a, **k: seen.append(group) or True)
+    pid = detach.detach([sys.executable, "-c", "pass"], str(tmp_path / "job.log"))
+    assert seen == [pid]
+
+
+def test_a_failure_to_record_never_stops_the_command(monkeypatch, tmp_path):
+    from claude_ops import killguard
+
+    def boom(*a, **k):
+        raise RuntimeError("no state folder")
+    monkeypatch.setattr(killguard, "record_group", boom)
+    log = tmp_path / "job.log"
+    detach.detach([sys.executable, "-c", "print('ran')"], str(log))
+    assert _wait_for(log, "ran")

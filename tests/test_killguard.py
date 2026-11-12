@@ -83,3 +83,54 @@ def test_started_groups_are_those_of_descendants_of_the_session():
 
 def test_started_groups_without_a_session_is_empty():
     assert killguard.started_groups({40: (1, 40, "sshd")}) == set()
+
+
+# --- groups a detached command leads --------------------------------------------------------------
+
+def _starts(table):
+    return lambda pid: table.get(pid)
+
+
+def test_a_recorded_group_is_known_while_its_leader_is_the_process_that_started(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_OPS_STATE_DIR", str(tmp_path))
+    starts = {500: "Mon Jan  1 10:00:00 2024", 9001: "Mon Jan  1 10:05:00 2024"}
+    assert killguard.record_group(9001, 500, start_of=_starts(starts))
+    assert killguard.recorded_groups(500, start_of=_starts(starts)) == {9001}
+    assert killguard.check([-9001], own_groups=killguard.recorded_groups(500, start_of=_starts(starts))) is None
+
+
+def test_a_reused_pid_does_not_inherit_the_allowance(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_OPS_STATE_DIR", str(tmp_path))
+    starts = {500: "Mon Jan  1 10:00:00 2024", 9001: "Mon Jan  1 10:05:00 2024"}
+    killguard.record_group(9001, 500, start_of=_starts(starts))
+    starts[9001] = "Tue Jan  2 08:00:00 2024"          # the pid now belongs to another process
+    assert killguard.recorded_groups(500, start_of=_starts(starts)) == set()
+    del starts[9001]                                    # and a group whose leader is gone
+    assert killguard.recorded_groups(500, start_of=_starts(starts)) == set()
+
+
+def test_another_session_does_not_see_the_group(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_OPS_STATE_DIR", str(tmp_path))
+    starts = {500: "t500", 600: "t600", 9001: "t9001"}
+    killguard.record_group(9001, 500, start_of=_starts(starts))
+    assert killguard.recorded_groups(600, start_of=_starts(starts)) == set()
+    # the same pid number with another start time is a different session
+    starts[500] = "t500-later"
+    assert killguard.recorded_groups(500, start_of=_starts(starts)) == set()
+
+
+def test_nothing_is_recorded_without_a_session_or_a_leader(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_OPS_STATE_DIR", str(tmp_path))
+    assert not killguard.record_group(9001, None, table={}, start_of=_starts({9001: "t"}))
+    assert not killguard.record_group(9001, 500, start_of=_starts({500: "t"}))
+    assert not list(tmp_path.rglob("*.json"))
+
+
+def test_a_group_that_ended_is_dropped_from_the_file_when_another_is_recorded(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_OPS_STATE_DIR", str(tmp_path))
+    starts = {500: "t500", 9001: "a", 9002: "b"}
+    killguard.record_group(9001, 500, start_of=_starts(starts))
+    del starts[9001]
+    killguard.record_group(9002, 500, start_of=_starts(starts))
+    (path,) = tmp_path.rglob("*.json")
+    assert [r["group"] for r in __import__("json").loads(path.read_text())] == [9002]

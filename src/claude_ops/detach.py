@@ -7,7 +7,8 @@ signal: the command still shares the chat's group, so a kill of that group ends 
 
 `detach` starts the command as the leader of a new session, with stdin from /dev/null and stdout and
 stderr appended to a log file, and returns at once with its pid, which is also its session and
-group id. To stop it later, signal that group: `kill -TERM -<pid>`.
+group id. To stop it later, signal that group: `kill -TERM -<pid>`. The group is recorded for the
+session that started it (killguard.recorded_groups), so the wide-kill hook lets that kill through.
 
     claude-ops detach --log FILE [--cwd DIR] -- COMMAND [ARGS...]    # prints the pid
 """
@@ -18,6 +19,8 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+
+from . import killguard
 
 
 def detach(argv: Sequence[str], log: str, *, cwd: str | None = None,
@@ -34,6 +37,12 @@ def detach(argv: Sequence[str], log: str, *, cwd: str | None = None,
         proc = subprocess.Popen(list(argv), stdin=subprocess.DEVNULL, stdout=out, stderr=out,
                                 cwd=cwd, env=None if env is None else dict(env),
                                 start_new_session=True, close_fds=True)
+    # remember the group for this session, so a later kill of it is known to be the session's own
+    # (killguard.recorded_groups); a failure here never stops the command
+    try:
+        killguard.record_group(proc.pid)
+    except Exception:       # noqa: BLE001
+        pass
     return proc.pid
 
 
