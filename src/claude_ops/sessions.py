@@ -145,7 +145,33 @@ def read_meta(path: Path, prev: dict | None = None) -> dict:
     return out
 
 
-def build_index(root: Path = ROOT, cache: Path | None = None, force: bool = False) -> list[dict]:
+#: what max_age remembers: key -> (time.monotonic() when it was read, the answer)
+_RECENT: dict = {}
+
+
+def _remembered(key, max_age: float, make):
+    """`make()`, or the answer it gave less than `max_age` seconds ago for the same key (0 asks every time)."""
+    if max_age > 0:
+        hit = _RECENT.get(key)
+        if hit is not None and time.monotonic() - hit[0] < max_age:
+            return hit[1]
+    value = make()
+    if max_age > 0:
+        _RECENT[key] = (time.monotonic(), value)
+    return value
+
+
+def build_index(root: Path = ROOT, cache: Path | None = None, force: bool = False, *,
+                max_age: float = 0.0) -> list[dict]:
+    """The index of every transcript under `root`, read from the cache for the files that did not change.
+
+    Listing and checking thousands of files takes a moment even then, so a caller that asks many times in a
+    row (a server building a page per request) can pass `max_age`, the number of seconds a previous answer for
+    the same folder and cache may be reused. The default asks every time, and `force` always does. Each
+    caller gets its own copy of the entries, so marking them (see `annotate`) never reaches another caller."""
+    if max_age > 0 and not force:
+        got = _remembered(("index", str(root), str(cache)), max_age, lambda: build_index(root, cache))
+        return [dict(e) for e in got]
     if cache is None:
         cache = default_cache(root)  # the index of another folder never replaces this folder's
     old = {}
@@ -182,8 +208,12 @@ def build_index(root: Path = ROOT, cache: Path | None = None, force: bool = Fals
     return sorted(idx, key=lambda e: e.get("active_at") or e["mtime"], reverse=True)
 
 
-def live_folders(*, env: Mapping[str, str] | None = None) -> set[str]:
-    """Folders a claude process is running in now. A fact about processes, not about which chat each one is."""
+def live_folders(*, env: Mapping[str, str] | None = None, max_age: float = 0.0) -> set[str]:
+    """Folders a claude process is running in now. A fact about processes, not about which chat each one is.
+    `max_age` is the number of seconds a previous answer may be reused (0 asks every time)."""
+    if max_age > 0:
+        key = ("live", repr(sorted(env.items())) if env is not None else None)
+        return set(_remembered(key, max_age, lambda: live_folders(env=env)))
     out: set[str] = set()
     try:
         pids = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, text=True, env=env).stdout.split()
