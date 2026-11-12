@@ -58,6 +58,35 @@ class Stub(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", f"https://127.0.0.1:{port}/ok")
             self.end_headers()
+        elif self.path == "/trickle":
+            # a status line, then one byte of a header every 0.2 s: each wait is short, the whole is not
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+            self.wfile.flush()
+            for _ in range(15):
+                time.sleep(0.2)
+                self.wfile.write(b"a")
+                self.wfile.flush()
+            self.wfile.write(b"\r\nContent-Length: 0\r\n\r\n")
+        elif self.path in ("/hop2", "/hop1", "/hop0"):
+            time.sleep(0.4)
+            if self.path == "/hop0":
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self.send_response(302)
+                self.send_header("Location", "/hop1" if self.path == "/hop2" else "/hop0")
+                self.end_headers()
+        elif self.path in ("/to-password", "/to-bad-port", "/to-big-port"):
+            target = {"/to-password": "https://user:secret@127.0.0.1/", "/to-bad-port": "https://127.0.0.1:abc/",
+                      "/to-big-port": "https://:99999/x"}[self.path]
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+        elif self.path == "/loop":
+            self.send_response(302)
+            self.send_header("Location", "/loop")
+            self.end_headers()
 
 
 @pytest.fixture(scope="module")
@@ -130,3 +159,33 @@ def test_a_refused_connection_is_no_answer():
     s.close()
     ok, why = u.ok(f"https://127.0.0.1:{port}/", timeout=2)
     assert not ok and why.startswith("127.0.0.1 did not answer")
+
+
+def test_a_server_that_trickles_its_answer_is_cut_off_at_the_total(server):
+    base, trust = server
+    started = time.monotonic()
+    ok, why = u.ok(f"{base}/trickle", timeout=1.0, context=trust)
+    assert not ok and why == "timed out after 1 s"
+    assert time.monotonic() - started < 1.8
+
+
+def test_the_timeout_is_a_total_across_redirects(server):
+    base, trust = server
+    started = time.monotonic()
+    ok, why = u.ok(f"{base}/hop2", timeout=1.0, context=trust)       # three answers of 0.4 s each
+    assert not ok and why == "timed out after 1 s"
+    assert time.monotonic() - started < 1.6
+    assert u.ok(f"{base}/hop2", timeout=5, context=trust) == (True, "200 from 127.0.0.1")
+
+
+def test_a_redirect_loop_stops_at_the_cap(server):
+    base, trust = server
+    assert u.ok(f"{base}/loop", context=trust) == (False, "more than 5 redirects")
+    assert u.ok(f"{base}/loop", context=trust, redirects=1) == (False, "more than 1 redirect")
+
+
+@pytest.mark.parametrize("path", ["/to-password", "/to-bad-port", "/to-big-port"])
+def test_a_redirect_to_an_address_problem_refuses_is_an_answer_not_an_exception(server, path):
+    base, trust = server
+    ok, why = u.ok(f"{base}{path}", context=trust)
+    assert not ok and why.startswith("redirected to an address it refuses (")
