@@ -28,8 +28,12 @@ cached), and it checks:
 - the text arguments of a GitHub MCP call that writes to a public owner/repo;
 - and, on a line that publishes to a public repository, the whole command with its path words left
   out, for what the checks above cannot read (a message built from a variable, a shell given a
-  string). Text a program makes itself (a script, `sed -i`) is only seen once it is committed or
-  pushed.
+  string). A path under a temporary folder (/tmp, /private/tmp, /var/tmp, the system's temporary
+  folder, `$TMPDIR`) is left out wherever it stands, after a redirection or attached to a short
+  option too, since it is never published and a file's own text is checked on its own. And a
+  `user.email=` that is the email git is already configured with in the command's folder is left
+  out, since every commit there records it anyway. Text a program makes itself (a script, `sed -i`)
+  is only seen once it is committed or pushed.
 
 The configuration (all keys optional; a missing file means no terms, so nothing is refused):
 
@@ -65,10 +69,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 from .commandline import (
-    PATH_WORD, READ_LIMIT, commit_plan, commit_repos, expand, git_invocations, hidden_commit, push_plans,
+    GIT_TIMEOUT_S, PATH_WORD, READ_LIMIT, commit_plan, commit_repos, expand, git_invocations, hidden_commit, push_plans,
     push_url, pushed, recorded, steps, unescape, writes,
 )
 
@@ -548,6 +553,50 @@ def _push_hit(command: str, cwd: str, cfg: Config) -> str | None:
     return None
 
 
+def temp_roots() -> list[str]:
+    """The folders temporary files live in: /tmp, /private/tmp, /var/tmp and the system's temporary
+    folder, as it is named and as it resolves."""
+    here = tempfile.gettempdir().rstrip("/")
+    return sorted({"/tmp", "/private/tmp", "/var/tmp", here, os.path.realpath(here).rstrip("/")} - {""},
+                  key=len, reverse=True)
+
+
+def temp_words() -> re.Pattern:
+    """A path under a temporary folder, wherever it starts a word: after a space, a quote, `=`, `:`, a
+    redirection (`>`, `2>`, `<`) or a short option it is attached to (`-F/tmp/x`)."""
+    roots = "|".join([r"\$TMPDIR", r"\$\{TMPDIR\}", *(re.escape(r) for r in temp_roots())])
+    return re.compile(r"(?:^|(?<=[\s'\"=:<>])|(?<=\s-[A-Za-z]))(?:" + roots + r")(?=[/\s'\"]|$)[^\s'\"]*")
+
+
+#: a git identity given for one command, `-c user.email=X`
+_EMAIL_SETTING = re.compile(r"(?<![\w.-])user\.email=(['\"]?)([^\s'\"]+)\1")
+
+
+def configured_emails(command: str, cwd: str) -> set[str]:
+    """The email git is configured with in each folder the command runs git in (`git config
+    user.email`, read now), so a `-c user.email=` that only repeats it says nothing new."""
+    found = set()
+    for d in {cwd, *(inv["dir"] for inv in git_invocations(command, cwd))}:
+        try:
+            r = subprocess.run(["git", "-C", d, "config", "user.email"], capture_output=True, text=True,
+                               timeout=GIT_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0 and r.stdout.strip():
+            found.add(r.stdout.strip())
+    return found
+
+
+def command_text(command: str, cwd: str) -> str:
+    """The command as the whole-command check reads it: without path words, paths under a temporary
+    folder, or a `user.email=` that repeats the email git is configured with there."""
+    text = temp_words().sub(" ", PATH_WORD.sub(" ", command))
+    if _EMAIL_SETTING.search(text):
+        own = configured_emails(command, cwd)
+        text = _EMAIL_SETTING.sub(lambda m: " " if m.group(2) in own else m.group(0), text)
+    return text
+
+
 def _command_hit(command: str, cwd: str, cfg: Config) -> str | None:
     """A term anywhere in a command line that publishes to a public repository. The checks above
     name where a term is; this one catches what they cannot read (a message built from a
@@ -556,7 +605,7 @@ def _command_hit(command: str, cwd: str, cfg: Config) -> str | None:
     targets = publish_targets(command, cwd)
     if not targets:
         return None
-    text = PATH_WORD.sub(" ", command)
+    text = command_text(command, cwd)
     for target in targets:
         hit = _hit([text], _slug(target), cfg, known_public=target.startswith("public:"))
         if hit:
