@@ -139,6 +139,14 @@ jobs:
     if: github.repository == 'owner/name'
 ```
 
+`go_public.fork_guard_survey` says what the fork guard would find in a repository on GitHub before it is added there, without cloning the repository.
+
+```python
+from claude_ops import go_public
+go_public.fork_guard_survey("owner/name")
+# {'installed': False, 'triggers': ['stale.yml'], 'hits': [{'file': 'stale.yml', 'job': 'stale'}], ...}
+```
+
 Wire it into a repository's continuous integration, so a pull request that adds an unguarded job
 fails:
 
