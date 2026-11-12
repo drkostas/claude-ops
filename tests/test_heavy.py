@@ -1,5 +1,6 @@
 """The heavy-job queue: the turn across chats, the gate, the memory cap, holds for CI jobs, and the
 clearing of what died. Every run uses its own state folder and stand-in machine readings."""
+import importlib
 import json
 import os
 import shutil
@@ -59,11 +60,13 @@ def test_heavy_queue(monkeypatch):
                                 stderr=subprocess.STDOUT, text=True, env=env(**extra))
 
     def module(**extra):
+        """claude_ops.heavy loaded again under these settings. `from claude_ops import heavy` would
+        hand back the package's attribute, the module an earlier import made, with its folders and
+        limits from that time, so it is imported by name."""
         for k, v in {"HEAVY_DIR": str(STATE), **extra}.items():
             monkeypatch.setenv(k, v)
         sys.modules.pop("claude_ops.heavy", None)
-        from claude_ops import heavy as h
-        return h
+        return importlib.import_module("claude_ops.heavy")
 
     # --- a job runs, its output and exit code pass through, the slot comes back ------------------
     rc, out = heavy("t", "small", "--", "bash", "-c", "echo hello-from-job; exit 3")
@@ -166,7 +169,8 @@ def test_heavy_queue(monkeypatch):
     check(h.failing(folder=STATE / "done", within_hours=1, at_least=1)
           and h.failing(folder=STATE / "nowhere") == [], "a reader may name the done folder")
     check(len(recs) == 4 and all("end" in j and "how" in j for j in recs)
-          and sum(j["how"] == "exit 7" for j in recs) == 3, "each record keeps when it ended and how it failed")
+          and sum(j["how"] == "exit 7" for j in recs) == 3,
+          f"each record keeps when it ended and how it failed (read from {h.DONE}): {recs}")
 
     # --- the gate ---------------------------------------------------------------------------------
     h = module(HEAVY_MIN_FREE_GB="6", HEAVY_MAX_SWAP_GB="14", HEAVY_MIN_DISK_PCT="10")
