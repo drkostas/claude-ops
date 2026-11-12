@@ -172,6 +172,9 @@ def cmd_hook(a) -> int:
     if a.name == "wide-kill":
         from .hooks import wide_kill
         return wide_kill.main([])
+    if a.name == "rtk-rewrite":
+        from .hooks import rtk_rewrite
+        return rtk_rewrite.main([])
     if a.name == "chain":
         from .hooks import chain
         return chain.main([])
@@ -467,7 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
                                     "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "mail-guard", "wide-kill",
-                                    "chain"))
+                                    "rtk-rewrite", "chain"))
     s.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("unwrap-github", help="join the broken paragraphs in what you posted on GitHub")
