@@ -1,5 +1,6 @@
-"""The plain-voice hook: GitHub text is refused when a paragraph is broken across lines, or when it
-carries a phrase on the configured list, and the joined text is saved for the model to send."""
+"""The plain-voice hook: GitHub text with a paragraph broken across lines is joined before it is sent,
+word for word in the command or the MCP call, or refused naming the saved text when that cannot be
+done exactly; text that carries a phrase on the configured list is refused."""
 import io
 import json
 import os
@@ -21,22 +22,66 @@ def bash(command, cwd):
     return {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)}
 
 
-def test_a_wrapped_pr_body_is_refused_and_its_joined_text_saved(tmp_path):
+JOINED = "Title line\n\nThe first sentence is long enough that it was wrapped onto a second line here.\n"
+
+
+def joined(command, cwd, cfg=None):
+    """(the changed command, the files it now sends) for a call the hook joins; it is refused by none."""
+    why, new, note = pv.review(bash(command, cwd), cfg or pv.Config())
+    assert why is None and new is not None and "joined before it was sent" in note, (command, why)
+    assert not any(pv.markdown.is_wrapped(t) for _w, t in pv.texts_of(bash(new["command"], cwd)))
+    return new["command"], [w for w in shlex.split(new["command"].split("\n")[0]) if pv.SAVED in w]
+
+
+def test_a_wrapped_body_file_is_sent_joined_from_a_saved_file_and_the_callers_file_is_left_alone(tmp_path):
     body = tmp_path / "body.md"
     body.write_text(WRAPPED)
-    why = pv.check(bash(f"gh pr create --title T --body-file {body}", tmp_path), pv.Config())
-    assert why and "broken across lines" in why and "onto a second line here." in why
-    saved = why.split("saved in ")[1].split(";")[0]
-    assert open(saved).read() == ("Title line\n\nThe first sentence is long enough that it was wrapped "
-                                  "onto a second line here.\n")
+    command, files = joined(f"gh pr create --title T --body-file {body}", tmp_path)
+    assert command.startswith("gh pr create --title T --body-file ") and str(body) not in command
+    assert open(files[0]).read() == JOINED and body.read_text() == WRAPPED
 
 
-def test_wrapped_text_in_every_way_gh_takes_a_body_is_refused(tmp_path):
-    for command in (f"gh pr create --title T --body {shlex.quote(WRAPPED)}",
-                    f"gh issue comment 3 --body-file - <<'EOF'\n{WRAPPED}EOF",
-                    f"gh pr edit 4 -b {shlex.quote(WRAPPED)}",
-                    f"gh api repos/someone/demo/issues/3/comments -f body={shlex.quote(WRAPPED)}"):
-        assert pv.check(bash(command, tmp_path), pv.Config()), command
+def test_wrapped_text_in_every_way_gh_takes_a_body_is_joined_word_for_word(tmp_path):
+    cases = {
+        f"gh pr create --title 'A [draft] title?' --body {shlex.quote(WRAPPED)}":
+            "gh pr create --title 'A [draft] title?' --body-file ",
+        f"gh pr edit 4 -b {shlex.quote(WRAPPED)}": "gh pr edit 4 --body-file ",
+        f"gh release create v1 --notes={shlex.quote(WRAPPED)}": "gh release create v1 --notes-file=",
+        f"gh issue comment 3 --body-file - <<'EOF'\n{WRAPPED}EOF": "gh issue comment 3 --body-file ",
+        f"gh api repos/someone/demo/issues/3/comments -f body={shlex.quote(WRAPPED)}":
+            "gh api repos/someone/demo/issues/3/comments -F body=@",
+    }
+    for command, start in cases.items():
+        new, files = joined(command, tmp_path)
+        assert new.startswith(start), (command, new)
+        saved = files[0].split("=@")[-1].split("=")[-1]
+        assert open(saved).read() == JOINED, command
+
+
+def test_code_lists_and_one_line_paragraphs_are_kept_as_they_are_when_the_rest_is_joined(tmp_path):
+    text = ("Title\n\nA long paragraph that someone wrapped at seventy-two columns for\nno reason at all here.\n\n"
+            "- an item\n- another item\n\n```\ncode line one\ncode line two\n```\n")
+    _, files = joined(f"gh pr comment 1 --body {shlex.quote(text)}", tmp_path)
+    assert open(files[0]).read() == ("Title\n\nA long paragraph that someone wrapped at seventy-two columns for "
+                                     "no reason at all here.\n\n- an item\n- another item\n\n"
+                                     "```\ncode line one\ncode line two\n```\n")
+
+
+def test_a_joined_text_that_still_has_a_listed_phrase_is_refused(tmp_path):
+    cfg = pv.Config([{"regex": r"\w: ", "why": "a colon in prose"}])
+    text = "Done.\n\nThe check reads the long sentence that a person wrapped here and it says\nthis: a colon.\n"
+    why, new, _ = pv.review(bash(f"gh pr comment 1 --body {shlex.quote(text)}", tmp_path), cfg)
+    assert new is None and "a colon in prose" in why and "this: a colon." in why
+
+
+def test_a_command_that_cannot_be_changed_exactly_is_refused_with_the_saved_text(tmp_path):
+    for command in (f"cd {tmp_path} && gh pr comment 1 --body {shlex.quote(WRAPPED)}",
+                    f"gh issue comment 3 --body-file - <<EOF\n{WRAPPED}EOF",
+                    f"gh pr comment 1 --body {shlex.quote(WRAPPED)} | cat"):
+        why, new, _ = pv.review(bash(command, tmp_path), pv.Config())
+        assert new is None and "broken across lines" in why and "saved in " in why, command
+        saved = why.split("saved in ")[1].split(";")[0]
+        assert open(saved).read() == JOINED
 
 
 def test_a_body_with_one_line_per_paragraph_and_a_commit_message_pass(tmp_path):
@@ -45,10 +90,12 @@ def test_a_body_with_one_line_per_paragraph_and_a_commit_message_pass(tmp_path):
     assert pv.check(bash(f"git commit -m {shlex.quote(WRAPPED)}", tmp_path), pv.Config()) is None
 
 
-def test_a_github_mcp_call_that_writes_is_checked_and_a_read_is_not():
+def test_a_github_mcp_call_that_writes_is_joined_and_a_read_is_left_alone():
     write = {"tool_name": "mcp__github__add_issue_comment", "tool_input": {"owner": "a", "repo": "b", "body": WRAPPED}}
     read = {"tool_name": "mcp__github__get_file_contents", "tool_input": {"owner": "a", "repo": "b", "path": WRAPPED}}
-    assert pv.check(write, pv.Config()) and pv.check(read, pv.Config()) is None
+    why, new, _ = pv.review(write, pv.Config())
+    assert why is None and new == {"owner": "a", "repo": "b", "body": JOINED}
+    assert pv.review(read, pv.Config()) == (None, None, "")
 
 
 def test_a_listed_phrase_in_the_prose_is_refused_and_code_urls_and_allowed_text_are_not(tmp_path):
@@ -72,10 +119,17 @@ def test_the_patterns_come_from_the_file(tmp_path, monkeypatch):
     assert pv.load([]).patterns == []
 
 
-def test_main_refuses_with_exit_2_and_fails_open(tmp_path, monkeypatch, capsys):
+def test_main_joins_refuses_with_exit_2_and_fails_open(tmp_path, monkeypatch, capsys):
     payload = bash(f"gh pr create --title T --body {shlex.quote(WRAPPED)}", tmp_path)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
-    assert pv.main(["--config", os.devnull]) == 2 and "broken across lines" in capsys.readouterr().err
+    assert pv.main(["--config", os.devnull]) == 0
+    spec = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert spec["updatedInput"]["command"].startswith("gh pr create --title T --body-file ")
+    assert "permissionDecision" not in spec and "joined before it was sent" in spec["additionalContext"]
+    cfg = tmp_path / "plain.json"
+    cfg.write_text(json.dumps({"patterns": [{"regex": "—", "why": "an em-dash"}]}))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(bash("gh pr comment 1 --body 'One — two.'", tmp_path))))
+    assert pv.main(["--config", str(cfg)]) == 2 and "an em-dash" in capsys.readouterr().err
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert pv.main([]) == 0
 
