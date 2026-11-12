@@ -153,3 +153,17 @@ def test_the_state_of_an_item_that_left_the_open_list():
     assert item_state("o/p", 1, get=lambda path: {"state": "closed", "pull_request": {"merged_at": "2026-01-01"}}) == "merged"
     assert item_state("o/p", 1, get=lambda path: {"state": "closed", "pull_request": {"merged_at": None}}) == "closed"
     assert item_state("o/p", 1, get=lambda path: {"state": "open"}) == "open"
+
+
+def test_an_unlinked_commit_is_ours_when_its_git_author_or_committer_says_so():
+    def commit(sha, **kw):
+        return {"sha": sha, "author": None, "committer": kw.get("committer"),
+                "commit": {"author": {"name": kw.get("name", "A Person"), "email": kw.get("email", "a@example.org")},
+                           "committer": {"date": sha}}}
+    get, _ = fake_lists({
+        "/repos/o/p/issues/3/comments": [], "/repos/o/p/pulls/3/reviews": [], "/repos/o/p/pulls/3/comments": [],
+        "/repos/o/p/pulls/3/commits": [commit("1", email="Me@Example.org"), commit("2", name="My Name"),
+                                       commit("3", committer=ME), commit("4", name="Someone Else")],
+    })
+    events = item_events("o/p", 3, pull_request=True, me="me", also_me=("me@example.org", "my name"), get=get)
+    assert [(e["id"], e["who"]) for e in events] == [("commit:4", "Someone Else")]
