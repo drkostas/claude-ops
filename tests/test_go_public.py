@@ -382,7 +382,8 @@ class ForkGuardWorld:
 
 def test_add_fork_guard_installs_the_workflow_through_a_merged_pull_request():
     world = ForkGuardWorld()
-    g.add_fork_guard("example/repo", "main", REFERENCE, run=world, wait=lambda s: None)
+    url = g.add_fork_guard("example/repo", "main", REFERENCE, run=world, wait=lambda s: None)
+    assert url == "https://github.com/example/repo/pull/9"
     assert ".github/workflows/fork-guard.yml" in world.branch_files
     assert "refs/heads/ci/fork-guard" in world.branch_refs
     assert world.merged
@@ -397,3 +398,76 @@ def test_add_fork_guard_stops_when_its_check_fails_on_the_pull_request():
     with pytest.raises(g.Refused, match="failed on its own pull request"):
         g.add_fork_guard("example/repo", "main", REFERENCE, run=world, wait=lambda s: None)
     assert not world.merged
+
+
+SCHEDULED_UNGUARDED = """name: Stale
+on:
+  schedule:
+    - cron: "0 3 * * *"
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh issue close 1
+"""
+SCHEDULED_GUARDED = SCHEDULED_UNGUARDED.replace("    runs-on:", "    if: github.repository == 'example/repo'\n    runs-on:")
+ON_PUSH = "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n"
+
+
+class WorkflowsWorld:
+    """gh as a fake `run` serving one repository's .github/workflows folder through the contents API."""
+
+    def __init__(self, files, *, folder=True):
+        self.files, self.folder, self.cmds = files, folder, []
+
+    def __call__(self, args, *, stdin=None, cwd=None, check=True):
+        self.cmds.append(args)
+        path = args[2].split("?")[0] if len(args) > 2 else ""
+        if args[:2] == ["gh", "api"] and path.endswith("/contents/.github/workflows"):
+            if not self.folder:
+                return subprocess.CompletedProcess(args, 1, "", "gh: Not Found (HTTP 404)")
+            listing = [{"name": n, "type": "file"} for n in self.files] + [{"name": "scripts", "type": "dir"}]
+            return subprocess.CompletedProcess(args, 0, json.dumps(listing), "")
+        if args[:2] == ["gh", "api"] and "/contents/.github/workflows/" in path:
+            name = path.rsplit("/", 1)[1]
+            if name not in self.files:
+                return subprocess.CompletedProcess(args, 1, "", "gh: Not Found (HTTP 404)")
+            content = base64.b64encode(self.files[name].encode()).decode()
+            return subprocess.CompletedProcess(args, 0, json.dumps({"content": content}), "")
+        raise AssertionError(f"unexpected command {args}")
+
+
+def test_fork_guard_survey_names_the_scheduled_files_and_the_jobs_it_would_flag():
+    pytest.importorskip("yaml")
+    world = WorkflowsWorld({"stale.yml": SCHEDULED_UNGUARDED, "ci.yml": ON_PUSH, "notes.txt": "x"})
+    got = g.fork_guard_survey("example/repo", run=world)
+    assert got == {"repo": "example/repo", "installed": False, "triggers": ["stale.yml"],
+                   "hits": [{"file": "stale.yml", "job": "stale"}], "unreadable": []}
+    assert not any("-X" in c for c in world.cmds)   # it only reads
+
+
+def test_fork_guard_survey_clears_a_guarded_job_and_sees_the_installed_check():
+    pytest.importorskip("yaml")
+    world = WorkflowsWorld({"stale.yml": SCHEDULED_GUARDED, "fork-guard.yml": "name: Fork guard\non: pull_request\n"})
+    got = g.fork_guard_survey("example/repo", "main", run=world)
+    assert got["installed"] and got["triggers"] == ["stale.yml"] and got["hits"] == []
+    assert all(c[2].endswith("?ref=main") for c in world.cmds)
+
+
+def test_fork_guard_survey_of_a_repository_with_no_workflows_is_empty():
+    pytest.importorskip("yaml")
+    got = g.fork_guard_survey("example/repo", run=WorkflowsWorld({}, folder=False))
+    assert got == {"repo": "example/repo", "installed": False, "triggers": [], "hits": [], "unreadable": []}
+
+
+def test_public_repos_lists_the_public_unarchived_ones():
+    seen = []
+
+    def run(args, *, stdin=None, cwd=None, check=True):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 0, "example/a\nexample/b\n", "")
+    assert g.public_repos("example", run=run) == ["example/a", "example/b"]
+    assert "--visibility" in seen[0] and "public" in seen[0] and "isArchived" in " ".join(seen[0])
+    assert "isFork | not" not in seen[0][-1]
+    g.public_repos("example", run=run, forks=False)
+    assert seen[1][-1] == ".[] | select((.isArchived | not) and (.isFork | not)) | .nameWithOwner"
