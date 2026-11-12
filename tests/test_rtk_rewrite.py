@@ -1,7 +1,8 @@
 """The rtk-rewrite hook: which commands get their rtk form, and which run as written.
 
 The cases are the ones a shell version of this hook was tested with, so the two give the same
-rewrites, plus the message-file commit, which goes to git itself here.
+rewrites, plus the message-file commit, which goes to git itself here, and a leading `cd <folder> &&`,
+which the shell version never looked past.
 """
 import io
 import json
@@ -59,6 +60,13 @@ def rewrite(command, cwd="", major=1):
     ("grep foo file\ngrep bar file", "rtk grep foo file\ngrep bar file"),
     # trailing newlines go, as a shell's $(...) drops them
     ("git status\n", "rtk git status"),
+    # one leading `cd <folder> &&` is kept, and the rest of the line is judged
+    ("cd /tmp && git status", "cd /tmp && rtk git status"),
+    ("cd ~/src/repo && gh pr list", "cd ~/src/repo && rtk gh pr list"),
+    ("cd repo && grep foo file", "cd repo && rtk grep foo file"),
+    ("cd a&&ls -la", "cd a&&rtk ls -la"),
+    ("cd ../x && git status && git diff", "cd ../x && rtk git status && git diff"),
+    ("cd /tmp && git status\ngit diff", "cd /tmp && rtk git status\ngit diff"),
 ])
 def test_rewritten(command, want, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)     # "src" must not be a folder here
@@ -114,6 +122,21 @@ def test_rewritten(command, want, tmp_path, monkeypatch):
     "git  status",
     "cat\tfile",
     "",
+    # a cd the rest cannot be read after, or a rest that would be left alone on its own
+    "cd /tmp; git status",
+    "cd /tmp || git status",
+    "cd /a && cd /b && git status",
+    'cd "my dir" && git status',
+    "cd $HOME/x && git status",
+    "cd - && git status",
+    "cd && git status",
+    "cd /tmp &&\ngit status",
+    "cd /tmp && grep -n foo file",
+    "cd /tmp && rtk git status",
+    "cd /tmp && echo hi",
+    "cd /tmp && git commit -F msg.txt",
+    "cd /tmp && gh pr view 1 --json body",
+    "cd /tmp && cat <<EOF\nx\nEOF",
 ])
 def test_left_alone(command):
     assert rewrite(command) is None
@@ -135,6 +158,16 @@ def test_a_plain_grep_on_a_folder_gets_r_from_rtk_1(tmp_path):
     assert rewrite(f"grep foo {folder}", major=None) == f"rtk grep foo {folder}"
     # a redirection in the path's place is not a path
     assert rewrite(f"grep foo >{folder}") == f"rtk grep foo >{folder}"
+
+
+def test_a_grep_after_cd_reads_its_path_against_that_folder(tmp_path, monkeypatch):
+    (tmp_path / "repo" / "src").mkdir(parents=True)
+    assert rewrite(f"cd {tmp_path}/repo && grep foo src") == f"cd {tmp_path}/repo && rtk grep -r foo src"
+    assert rewrite(f"cd {tmp_path} && grep foo src") == f"cd {tmp_path} && rtk grep foo src"
+    # a relative cd is read against the call's working folder, and ~ is the home folder
+    assert rewrite("cd repo && grep foo src", cwd=str(tmp_path)) == "cd repo && rtk grep -r foo src"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert rewrite("cd ~/repo && grep foo src") == "cd ~/repo && rtk grep -r foo src"
 
 
 def test_the_version_is_asked_only_for_a_folder(tmp_path):

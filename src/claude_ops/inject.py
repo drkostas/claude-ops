@@ -201,14 +201,16 @@ def input_age(name: str, *, now: float | None = None, env: Mapping[str, str] | N
 
 
 #: the keys `press` sends, by their tmux names
-KEYS = ("Escape",)
+KEYS = ("Escape", "Enter")
 
 
 def press(target: str, key: str, *, transport: str = "tmux",
           env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     """Press one key in a tmux session: Escape, to close a menu without choosing anything in it
-    (`update.rc_menu`). Nothing is typed and nothing is logged, since a key carries no text. Look at
-    the screen first: in a session at work, Escape stops its turn."""
+    (`update.rc_menu`), or Enter, to send a paste of your own that the session still holds in its
+    input line (`update.held_paste`). Nothing is typed and nothing is logged, since a key carries no
+    text. Look at the screen first: in a session at work Escape stops its turn, and Enter sends
+    whatever the input line holds."""
     if key not in KEYS:
         raise ValueError(f"press sends {', '.join(KEYS)}, not {key!r}")
     if transport != "tmux":

@@ -1,7 +1,9 @@
 """The heavy-job queue: the turn across chats, the gate, the memory cap, holds for CI jobs, and the
 clearing of what died. Every run uses its own state folder and stand-in machine readings."""
+import importlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +15,23 @@ import claude_ops
 ROOMY = "20 2 50"          # free GB, swap GB, disk %: a machine with room
 #: the package under test, for the child processes: an installed claude-ops elsewhere must not answer
 SRC = str(Path(claude_ops.__file__).resolve().parents[1])
+
+
+def test_a_slot_given_back_while_it_is_looked_at_is_no_error(monkeypatch, tmp_path):
+    """clear_stale finds the slot's folder, then reads its age. A holder that gives the slot back in
+    between (its record goes first, then the folder) used to end the waiter that looked with
+    FileNotFoundError, so that waiter's job never ran."""
+    from claude_ops import heavy as h
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    monkeypatch.setattr(h, "SLOT", slot)
+
+    def given_back():
+        shutil.rmtree(slot)          # the release, between the look at the folder and the look at its age
+        return None
+    monkeypatch.setattr(h, "holder", given_back)
+    h.clear_stale()
+    assert not slot.exists()
 
 
 def test_heavy_queue(monkeypatch):
@@ -41,11 +60,13 @@ def test_heavy_queue(monkeypatch):
                                 stderr=subprocess.STDOUT, text=True, env=env(**extra))
 
     def module(**extra):
+        """claude_ops.heavy loaded again under these settings. `from claude_ops import heavy` would
+        hand back the package's attribute, the module an earlier import made, with its folders and
+        limits from that time, so it is imported by name."""
         for k, v in {"HEAVY_DIR": str(STATE), **extra}.items():
             monkeypatch.setenv(k, v)
         sys.modules.pop("claude_ops.heavy", None)
-        from claude_ops import heavy as h
-        return h
+        return importlib.import_module("claude_ops.heavy")
 
     # --- a job runs, its output and exit code pass through, the slot comes back ------------------
     rc, out = heavy("t", "small", "--", "bash", "-c", "echo hello-from-job; exit 3")
@@ -148,7 +169,8 @@ def test_heavy_queue(monkeypatch):
     check(h.failing(folder=STATE / "done", within_hours=1, at_least=1)
           and h.failing(folder=STATE / "nowhere") == [], "a reader may name the done folder")
     check(len(recs) == 4 and all("end" in j and "how" in j for j in recs)
-          and sum(j["how"] == "exit 7" for j in recs) == 3, "each record keeps when it ended and how it failed")
+          and sum(j["how"] == "exit 7" for j in recs) == 3,
+          f"each record keeps when it ended and how it failed (read from {h.DONE}): {recs}")
 
     # --- the gate ---------------------------------------------------------------------------------
     h = module(HEAVY_MIN_FREE_GB="6", HEAVY_MAX_SWAP_GB="14", HEAVY_MIN_DISK_PCT="10")
@@ -216,12 +238,21 @@ def test_heavy_queue(monkeypatch):
     b = start("chat-b", "b1", "--", *job, "b1")           # queued after all three of chat-a
     check(soon(lambda: waiting() == 4), "b1 waits in the queue")
     go.touch()
-    for q in [first, *a, b]:
-        q.wait(timeout=60)
+    jobs = {"busy-1": first, "a1": a[0], "a2": a[1], "a3": a[2], "b1": b}
+    for q in jobs.values():
+        try:
+            q.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            q.kill(); q.wait()
     order = log.read_text().split()
-    check(order[0] == "busy-1" and order.index("b1") < order.index("a2"),
-          f"⭐ a chat that queues three jobs takes turns with a chat that queued one later: {order}")
-    check(order.index("a1") < order.index("a2") < order.index("a3"), "and each chat's jobs keep their order")
+    # a job that never ran is named, with its exit code and what it printed, rather than a bare
+    # ValueError from order.index() (it failed about one full run in three on a loaded machine)
+    missing = {n: (q.returncode, q.stdout.read()[-400:]) for n, q in jobs.items() if n not in order}
+    check(not missing, f"every job of the turn ran: the log holds {order}; these did not: {missing}")
+    if not missing:
+        check(order[0] == "busy-1" and order.index("b1") < order.index("a2"),
+              f"⭐ a chat that queues three jobs takes turns with a chat that queued one later: {order}")
+        check(order.index("a1") < order.index("a2") < order.index("a3"), "and each chat's jobs keep their order")
 
     # --- holds for CI jobs, and release -------------------------------------------------------------
     worker = subprocess.Popen(["sleep", "30"])

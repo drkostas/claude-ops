@@ -179,7 +179,7 @@ def test_press_sends_one_escape_to_a_tmux_session(tmp_path):
     env["TMUX_TMPDIR"] = short
     out = tmp_path / "key.bin"
     subprocess.run(["tmux", "-u", "new-session", "-d", "-s", "claude-k",
-                    f"stty raw -echo; head -c 2 > {out}"], check=True, env=env)
+                    f"stty raw -echo; head -c 3 > {out}"], check=True, env=env)
     try:
         # the key must arrive after stty, or the terminal keeps it waiting for a whole line
         for _ in range(50):
@@ -190,12 +190,14 @@ def test_press_sends_one_escape_to_a_tmux_session(tmp_path):
             time.sleep(0.1)
         ok, why = inject.press("claude-k", "Escape", env=env)
         assert ok, why
+        ok, why = inject.press("claude-k", "Enter", env=env)
+        assert ok, why
         subprocess.run(["tmux", "send-keys", "-t", "claude-k", "-l", "z"], env=env)   # marks the end
         for _ in range(50):
-            if out.exists() and out.stat().st_size >= 2:
+            if out.exists() and out.stat().st_size >= 3:
                 break
             time.sleep(0.1)
-        assert out.read_bytes() == b"\x1bz"
+        assert out.read_bytes() == b"\x1b\rz"
     finally:
         subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
         shutil.rmtree(short, ignore_errors=True)
@@ -203,7 +205,7 @@ def test_press_sends_one_escape_to_a_tmux_session(tmp_path):
 
 def test_press_sends_only_the_keys_it_names():
     with pytest.raises(ValueError):
-        inject.press("claude-k", "Enter")
+        inject.press("claude-k", "C-c")
     with pytest.raises(ValueError):
         inject.press("S1", "Escape", transport="iterm")
 
