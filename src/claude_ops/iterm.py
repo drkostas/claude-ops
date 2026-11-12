@@ -64,11 +64,30 @@ def assign(windows: Sequence[Sequence[tuple[str, Sequence[float] | None]]],
     return out
 
 
-def tmux_by_tty(*, tmux: str = "tmux", env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """{terminal device: tmux session} for every tmux client, {} when tmux does not answer."""
+class TmuxNotFound(RuntimeError):
+    """The tmux program could not be started: it is not on the PATH a caller passed, or not at the
+    path given. Raised instead of answering "no clients", which a caller cannot tell apart from this.
+    A background job's PATH often lacks the folder tmux is installed in, so pass its full path."""
+
+
+def _tmux(tmux: str, args: Sequence[str], *, env: Mapping[str, str] | None, run=None,
+          timeout: float = 5) -> subprocess.CompletedProcess:
+    """Run tmux. A program that cannot be started raises TmuxNotFound; a timeout and any other OSError
+    reach the caller as they are, which reads them as "tmux did not answer"."""
     try:
-        r = subprocess.run([tmux, "list-clients", "-F", "#{client_tty} #{session_name}"],
-                           capture_output=True, text=True, timeout=5, env=env)
+        return (run or subprocess.run)([tmux, *args], capture_output=True, text=True, timeout=timeout,
+                                       env=env)
+    except (FileNotFoundError, PermissionError, NotADirectoryError) as e:
+        path = (env or os.environ).get("PATH", "")
+        raise TmuxNotFound(f"could not start tmux as {tmux!r} ({e.strerror or e}) with PATH {path!r}; "
+                           f"pass its full path as tmux=") from e
+
+
+def tmux_by_tty(*, tmux: str = "tmux", env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """{terminal device: tmux session} for every tmux client, {} when tmux answers no clients (no
+    server runs) or does not answer in time. Raises TmuxNotFound when tmux cannot be started."""
+    try:
+        r = _tmux(tmux, ["list-clients", "-F", "#{client_tty} #{session_name}"], env=env)
     except (OSError, subprocess.TimeoutExpired):
         return {}
     return dict(line.split(" ", 1) for line in r.stdout.splitlines() if " " in line)
@@ -78,7 +97,7 @@ def chat_tabs(*, prefix: str = "claude-", tmux: str = "tmux",
               env: Mapping[str, str] | None = None) -> list[list[tuple[str, Color | None, str]]] | None:
     """Per iTerm2 window, (tmux session, tab color or None, iTerm2 session id) for each tab that
     shows a tmux session whose name starts with `prefix`. None when iTerm2's API does not answer or
-    the `iterm2` package is missing."""
+    the `iterm2` package is missing, and TmuxNotFound when tmux cannot be started."""
     try:
         import iterm2   # noqa: PLC0415
     except ImportError:
@@ -465,11 +484,10 @@ def shell_windows(folder: str, raw: str | None = None, *, run=subprocess.run,
 
 def tmux_client_ttys(session: str, *, tmux: str = "tmux", env: Mapping[str, str] | None = None) -> set[str]:
     """The terminals of the plain clients attached to a tmux session (a control-mode client has
-    none of its own that iTerm2 shows)."""
+    none of its own that iTerm2 shows). Raises TmuxNotFound when tmux cannot be started."""
     try:
-        r = subprocess.run([tmux, "list-clients", "-t", session, "-F",
-                            "#{client_tty} #{client_control_mode}"],
-                           capture_output=True, text=True, timeout=5, env=env)
+        r = _tmux(tmux, ["list-clients", "-t", session, "-F", "#{client_tty} #{client_control_mode}"],
+                  env=env)
     except (OSError, subprocess.TimeoutExpired):
         return set()
     if r.returncode != 0:
@@ -504,10 +522,11 @@ def doubled_clients(*, prefix: str = "claude-", tmux: str = "tmux", env: Mapping
     tabs (an iTerm2 that restores two saved tabs of one session when it starts does this). Each client
     is {tty, pid, created}, oldest first, and the oldest is left out, so what is returned is what to
     detach. A control-mode client is not counted, nor a client outside iTerm2 (an ssh login, another
-    terminal app), which a person may have opened on purpose. None when tmux or ps does not answer."""
+    terminal app), which a person may have opened on purpose. None when tmux or ps does not answer,
+    and TmuxNotFound when tmux cannot be started."""
     try:
-        r = run([tmux, "list-clients", "-F", "#{client_tty}\t#{client_pid}\t#{client_created}\t"
-                 "#{client_control_mode}\t#{session_name}"], capture_output=True, text=True, timeout=5, env=env)
+        r = _tmux(tmux, ["list-clients", "-F", "#{client_tty}\t#{client_pid}\t#{client_created}\t"
+                         "#{client_control_mode}\t#{session_name}"], env=env, run=run)
         ps = run(["ps", "-Ao", "pid=,ppid=,command="], capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -532,10 +551,10 @@ def doubled_clients(*, prefix: str = "claude-", tmux: str = "tmux", env: Mapping
 def detach_client(tty: str, *, tmux: str = "tmux", env: Mapping[str, str] | None = None,
                   run=subprocess.run) -> bool:
     """Detach one tmux client by its terminal, which ends the client and so closes the iTerm2 tab it
-    ran in; the session goes on. Whether tmux said yes."""
+    ran in; the session goes on. Whether tmux said yes. Raises TmuxNotFound when tmux cannot be
+    started."""
     try:
-        return run([tmux, "detach-client", "-t", tty], capture_output=True, text=True, timeout=5,
-                   env=env).returncode == 0
+        return _tmux(tmux, ["detach-client", "-t", tty], env=env, run=run).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -753,7 +772,7 @@ def bind_chat_keys(send_hex: Mapping[str, Sequence[int]], *, prefix: str = "clau
     the session's other settings stay. Answers the tmux sessions whose tab changed; a tab that has the
     bindings already is left alone. With `apply` False nothing is changed and the answer is the
     sessions whose tab lacks them. None when iTerm2's API did not answer or the `iterm2` package is
-    missing.
+    missing, and TmuxNotFound when tmux cannot be started.
 
     A program in fullscreen (the alternate screen) keeps its history to itself, so iTerm2's Cmd+F
     finds only what is on the screen; a binding that sends the program's own search keys instead is
