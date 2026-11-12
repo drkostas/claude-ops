@@ -11,6 +11,11 @@ What it changes, and what it leaves alone:
 - Only the first line of a command is judged and changed. A rule that looked at every line once
   rewrote a flagged `grep -oE` on line two (`F=...`, then a newline, then the grep), which rtk then
   refused, so later lines always run as written.
+- One leading `cd <folder> &&` on the first line is kept as it is, and the rest of the line is judged
+  as if it began the command (`cd repo && git status` becomes `cd repo && rtk git status`). The
+  folder must be one plain word (letters, digits and `_ . / @ + , : = % -`, with `~` at its start for
+  the home folder). A quoted folder, one with a variable, `cd x; cmd`, `cd x || cmd` and a second
+  `cd` after the first run as written. A plain grep's relative path is read against that folder.
 - A first line that already runs rtk (`rtk ...`, or a path ending in `/rtk `) is left alone, and so is
   any command with a here-document (`<<`), whose body is data the rules must not read.
 - `grep` and `rg` are rewritten only in the plain `grep PATTERN [PATH]` form: no word of the first
@@ -87,6 +92,8 @@ RULES: list[tuple[str, str, str]] = [
     (_word("golangci-lint"), "^golangci-lint", "rtk golangci-lint"),
 ]
 _RULES = [(re.compile(m), re.compile(p), r) for m, p, r in RULES]
+#: one leading `cd <folder> &&`, the folder one plain word, `~` allowed at its start
+_CD = re.compile(r"^cd[ \t]+(~?[A-Za-z0-9_./@+,:=%-]*)[ \t]*&&[ \t]*")
 _GH_EXACT = re.compile(rf"(?:^|{_SP})--(?:json|jq|template)(?:[ \t\n\v\f\r=]|\Z)")
 
 
@@ -148,6 +155,18 @@ def rewrite(command: str, cwd: str = "", major: Callable[[], int | None] = rtk_m
     if not isinstance(command, str):
         return None
     command = command.rstrip("\n")
+    m = _CD.match(command)
+    if m and m.group(1) and not m.group(1).startswith("-"):     # `cd -` is the previous folder
+        folder = os.path.expanduser(m.group(1))
+        if not os.path.isabs(folder) and cwd:
+            folder = os.path.join(cwd, folder)
+        rest = _rewrite(command[m.end():], folder, major)
+        return None if rest is None else command[:m.end()] + rest
+    return _rewrite(command, cwd, major)
+
+
+def _rewrite(command: str, cwd: str, major: Callable[[], int | None]) -> str | None:
+    """rewrite() for a command with no leading cd."""
     first = command.split("\n", 1)[0]
     if not command or first.startswith("rtk ") or "/rtk " in first or "<<" in command:
         return None
