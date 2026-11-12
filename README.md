@@ -51,6 +51,18 @@ claude-ops tracebacks app.log --offset 81920                         # only what
 
 In Python, `tracebacks.read_new(path, offset)` returns the tracebacks after `offset`, the offset to start from next time and how many bytes it skipped (a backlog over 8 MB is skipped from its start). A traceback still being written at the end of the file waits for the next pass, a log that shrank is read from the start, a chain ("During handling of the above exception") is one traceback named by its last exception, and two threads writing at once keep what was complete. `tracebacks.group(traces, prefer)` folds them by signature, such as `KeyError at handlers.py:render`.
 
+## Wait until an https page answers
+
+A job that waits until a page exists (a package's listing, a release page, a badge) can ask once on each pass instead of someone checking every day by hand. `url_check.ok(url)` makes one GET with a 10 second timeout and passes only on a 200.
+
+```python
+from claude_ops import url_check
+url_check.ok("https://example.org/")          # (True, "200 from example.org")
+url_check.problem("http://example.org/")      # "takes only https addresses, ..."
+```
+
+Only https addresses are taken, and redirects are followed only to https. An address with a user name or password in it, or with no host, is refused by `problem` before anything is sent, and `ok` raises `NotHttps` for it. The request sends no cookies and no credentials. Any other answer is `(False, why)`, with the status or the error named ("404 from example.org", "timed out after 10 s").
+
 ## What a deploy brought
 
 `claude-ops changelog <old> <new>` lists the pull requests merged between two commits, oldest first, so a deploy can say what arrived instead of two hashes. It reads the first-parent history, so the commits inside each pull request are left out.
