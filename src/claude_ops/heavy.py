@@ -224,12 +224,21 @@ def past_jobs() -> list[dict]:
 
 
 def clear_stale() -> None:
-    """A slot whose holder is gone is free; one made but never filled is free after a minute."""
+    """A slot whose holder is gone is free; one made but never filled is free after a minute.
+
+    A holder that gives the slot back removes its record and then the folder, so a look that finds
+    the folder but no record may find no folder a moment later. That is a slot given back, not an
+    error: it raised FileNotFoundError here, and the waiter that looked ended without running its job
+    (about 1 job in 45 when twelve short jobs queued at once)."""
     if not SLOT.is_dir():
         return
     h = holder()
     if h is None:
-        if time.time() - SLOT.stat().st_mtime > 60:
+        try:
+            made = SLOT.stat().st_mtime
+        except OSError:
+            return
+        if time.time() - made > 60:
             shutil.rmtree(SLOT, ignore_errors=True)
     elif not alive(int(h["pid"])):
         shutil.rmtree(SLOT, ignore_errors=True)
