@@ -417,3 +417,41 @@ def test_doubled_clients_say_unknown_when_tmux_does_not_answer():
 def test_detach_client_names_the_terminal():
     run = _runner("", "")
     assert iterm.detach_client("/dev/ttys048", run=run) and run.detached == ["/dev/ttys048"]
+
+
+# ----------------------------------------------------------------------------- a missing tmux
+
+def _no_program(cmd, *a, **k):
+    if cmd[0].endswith("tmux"):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+    return subprocess.CompletedProcess(cmd, 0, PS, "")
+
+
+def test_a_missing_tmux_is_raised_never_read_as_no_clients(monkeypatch):
+    # a background job's PATH often lacks the folder tmux is in, and an empty answer then read as
+    # "no chat is attached anywhere"
+    monkeypatch.setattr(iterm.subprocess, "run", _no_program)
+    with pytest.raises(iterm.TmuxNotFound, match="tmux"):
+        iterm.tmux_by_tty()
+    with pytest.raises(iterm.TmuxNotFound):
+        iterm.tmux_client_ttys("claude-a", tmux="/no/such/tmux")
+    with pytest.raises(iterm.TmuxNotFound):
+        iterm.doubled_clients(run=_no_program)
+    with pytest.raises(iterm.TmuxNotFound):
+        iterm.detach_client("/dev/ttys048", run=_no_program)
+
+
+def test_a_tmux_with_no_server_still_answers_no_clients(monkeypatch):
+    def no_server(cmd, *a, **k):
+        return subprocess.CompletedProcess(cmd, 1, "", "no server running on /tmp/tmux-1/default\n")
+    monkeypatch.setattr(iterm.subprocess, "run", no_server)
+    assert iterm.tmux_by_tty() == {}
+    assert iterm.tmux_client_ttys("claude-a") == set()
+
+
+def test_a_tmux_that_hangs_is_still_unknown(monkeypatch):
+    def hangs(cmd, *a, **k):
+        raise subprocess.TimeoutExpired(cmd, 5)
+    monkeypatch.setattr(iterm.subprocess, "run", hangs)
+    assert iterm.tmux_by_tty() == {}
+    assert iterm.doubled_clients(run=hangs) is None
