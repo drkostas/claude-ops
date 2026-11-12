@@ -220,3 +220,20 @@ def test_the_process_listing_leaves_out_only_the_hook_and_its_parent(monkeypatch
     out = f"{os.getpid()} python3 -m claude_ops.hooks.chain\n{os.getppid()} claude\n7 python3 -m claude_ops.tavily\n"
     monkeypatch.setattr(hook.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
     assert hook.processes(["-f", "x"]) == ["python3 -m claude_ops.tavily"]
+
+
+# --- a group `claude-ops detach` started is the session's own ---------------------------------------
+
+def test_a_kill_of_a_recorded_detached_group_is_allowed_and_any_other_group_is_not(tmp_path, monkeypatch):
+    from claude_ops import killguard
+    monkeypatch.setenv("CLAUDE_OPS_STATE_DIR", str(tmp_path))
+    starts = {500: "t500", 9001: "t9001"}
+    killguard.record_group(9001, 500, start_of=starts.get)
+    table = {500: (1, 400, "claude")}
+    monkeypatch.setattr(killguard, "process_table", lambda: table)
+    monkeypatch.setattr(killguard, "session_root", lambda t, start=None: 500)
+    monkeypatch.setattr(killguard, "process_start", starts.get)
+    own = hook.session_groups()
+    assert own == {9001}
+    assert hook.check_kill(["-TERM", "-9001"], {}, owns=lambda: own) is None
+    assert hook.check_kill(["-TERM", "-9002"], {}, owns=lambda: own)

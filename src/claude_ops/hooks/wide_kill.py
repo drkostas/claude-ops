@@ -6,7 +6,8 @@ sharing server). Nothing can be done from the outside once they are gone. This h
 shapes and has no approval path, because a person who is away cannot give one:
 
 - `kill -1`, `kill 0`, `kill 1`, a negative pid (a process group) unless a process of that group
-  descends from the Claude Code process running the hook (a background task the session started),
+  descends from the Claude Code process running the hook (a background task the session started) or
+  is one `claude-ops detach` recorded for this session while its leader is still the process it started,
   and a negative pid built from a variable (only `-$!` is let through; write the group's number);
 - `killall`, `killall5`, `skill`, `pkill -u`/`-U` (a whole user) and `pkill -v` (everything else);
 - a pattern kill (`pkill`, or `pgrep`, `ps` or `pidof` feeding `kill` through `$(...)`, backticks or
@@ -247,7 +248,10 @@ def kill_targets(args: list[str], stdin: bool = False) -> list[str]:
 def session_groups() -> set[int]:
     """The process groups this session started (read once, when a command names a group)."""
     table = killguard.process_table()
-    return killguard.started_groups(table) if table else set()
+    if not table:
+        return set()
+    # a command detach started has left the session's process tree, so detach recorded its group
+    return killguard.started_groups(table) | killguard.recorded_groups(table=table)
 
 
 GROUP_HINT = "write the group's number; a group this session started is allowed"
