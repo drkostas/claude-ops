@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import os
 import re
+import http.client
 import socket
 import subprocess
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -34,13 +36,17 @@ UP, DOWN, UNKNOWN = "up", "down", "unknown"
 class Spec:
     """One service to read. `label` is a launchd label and `domain` the launchd domain it lives in
     (for example `gui/501` or `system`). `port` is a TCP port on `host`, `socket_path` a unix socket.
-    Give at most one of port and socket_path."""
+    Give at most one of port and socket_path. `http_path` (for example `/health`) makes the service
+    answer only when a GET of that path on `host` and `port` returns a 2xx status within the timeout.
+    A port forward accepts a connection even when the program behind it is down, so a plain connect
+    can read as up for a service that is dead. `http_path` needs a port."""
     name: str
     label: str | None = None
     domain: str | None = None
     host: str = "127.0.0.1"
     port: int | None = None
     socket_path: str | None = None
+    http_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,7 +80,22 @@ def launchd_state(spec: Spec, run: Callable[..., "subprocess.CompletedProcess[st
     return parse_launchd(r.stdout)
 
 
+# A proxy named in the environment must never answer for a service, so this opener has none.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _get(spec: Spec, timeout: float) -> bool:
+    url = f"http://{spec.host}:{spec.port}/{spec.http_path.lstrip('/')}"
+    try:
+        with _OPENER.open(url, timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except (OSError, ValueError, http.client.HTTPException):
+        return False         # URLError, HTTPError (non-2xx), timeouts, refused connects and a reply that is not HTTP
+
+
 def _connect(spec: Spec, timeout: float) -> bool:
+    if spec.http_path:
+        return _get(spec, timeout)
     if spec.socket_path:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         target: object = spec.socket_path
@@ -97,6 +118,8 @@ def answers(spec: Spec, timeout: float = 3.0, connect: Callable[[Spec, float], b
         return None
     if spec.port is not None and spec.socket_path:
         raise ValueError("a spec names a port or a socket, not both")
+    if spec.http_path and spec.port is None:
+        raise ValueError("an http_path needs a port")
     return connect(spec, timeout)
 
 
