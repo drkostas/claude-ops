@@ -1433,6 +1433,22 @@ def _local_command(d: dict) -> bool:
     return isinstance(c, str) and c.lstrip().startswith(("<command-name>", "<local-command-"))
 
 
+#: Claude Code's own id for the note a resumed session writes about the tasks a restart stopped
+ORPHAN_SUMMARY = "__orphan_summary__"
+
+
+def _resume_note(d: dict) -> bool:
+    """Whether a record is a resumed session's note of the background tasks the restart stopped (a
+    task notification naming ORPHAN_SUMMARY), or the dequeue of a queued message, whose own user
+    record follows it. A resume writes both and starts no turn."""
+    if d.get("type") == "queue-operation" and d.get("operation") == "dequeue":
+        return True
+    body = d.get("content") if d.get("type") == "queue-operation" else (d.get("message") or {}).get("content")
+    if isinstance(body, list):
+        body = " ".join(str(x.get("text") or x.get("content") or "") for x in body if isinstance(x, dict))
+    return isinstance(body, str) and "<task-notification>" in body and ORPHAN_SUMMARY in body
+
+
 def _moves(d) -> bool:
     """A record that means the conversation moved: a message, or one typed and queued."""
     if not isinstance(d, dict) or d.get("type") not in ACTIVITY:
@@ -1445,7 +1461,9 @@ def _moves(d) -> bool:
     # turn, so nothing ends it: a refresh that ran one made every chat it refreshed look busy from
     # then on. A command that does start a turn is still seen, through the assistant records that
     # follow it.
-    return not (d.get("isMeta") or _local_command(d))
+    # A resumed session's note of the background tasks the restart stopped is the same: it is written
+    # as a queued message and a user record, and no turn follows it.
+    return not (d.get("isMeta") or _local_command(d) or _resume_note(d))
 
 
 def last_message(path: Path | None, scan: int | None = None) -> dict | None:
