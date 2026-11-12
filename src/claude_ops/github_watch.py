@@ -137,7 +137,8 @@ def _is_bot(user) -> bool:
     return (user or {}).get("type") == "Bot"
 
 
-def item_events(repo: str, number: int, *, pull_request: bool, me: str, get: Callable = _get) -> list[dict]:
+def item_events(repo: str, number: int, *, pull_request: bool, me: str, also_me: tuple[str, ...] = (),
+                get: Callable = _get) -> list[dict]:
     """What people other than `me` did on one issue or pull request, oldest first, as
     {"id", "kind", "who", "at", "url"}.
 
@@ -145,7 +146,10 @@ def item_events(repo: str, number: int, *, pull_request: bool, me: str, get: Cal
     "review_comment" and "commit" (a commit someone else pushed to the pull request's branch, for
     example a maintainer merging the base branch in). Each id is unique and never changes, so a
     seen-set holds what was already reported. Bot accounts and pending reviews are left out.
-    An issue is one request, a pull request four."""
+
+    A commit whose author has no linked GitHub account is told apart by its git author. It is
+    `me`'s when that name or email is in `also_me`, or when `me` committed it. Otherwise it is
+    reported under the git author's name. An issue is one request, a pull request four."""
     base = f"/repos/{repo}"
     events: list[dict] = []
     for c in _pages(f"{base}/issues/{number}/comments", get):
@@ -164,8 +168,15 @@ def item_events(repo: str, number: int, *, pull_request: bool, me: str, get: Cal
                 events.append({"id": f"review_comment:{c['id']}", "kind": "review_comment",
                                "who": _login(c.get("user")), "at": c.get("created_at", ""),
                                "url": c.get("html_url", "")})
+        mine = {m.lower() for m in also_me}
         for c in _pages(f"{base}/pulls/{number}/commits", get):
-            who = _login(c.get("author")) or (c.get("commit") or {}).get("author", {}).get("name", "")
+            git_author = (c.get("commit") or {}).get("author") or {}
+            who = _login(c.get("author"))
+            if not who:
+                if _login(c.get("committer")) == me or {str(git_author.get("name", "")).lower(),
+                                                        str(git_author.get("email", "")).lower()} & mine:
+                    continue
+                who = git_author.get("name", "")
             if who == me or _is_bot(c.get("author")):
                 continue
             events.append({"id": f"commit:{c['sha']}", "kind": "commit", "who": who,
