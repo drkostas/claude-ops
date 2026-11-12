@@ -808,6 +808,32 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
     return True, "its input line is empty"
 
 
+#: the stand-in Claude Code shows in its input line for a long paste it has not sent yet: the
+#: paste's number in the session, then how many lines it adds ("[Pasted text #24 +20 lines]"), or the
+#: number alone for a long paste of one line ("[Pasted text #3]"), as Claude Code writes them
+PASTED = re.compile(r"^\[Pasted text #\d+(?: \+(\d+) lines)?\]$")
+
+
+def held_paste(screen: str | None) -> int | None:
+    """The size, in the lines its stand-in names, of a paste Claude Code holds unsent in its input
+    line (0 when it names none), when that stand-in is all the line holds; None for an empty line, typed words (with or
+    without a stand-in among them), a dialog, or no screen.
+
+    A program that pastes into a session and then presses Enter can lose the Enter, for example
+    while the session is compacting. The paste then stays in the input line as its stand-in, and
+    empty_prompt reads that as a half-typed message, so every later paste waits behind it for ever.
+    The sender that made the paste can compare this size with its own text's and press Enter
+    once. Nothing else should: a stand-in can just as well be a paste a person is still writing."""
+    if not screen:
+        return None
+    prompts = [ln.strip() for ln in screen.splitlines()[-8:]
+               if ln.strip().startswith("❯") and not OPTION.match(ln.strip())]
+    if not prompts:
+        return None
+    m = PASTED.match(prompts[-1][1:].strip())
+    return int(m.group(1) or 0) if m else None
+
+
 #: what a session's screen says when it lost its login, or its Remote Control with it: how such
 #: a line starts, after the bullet Claude Code draws. The same words further in a line are a
 #: conversation about the outage, or a command that searched for them, and do not count
