@@ -118,3 +118,38 @@ def test_a_listener_that_never_speaks_http_is_down_for_an_http_path():
 def test_an_http_path_without_a_port_is_refused():
     with pytest.raises(ValueError):
         sc.answers(sc.Spec("x", socket_path="/tmp/none.sock", http_path="/health"))
+
+
+def test_a_reply_that_is_not_http_reads_false_and_never_raises():
+    import threading
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(5)
+
+    def serve():
+        c, _ = s.accept()
+        c.recv(4096)
+        c.sendall(b"SSH-2.0-test\r\n")
+        c.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        assert sc.answers(sc.Spec("ssh", port=s.getsockname()[1], http_path="/health"), timeout=2) is False
+    finally:
+        s.close()
+
+
+def test_a_proxy_in_the_environment_is_not_used(monkeypatch):
+    srv = _http_server(200)
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    dead_port = dead.getsockname()[1]
+    dead.close()
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead_port}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead_port}")
+    try:
+        assert sc.answers(sc.Spec("web", port=srv.server_port, http_path="/health"), timeout=2) is True
+    finally:
+        srv.shutdown()
+        srv.server_close()

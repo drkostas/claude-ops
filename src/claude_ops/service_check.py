@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import http.client
 import socket
 import subprocess
 import urllib.request
@@ -79,13 +80,17 @@ def launchd_state(spec: Spec, run: Callable[..., "subprocess.CompletedProcess[st
     return parse_launchd(r.stdout)
 
 
+# A proxy named in the environment must never answer for a service, so this opener has none.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _get(spec: Spec, timeout: float) -> bool:
     url = f"http://{spec.host}:{spec.port}/{spec.http_path.lstrip('/')}"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        with _OPENER.open(url, timeout=timeout) as r:
             return 200 <= r.status < 300
-    except (OSError, ValueError):
-        return False         # includes URLError, HTTPError (non-2xx), timeouts and refused connects
+    except (OSError, ValueError, http.client.HTTPException):
+        return False         # URLError, HTTPError (non-2xx), timeouts, refused connects and a reply that is not HTTP
 
 
 def _connect(spec: Spec, timeout: float) -> bool:
