@@ -16,12 +16,17 @@ One API response is written as several transcript lines, each repeating the same
 is counted by its message id, or every figure comes out about twice too big. A session's subagents write
 their own files under `<session>/subagents/`, and those count too.
 
+What a chat spent on each piece of work (`attribute`) comes from the work item ids its turns name. The caller
+says what an id looks like and which tools carry one (`Marks`), and the reader keeps only the ids it matched
+and where they were, never the text around them.
+
 Three states everywhere: a reading that is absent is unknown, never zero. The store lives at
 ~/.local/state/claude-ops/meter.sqlite3 unless CLAUDE_OPS_METER_DB says otherwise. It holds numbers and
 names, never message text.
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import gzip
 import json
@@ -49,9 +54,16 @@ CREATE INDEX IF NOT EXISTS statusline_at ON statusline(at);
 CREATE TABLE IF NOT EXISTS responses(
   message_id TEXT PRIMARY KEY, session_id TEXT, at REAL, model TEXT, input INTEGER, output INTEGER,
   cache_read INTEGER, cache_write INTEGER, subagent INTEGER NOT NULL DEFAULT 0, cwd TEXT,
-  shown INTEGER NOT NULL DEFAULT 0);
+  shown INTEGER NOT NULL DEFAULT 0, agent TEXT);
 CREATE INDEX IF NOT EXISTS responses_at ON responses(at);
 CREATE INDEX IF NOT EXISTS responses_session ON responses(session_id, at);
+CREATE TABLE IF NOT EXISTS prompts(session_id TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(session_id, at));
+CREATE TABLE IF NOT EXISTS marks(
+  session_id TEXT NOT NULL, at REAL NOT NULL, place TEXT NOT NULL, tag TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(session_id, at, place, tag));
+CREATE TABLE IF NOT EXISTS agents(
+  session_id TEXT NOT NULL, agent_id TEXT NOT NULL, tool_use_id TEXT NOT NULL, PRIMARY KEY(session_id, agent_id));
+CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS reloads(session_id TEXT NOT NULL, at REAL NOT NULL, chars INTEGER NOT NULL, PRIMARY KEY(session_id, at));
 CREATE TABLE IF NOT EXISTS compactions(session_id TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(session_id, at));
 CREATE TABLE IF NOT EXISTS positions(path TEXT PRIMARY KEY, read_to INTEGER NOT NULL, seam TEXT, size INTEGER);
@@ -74,9 +86,13 @@ def connect(db: "Path | str | None" = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.executescript(SCHEMA)
-    older = bool(tables) and "compactions" not in tables
-    if "shown" not in [r[1] for r in conn.execute("PRAGMA table_info(responses)")]:
+    older = bool(tables) and ("compactions" not in tables or "prompts" not in tables)
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(responses)")]
+    if "shown" not in columns:
         conn.execute("ALTER TABLE responses ADD COLUMN shown INTEGER NOT NULL DEFAULT 0")
+        older = True
+    if "agent" not in columns:
+        conn.execute("ALTER TABLE responses ADD COLUMN agent TEXT")
         older = True
     if older:
         # A store from before these figures: each transcript is read once more to fill them, and the counts stay.
@@ -168,6 +184,13 @@ def statusline_main(stdin=None, stdout=None) -> int:
 
 # ------------------------------------------------------------------------------ the transcripts
 _USAGE = b'"usage"'
+_RELOAD = b'"instructions"'
+_COMPACTED = b'"compact_boundary"'
+_QUEUED = b'"queued_command"'
+_USER = b'"user"'
+# a key a tool's result has and a prompt never does (inside a string a quote is escaped, so these match keys only)
+_RESULT = b'"tool_use_id"'
+_ATTACHMENT = b'"attachment"'
 
 
 def _when(s) -> "float | None":
@@ -177,35 +200,48 @@ def _when(s) -> "float | None":
         return None
 
 
+def _parse(raw: bytes) -> "dict | None":
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _response(d: dict, subagent: bool = False, agent: "str | None" = None) -> "dict | None":
+    m = d.get("message")
+    use = m.get("usage") if isinstance(m, dict) else None
+    mid = m.get("id") if isinstance(m, dict) else None
+    if not mid or not isinstance(use, dict):
+        return None
+    shown = sum(len(json.dumps(b)) for b in m.get("content") or [] if isinstance(b, dict) and b.get("type") != "thinking")
+    return {"message_id": mid, "session_id": d.get("sessionId"), "at": _when(d.get("timestamp")), "shown": shown,
+            "model": m.get("model"), "cwd": d.get("cwd"), "subagent": int(subagent or bool(d.get("isSidechain"))),
+            "input": int(use.get("input_tokens") or 0), "output": int(use.get("output_tokens") or 0),
+            "cache_read": int(use.get("cache_read_input_tokens") or 0),
+            "cache_write": int(use.get("cache_creation_input_tokens") or 0), "agent": agent}
+
+
+def _keep(out: dict, new: dict) -> None:
+    """One more line of a response: its largest figures are kept, with the time of its first line."""
+    old = out.get(new["message_id"])
+    if old:
+        for k in ("input", "output", "cache_read", "cache_write"):
+            new[k] = max(new[k], old[k])
+        new["at"] = old["at"] or new["at"]
+        new["shown"] += old["shown"]
+    out[new["message_id"]] = new
+
+
 def responses_in(raw_lines, *, subagent: bool = False) -> dict:
     """The responses in some transcript lines, by message id. A response is written as several lines
     repeating one usage, whose output count grows, so the largest figures of each are kept."""
     out: dict[str, dict] = {}
     for raw in raw_lines:
-        if _USAGE not in raw:
-            continue
-        try:
-            d = json.loads(raw)
-        except ValueError:
-            continue
-        m = d.get("message") if isinstance(d, dict) else None
-        use = m.get("usage") if isinstance(m, dict) else None
-        mid = m.get("id") if isinstance(m, dict) else None
-        if not mid or not isinstance(use, dict):
-            continue
-        shown = sum(len(json.dumps(b)) for b in m.get("content") or [] if isinstance(b, dict) and b.get("type") != "thinking")
-        new = {"message_id": mid, "session_id": d.get("sessionId"), "at": _when(d.get("timestamp")), "shown": shown,
-               "model": m.get("model"), "cwd": d.get("cwd"), "subagent": int(subagent or bool(d.get("isSidechain"))),
-               "input": int(use.get("input_tokens") or 0), "output": int(use.get("output_tokens") or 0),
-               "cache_read": int(use.get("cache_read_input_tokens") or 0),
-               "cache_write": int(use.get("cache_creation_input_tokens") or 0)}
-        old = out.get(mid)
-        if old:
-            for k in ("input", "output", "cache_read", "cache_write"):
-                new[k] = max(new[k], old[k])
-            new["at"] = old["at"] or new["at"]
-            new["shown"] += old["shown"]
-        out[mid] = new
+        d = _parse(raw) if _USAGE in raw else None
+        new = _response(d, subagent) if d else None
+        if new:
+            _keep(out, new)
     return out
 
 
@@ -217,90 +253,256 @@ _SAVE = ("INSERT INTO responses(message_id, session_id, at, model, input, output
 
 
 _SHOWN = "UPDATE responses SET shown = max(shown, ?) WHERE message_id = ?"
-_RELOAD = b'"instructions"'
+_AGENT = "UPDATE responses SET agent = coalesce(agent, ?) WHERE message_id = ?"
+
+
+def _reload(d: dict) -> "tuple | None":
+    at = d.get("attachment") if d.get("type") == "attachment" else None
+    when = _when(d.get("timestamp")) if isinstance(at, dict) and at.get("type") == "instructions" else None
+    return (d["sessionId"], when, len(json.dumps(at))) if when is not None and d.get("sessionId") else None
 
 
 def reloads_in(raw_lines) -> list[tuple]:
     """The instruction files a conversation was handed again, each as (session, time, characters). No text is kept."""
     out = []
     for raw in raw_lines:
-        if _RELOAD not in raw:
-            continue
-        try:
-            d = json.loads(raw)
-        except ValueError:
-            continue
-        at = d.get("attachment") if isinstance(d, dict) and d.get("type") == "attachment" else None
-        when = _when(d.get("timestamp")) if isinstance(at, dict) and at.get("type") == "instructions" else None
-        if when is not None and d.get("sessionId"):
-            out.append((d["sessionId"], when, len(json.dumps(at))))
+        d = _parse(raw) if _RELOAD in raw else None
+        got = _reload(d) if d else None
+        if got:
+            out.append(got)
     return out
 
 
-_COMPACTED = b'"compact_boundary"'
+def _compaction(d: dict) -> "tuple | None":
+    if d.get("type") == "system" and d.get("subtype") == "compact_boundary" and d.get("sessionId"):
+        when = _when(d.get("timestamp"))
+        return (d["sessionId"], when) if when is not None else None
+    return None
 
 
 def compactions_in(raw_lines) -> list[tuple]:
     """Each compaction a conversation's lines record, as (session, time)."""
     out = []
     for raw in raw_lines:
-        if _COMPACTED not in raw:
-            continue
-        try:
-            d = json.loads(raw)
-        except ValueError:
-            continue
-        if isinstance(d, dict) and d.get("type") == "system" and d.get("subtype") == "compact_boundary" and d.get("sessionId"):
-            when = _when(d.get("timestamp"))
-            if when is not None:
-                out.append((d["sessionId"], when))
+        d = _parse(raw) if _COMPACTED in raw else None
+        got = _compaction(d) if d else None
+        if got:
+            out.append(got)
     return out
 
 
-def read_file(conn: sqlite3.Connection, path: Path) -> int:
-    """The responses a transcript gained since the last read, saved. It reads from the remembered position
-    when the bytes before it still hash the same (sessions._seam), and from the start for a file replaced
-    by another one. A line still being written is read again next time. Returns the responses saved."""
+# ------------------------------------------------------------------------------ what each turn names
+MARKS = Path(os.environ.get("CLAUDE_OPS_METER_MARKS") or Path.home() / ".config" / "claude-ops" / "meter-marks.json")
+#: what an id looks like unless the configuration says otherwise: one token, never a piece of text
+ID = r"[A-Za-z0-9_.:/#-]{1,100}"
+#: the tools whose call starts work that runs on after it, besides any call run in the background
+STARTERS = ("Agent", "Task")
+_NOTICE = re.compile(r"<tool-use-id>([A-Za-z0-9_-]{1,100})</tool-use-id>")
+
+
+class Marks:
+    """Which work items a chat's turns name, as the caller sets them.
+
+    `prompt` is a regular expression looked for in the text of each prompt, whose first group is an id (a pasted
+    ticket that starts with "Ticket ABC-12", say). `calls` maps a tool's name to the fields of its input that hold
+    an id. An id is kept only when the whole of it matches `id`. `skip` lists windows of a conversation, each
+    {"session", "from", "to"} with ISO times, where nothing is marked and no prompt is kept. With no prompt and no
+    calls, the reader still keeps the turns and the work started in the background, which name no item."""
+
+    def __init__(self, prompt: str = "", calls: "dict | None" = None, id: str = ID, skip=()) -> None:  # noqa: A002
+        self.prompt = re.compile(prompt) if prompt else None
+        if self.prompt is not None and self.prompt.groups < 1:
+            raise ValueError("the prompt pattern needs a group around the id")
+        self.calls = {str(name): tuple(str(f) for f in fields) for name, fields in (calls or {}).items()}
+        self.id = re.compile(id)
+        self.skip = []
+        for s in skip:
+            start, end = (_when(s.get("from")), _when(s.get("to"))) if isinstance(s, dict) else (None, None)
+            if start is None or end is None or not s.get("session"):
+                raise ValueError(f"a skipped window needs a session, a from and a to: {s!r}")
+            self.skip.append((str(s["session"]), start, end))
+        self.fingerprint = json.dumps({"prompt": prompt, "calls": {k: list(v) for k, v in self.calls.items()}, "id": id,
+                                       "skip": [list(s) for s in self.skip]}, sort_keys=True)
+
+    @classmethod
+    def load(cls, path: "Path | str | None" = None) -> "Marks":
+        """The configuration in `path` (CLAUDE_OPS_METER_MARKS, or ~/.config/claude-ops/meter-marks.json): a JSON
+        object with the same names. No file marks no ids, and a file that cannot be read is refused."""
+        p = Path(path or MARKS)
+        try:
+            d = json.loads(p.read_text())
+        except FileNotFoundError:
+            return cls()
+        if not isinstance(d, dict):
+            raise ValueError(f"{p} does not hold an object")
+        return cls(prompt=d.get("prompt") or "", calls=d.get("calls") or {}, id=d.get("id") or ID, skip=d.get("skip") or ())
+
+    def skipped(self, session_id: str, at: float) -> bool:
+        return any(s == session_id and start <= at < end for s, start, end in self.skip)
+
+    def ids(self, text: str) -> list[str]:
+        if self.prompt is None:
+            return []
+        return [m.group(1) for m in self.prompt.finditer(text) if m.group(1) and self.id.fullmatch(m.group(1))]
+
+
+def _text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _named(text: str, marks: Marks) -> list[tuple[str, str, str]]:
+    got = [("prompt", tag, "") for tag in marks.ids(text)]
+    if "<task-notification>" in text:
+        got += [("notice", tag, "") for tag in _NOTICE.findall(text)]
+    return got
+
+
+def marks_of(d: dict, marks: Marks) -> tuple[bool, list[tuple[str, str, str]]]:
+    """What one transcript line says about the turns: whether it is a prompt, which starts a turn, and its marks as
+    (place, tag, message id). The places are `prompt` (an id in a prompt's text, or in a message that arrived while
+    a turn ran), `call` (an id in a tool's input), `started` (a call whose work runs on after it, in the background
+    or as a subagent, tagged with the call's own id) and `notice` (the notice that background work ended, tagged
+    with the id of the call that started it). A subagent's own lines give nothing, since its spend goes to the call
+    that started it."""
+    if d.get("isSidechain"):
+        return False, []
+    kind = d.get("type")
+    if kind == "user":
+        content = (d.get("message") or {}).get("content")
+        result = isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+        if d.get("isMeta") or d.get("isCompactSummary") or result:
+            return False, []
+        return True, _named(_text(content), marks)
+    if kind == "attachment":
+        a = d.get("attachment") or {}
+        return False, _named(_text(a.get("prompt")), marks) if a.get("type") == "queued_command" else []
+    out: list[tuple[str, str, str]] = []
+    m = d.get("message") if kind == "assistant" else None
+    for b in (m.get("content") or []) if isinstance(m, dict) else []:
+        if not isinstance(b, dict) or b.get("type") != "tool_use":
+            continue
+        given = b.get("input") if isinstance(b.get("input"), dict) else {}
+        for field in marks.calls.get(b.get("name"), ()):
+            value = given.get(field)
+            if isinstance(value, str) and marks.id.fullmatch(value.strip()):
+                out.append(("call", value.strip(), m.get("id") or ""))
+        if b.get("id") and (given.get("run_in_background") is True or b.get("name") in STARTERS):
+            out.append(("started", str(b["id"]), m.get("id") or ""))
+    return False, out
+
+
+def _wants(raw: bytes) -> bool:
+    """Whether a line can hold anything the reader keeps. A tool's result never does, and results are most of the bytes."""
+    return (_USAGE in raw or _RELOAD in raw or _COMPACTED in raw or _QUEUED in raw
+            or (_USER in raw and _RESULT not in raw and _ATTACHMENT not in raw))
+
+
+def _started_by(path: Path) -> "str | None":
+    """The call that started a subagent, from the note Claude Code writes beside its transcript."""
+    try:
+        meta = json.loads(path.with_name(path.name[:-len(".jsonl")] + ".meta.json").read_text())
+    except (OSError, ValueError):
+        return None
+    use = meta.get("toolUseId") if isinstance(meta, dict) else None
+    return str(use) if use else None
+
+
+def read_file(conn: sqlite3.Connection, path: Path, marks: "Marks | None" = None) -> int:
+    """The responses a transcript gained since the last read, saved, with the prompts and marks of its turns
+    (`marks_of`). It reads from the remembered position when the bytes before it still hash the same
+    (sessions._seam), and from the start for a file replaced by another one. A line still being written is read
+    again next time. The file is read one line at a time, so a large transcript is never held whole, and a tool's
+    result is parsed only when it carries a usage figure. Returns the responses saved."""
     from .sessions import _seam  # noqa: PLC0415 - a status line render must not import this
+    marks = Marks() if marks is None else marks
     st = path.stat()
     row = conn.execute("SELECT read_to, seam, size FROM positions WHERE path = ?", (str(path),)).fetchone()
     if row and row[2] == st.st_size:
         return 0
+    side = path.parent.name == "subagents"
+    agent = path.name[:-len(".jsonl")].removeprefix("agent-") if side else None
+    found: dict = {}
+    reloads, cuts, prompts, kept = [], [], [], []
     with path.open("rb") as fh:
         start = row[0] if row and row[0] <= st.st_size and _seam(fh, row[0]) == row[1] else 0
         fh.seek(start)
-        whole, read_to = [], start
+        read_to = start
         for raw in fh:
             if not raw.endswith(b"\n"):
                 break
-            whole.append(raw)
             read_to += len(raw)
+            d = _parse(raw) if _wants(raw) else None
+            if d is None:
+                continue
+            new = _response(d, side, agent)
+            if new:
+                _keep(found, new)
+            for got, into in ((_reload(d), reloads), (_compaction(d), cuts)):
+                if got:
+                    into.append(got)
+            sid, at = d.get("sessionId"), _when(d.get("timestamp"))
+            if side or not sid or at is None or marks.skipped(sid, at):
+                continue
+            prompt, named = marks_of(d, marks)
+            if prompt:
+                prompts.append((sid, at))
+            kept.extend((sid, at, place, tag, mid) for place, tag, mid in named)
         seam = _seam(fh, read_to)
-    found = responses_in(whole, subagent=path.parent.name == "subagents")
     if found:
         conn.executemany(_SAVE, list(found.values()))
         conn.executemany(_SHOWN, [(r["shown"], r["message_id"]) for r in found.values()])
-    conn.executemany("INSERT OR REPLACE INTO reloads(session_id, at, chars) VALUES (?, ?, ?)", reloads_in(whole))
-    conn.executemany("INSERT OR REPLACE INTO compactions(session_id, at) VALUES (?, ?)", compactions_in(whole))
+        conn.executemany(_AGENT, [(r["agent"], r["message_id"]) for r in found.values() if r["agent"]])
+    conn.executemany("INSERT OR REPLACE INTO reloads(session_id, at, chars) VALUES (?, ?, ?)", reloads)
+    conn.executemany("INSERT OR REPLACE INTO compactions(session_id, at) VALUES (?, ?)", cuts)
+    conn.executemany("INSERT OR IGNORE INTO prompts(session_id, at) VALUES (?, ?)", prompts)
+    conn.executemany("INSERT OR IGNORE INTO marks(session_id, at, place, tag, message_id) VALUES (?, ?, ?, ?, ?)", kept)
+    use = _started_by(path) if side else None
+    if use:
+        conn.execute("INSERT OR REPLACE INTO agents(session_id, agent_id, tool_use_id) VALUES (?, ?, ?)",
+                     (path.parent.parent.name, agent, use))
     conn.execute("INSERT OR REPLACE INTO positions(path, read_to, seam, size) VALUES (?, ?, ?, ?)",
                  (str(path), read_to, seam, st.st_size))
     return len(found)
 
 
-def read_all(*, root: "Path | None" = None, db: "Path | str | None" = None, since: "float | None" = None) -> dict:
+def _settle(conn: sqlite3.Connection, marks: Marks) -> None:
+    """Match the store to `marks`. When the configuration changed, the marks it decides are dropped (and the prompts
+    in a window now skipped), and every transcript is read again from its start."""
+    was = conn.execute("SELECT value FROM settings WHERE name = 'marks'").fetchone()
+    if was and was[0] == marks.fingerprint:
+        return
+    conn.execute("DELETE FROM marks WHERE place IN ('prompt', 'call')")
+    for sid, start, end in marks.skip:
+        conn.execute("DELETE FROM marks WHERE session_id = ? AND at >= ? AND at < ?", (sid, start, end))
+        conn.execute("DELETE FROM prompts WHERE session_id = ? AND at >= ? AND at < ?", (sid, start, end))
+    conn.execute("DELETE FROM positions")
+    conn.execute("INSERT OR REPLACE INTO settings(name, value) VALUES ('marks', ?)", (marks.fingerprint,))
+    conn.commit()
+
+
+def read_all(*, root: "Path | None" = None, db: "Path | str | None" = None, since: "float | None" = None,
+             marks: "Marks | None" = None) -> dict:
     """Read every transcript under `root` that changed, a session's subagents included. With `since`, files
-    last written before it are passed over. Returns {"files", "responses"}."""
+    last written before it are passed over. `marks` says what the turns name (`Marks.load()` when None). After it
+    changes, every file is read again, and the ids in a file older than `since` come back with a read that has no
+    `since`. Returns {"files", "responses"}."""
     from .paths import PROJECTS  # noqa: PLC0415
     root = Path(root or PROJECTS)
+    marks = Marks.load() if marks is None else marks
     files = responses = 0
     conn = connect(db)
     try:
+        _settle(conn, marks)
         for pattern in ("*/*.jsonl", "*/*/subagents/*.jsonl"):
             for path in root.glob(pattern):
                 try:
                     if since is not None and path.stat().st_mtime < since:
                         continue
-                    got = read_file(conn, path)
+                    got = read_file(conn, path, marks)
                 except OSError:
                     continue
                 files += 1
@@ -847,6 +1049,140 @@ def report(*, db: "Path | str | None" = None, since: "float | None" = None, unti
                            "thinking": "estimated"}}
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------------------------ what each response was for
+#: how sure an answer is, surest first
+KINDS = ("measured", "split", "shared", "linked", "unattributed")
+COUNTS = ("input", "output", "cache_read", "cache_write")
+
+
+class _Turns:
+    """One conversation's turns and marks, to say which items a moment of it was for."""
+
+    def __init__(self, conn: sqlite3.Connection, session_id: str, key) -> None:
+        self.starts = [r[0] for r in conn.execute("SELECT at FROM prompts WHERE session_id = ? ORDER BY at", (session_id,))]
+        first = dict(conn.execute("SELECT message_id, at FROM responses WHERE session_id = ? AND at IS NOT NULL", (session_id,)))
+        self.started: dict[str, float] = {}
+        self.notices: dict[int, list[str]] = {}
+        named: dict[int, dict[float, set]] = {}
+        for at, place, tag, mid in conn.execute("SELECT at, place, tag, message_id FROM marks WHERE session_id = ?", (session_id,)):
+            # a call belongs to the response that made it, whose first line can come before the call's own line
+            at = min(at, first.get(mid, at)) if mid else at
+            if place == "started":
+                self.started[tag] = at
+            elif place == "notice":
+                self.notices.setdefault(self.turn(at), []).append(tag)
+            elif place in ("prompt", "call"):
+                named.setdefault(self.turn(at), {}).setdefault(at, set()).add(key(tag))
+        self.named = {turn: sorted(events.items()) for turn, events in named.items()}
+
+    def turn(self, at: float) -> int:
+        return bisect.bisect_right(self.starts, at) - 1
+
+    def at(self, when: float, depth: int = 0) -> tuple[tuple, str]:
+        """The items a moment was for, and how sure that is (KINDS)."""
+        turn = self.turn(when)
+        if turn < 0:
+            return (), "unattributed"
+        events = self.named.get(turn)
+        if events:
+            every = set().union(*(items for _at, items in events))
+            if len(every) == 1:
+                return tuple(every), "measured"
+            # the last item named at or before the moment, and before the first naming, the first named
+            i = max(bisect.bisect_right([at for at, _items in events], when) - 1, 0)
+            items = tuple(sorted(events[i][1]))
+            return items, "split" if len(items) == 1 else "shared"
+        got: set = set()
+        if depth < 8:
+            for tag in self.notices.get(turn, ()):
+                if tag in self.started:
+                    got.update(self.at(self.started[tag], depth + 1)[0])
+        return (tuple(sorted(got)), "linked") if got else ((), "unattributed")
+
+
+def _window(since, until, now) -> tuple[float, float]:
+    now = time.time() if now is None else now
+    return (now - 86400 if since is None else since), (now if until is None else until)
+
+
+def assignments(session_id: str, *, since: "float | None" = None, until: "float | None" = None, key=None,
+                db: "Path | str | None" = None, now: "float | None" = None) -> list[dict]:
+    """Which work items each of a chat's responses in a window was for, by what its turns name (see `marks_of`). A
+    turn is the responses from one prompt to the next. When the turn names one item, each response is for it
+    (`measured`). When it names several, each response is for the last item named at or before it, and the first
+    named before that (`split`), shared evenly when that naming held several items at once, as a prompt that
+    pasted several does (`shared`). A turn that names none but is a background job's notice is for what the turn
+    that started the job was doing (`linked`). Any other response is `unattributed`. A subagent's responses are
+    placed where the call that started it was made. `key` maps a matched id to the one it stands for, for a scheme
+    with short forms, and is the identity by default. Each answer gives the response's time, its turn (the prompt's
+    time, None before the first), model, the four counts, whether a subagent made it, its items and its kind."""
+    since, until = _window(since, until, now)
+    key = key or (lambda tag: tag)
+    conn = connect(db)
+    try:
+        turns = _Turns(conn, session_id, key)
+        agents = dict(conn.execute("SELECT agent_id, tool_use_id FROM agents WHERE session_id = ?", (session_id,)))
+        firsts = dict(conn.execute("SELECT agent, min(at) FROM responses WHERE session_id = ? AND agent IS NOT NULL "
+                                   "GROUP BY agent", (session_id,)))
+        rows = conn.execute("SELECT message_id, at, model, input, output, cache_read, cache_write, subagent, agent FROM responses "
+                            "WHERE session_id = ? AND at >= ? AND at < ? ORDER BY at", (session_id, since, until)).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for mid, at, model, input_, output, read, write, sub, agent in rows:
+        # a subagent's spend goes where the call that started it was made, or failing that where it first answered
+        where = turns.started.get(agents.get(agent), firsts.get(agent, at)) if agent else at
+        items, kind = turns.at(where)
+        turn = turns.turn(where)
+        out.append({"message_id": mid, "at": at, "turn": turns.starts[turn] if turn >= 0 else None, "model": model,
+                    "input": input_, "output": output, "cache_read": read, "cache_write": write, "subagent": bool(sub),
+                    "items": list(items), "kind": kind})
+    return out
+
+
+def _shares(n: int, parts: int) -> list[int]:
+    q, r = divmod(n, parts)
+    return [q + (1 if i < r else 0) for i in range(parts)]
+
+
+def _blank() -> dict:
+    return {"responses": 0, **dict.fromkeys(COUNTS, 0), "weighted": 0.0}
+
+
+def _add(block: dict, model: "str | None", counts) -> float:
+    w = weighted(model, *counts)
+    block["responses"] += 1
+    for name, n in zip(COUNTS, counts):
+        block[name] += n
+    block["weighted"] += w
+    return w
+
+
+def attribute(session_id: str, *, since: "float | None" = None, until: "float | None" = None, key=None,
+              db: "Path | str | None" = None, now: "float | None" = None) -> dict:
+    """What a chat spent on each work item over a window, the last day by default, from `assignments`. Each item has
+    the four counts, the weighted figure and how much of that each kind is, so a reader sees how sure it is. A
+    response shared by several items is split evenly, the rest of a count going to the first items in order, and
+    `responses` counts each response an item had a part in. The items and `unattributed` add up to `total`, the
+    window's own counts, to the token, and those are what `report` gives for the chat."""
+    since, until = _window(since, until, now)
+    items: dict = {}
+    unattributed, total = _blank(), _blank()
+    kinds = dict.fromkeys(KINDS, 0.0)
+    for r in assignments(session_id, since=since, until=until, key=key, db=db):
+        counts = tuple(r[name] for name in COUNTS)
+        _add(total, r["model"], counts)
+        names = r["items"] or [None]
+        for name, part in zip(names, zip(*(_shares(n, len(names)) for n in counts))):
+            block = items.setdefault(name, {"item": name, **_blank(), "kinds": {}}) if name else unattributed
+            w = _add(block, r["model"], part)
+            kinds[r["kind"]] += w
+            if name:
+                block["kinds"][r["kind"]] = block["kinds"].get(r["kind"], 0.0) + w
+    return {"session_id": session_id, "since": since, "until": until, "total": total, "kinds": kinds,
+            "items": sorted(items.values(), key=lambda b: -b["weighted"]), "unattributed": unattributed}
 
 
 def main(argv: "list[str] | None" = None) -> int:
