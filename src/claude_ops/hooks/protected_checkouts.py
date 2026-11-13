@@ -12,7 +12,10 @@ back to the model):
   folder named directly or through a variable the same line assigned (`L=~/x; git -C "$L" ...`);
 - `git worktree remove` or `git worktree move` of a protected folder;
 - text a Bash command writes into a file there (a here-document, `echo` or `printf` redirected, or
-  piped into `tee`);
+  piped into `tee`). A target held in a variable the line assigned is judged where that variable
+  points. A target that starts with a variable nobody on the line assigned (`$T/notes.md` after
+  `T=$(mktemp -d)`) has an unknown folder, so it is not joined to the current folder. It is refused
+  only when the rest of it names a protected folder (`$T/worktrees/app-live/x`);
 - Write, Edit, MultiEdit and NotebookEdit of a file inside one.
 
 Reading stays allowed: log, show, status, diff, rev-parse, fetch, reflog, `stash list`, and
@@ -105,9 +108,16 @@ def check_bash(command: str, cwd: str, patterns: list[re.Pattern]) -> str | None
         if sub == "stash" and args[:1] and args[0] in STASH_READS:
             continue
         return f"`git {sub}` in {where}"
-    for path, _text in commandline.writes(command, cwd):
-        if protected(path, patterns):
-            return f"a write into {path}"
+    for here, target, _text in commandline.write_targets(command, cwd):
+        if not commandline.unknown_start(target):
+            path = os.path.normpath(os.path.join(here, target))
+            if protected(path, patterns):
+                return f"a write into {path}"
+            continue
+        rest = commandline.after_unknown(target)
+        if rest and any(p.search(os.path.normpath(rest) + "/") for p in patterns):
+            return (f"a write into {target}. The hook cannot resolve the start of that path and the rest "
+                    "of it names a protected folder, so name the path in full")
     return None
 
 

@@ -95,3 +95,64 @@ def test_commandline_follows_a_variable_the_line_assigned(home):
     assert invs and invs[0]["dir"] == str(home / "worktrees" / "app-live")
     assert commandline.assignments(["export", "A=1", "B=$A/x"], {}) == {"A": "1", "B": "1/x"}
     assert commandline.assignments(["git", "status"], {}) is None
+
+
+@pytest.fixture()
+def unset(monkeypatch):
+    """The variable names these lines use are not in the hook's own environment either."""
+    for name in ("F", "T", "L", "X", "UNSET"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("command", [
+    # a `)` glued to the separator after it hid the next command from every hook
+    'L=$(cd ~/worktrees/app-live && pwd); git -C "$L" checkout x',
+    'X=$(date)&& git -C ~/worktrees/app-live reset --hard',
+    '(cd /tmp); git -C ~/worktrees/app-live checkout x',
+    '(cd /tmp)\ngit -C ~/worktrees/app-live checkout x',
+    'echo $(date)|tee ~/worktrees/app-live/a',
+    'T=$(mktemp -d); git -C ~/worktrees/app-live checkout x',
+    'cd ~/worktrees && echo x > app-live/kernel/a',
+    # $PWD is the folder the line is in, not the hook's
+    'cd ~/worktrees/app-live && echo x > "$PWD/a"',
+    # a known start inside a protected folder stays refused, whatever the variable after it holds
+    'cd ~/worktrees/app-live && echo x > "kernel/$UNSET"',
+    'echo x > ~/worktrees/app-live/"$UNSET"',
+    # an unknown start, with the rest naming a protected folder
+    'echo x > "$UNSET/worktrees/app-live/x"',
+])
+def test_a_variable_or_a_subshell_does_not_hide_a_change(home, unset, command):
+    assert bash(command, home), command
+
+
+@pytest.mark.parametrize("command", [
+    # the line that was refused: F holds an absolute path outside the protected folder
+    'cd ~/worktrees/app-live && python3 -m tool note abc "x" | tail -1; T=$(date \'+%H:%M\'); '
+    'F=~/notes/n.md; printf \'%s\\n\' "y" >> "$F"',
+    # a variable nobody on the line assigned is an unknown folder, not one under the cd
+    'cd ~/worktrees/app-live && printf x >> "$UNSET"',
+    "T=$(mktemp -d); cd ~/worktrees/app-live && cat > \"$T/x.md\" <<'EOF'\nhi\nEOF",
+])
+def test_a_write_held_in_a_variable_goes_where_the_variable_points(home, unset, command):
+    assert bash(command, home) is None, command
+
+
+def test_an_unresolved_start_is_named_in_the_refusal(home, unset):
+    why = bash('echo x > "$UNSET/worktrees/app-live/x"', home)
+    assert "$UNSET/worktrees/app-live/x" in why and "name the path in full" in why
+
+
+def test_commandline_splits_a_parenthesis_from_the_separator_after_it(home, unset):
+    assert commandline.simple_commands("X=$(date); git status") == [["X=$", "date"], ["git", "status"]]
+    assert commandline.simple_commands("(cd a)&&ls|wc") == [["cd", "a"], ["ls"], ["wc"]]
+    assert commandline.split_punctuation(")&&") == [")", "&&"]
+    assert commandline.split_punctuation(">(") == ["("]
+    assert commandline.split_punctuation("&&") == ["&&"]
+    line = 'T=$(mktemp -d); F=/tmp/n.md; cat > "$T/a.md" <<EOF\nhi\nEOF\necho y >> "$F"'
+    assert [(t, text) for _here, t, text in commandline.write_targets(line, str(home))] == \
+        [("$T/a.md", "hi\n"), ("/tmp/n.md", "y")]
+    assert commandline.unknown_start("$T/a.md") and not commandline.unknown_start("/tmp/n.md")
+    assert commandline.after_unknown("$T/worktrees/x") == "/worktrees/x"
+    assert commandline.after_unknown("$(mktemp -d)/x") == "/x"
+    assert commandline.after_unknown("$F") == ""
+    assert commandline.writes('cd /tmp/x && echo hi > "$PWD/a"', "/") == [("/tmp/x/a", "hi")]

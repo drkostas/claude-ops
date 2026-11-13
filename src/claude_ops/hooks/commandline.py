@@ -29,6 +29,8 @@ REDIRECT = re.compile(r"^(\d*[<>]{1,3}&?|&>>?|<&|>&|>\|)$")
 PATH_WORD = re.compile(r"(?<![^\s'\"=])(?:/|~/|\$HOME/)[^\s'\"]*")
 #: the characters whose runs separate simple commands (a newline is one of them)
 SEPARATORS = set(";&|\n")
+#: the characters the shell splitter hands over as punctuation, apart from the words
+PUNCTUATION = ";&|<>()\n"
 #: a backslash before a newline is a line continuation, which the shell removes (an even run of
 #: backslashes before the newline is not one)
 CONTINUATION = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
@@ -101,12 +103,12 @@ def parse(command: str) -> list[dict]:
         return f"<< __heredoc_{len(bodies) - 1}__{m.group(4)}"
 
     command = strip_comments(HEREDOC_PARTS.sub(set_aside, command))
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()\n")
+    lex = shlex.shlex(command, posix=True, punctuation_chars=PUNCTUATION)
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
     lex.commenters = ""
     try:
-        tokens = list(lex)
+        tokens = [part for t in lex for part in split_punctuation(t)]
     except ValueError:
         return []
 
@@ -140,6 +142,23 @@ def parse(command: str) -> list[dict]:
                 t = HEREDOC_MARK.sub(lambda m: bodies[int(m.group(1))], t)
             out[-1]["words"].append(t)
     return [c for c in out if c["words"]]
+
+
+def split_punctuation(token: str) -> list[str]:
+    """A run of punctuation as its parts. shlex hands over a parenthesis and the separator after it
+    as one token (`);`, `)&&`, `)|`, a `)` and a newline), and read as a word that token joins the
+    next command to the one before it, so a `git` after `X=$(date);` was never seen. `>(` and `<(`
+    open a process substitution, which is not a file the command writes."""
+    if len(token) < 2 or not set(token) <= set(PUNCTUATION) or not set(token) & set("()"):
+        return [token]
+    parts = re.findall(r"[()]|[^()]+", token)
+    out = []
+    for i, part in enumerate(parts):
+        if part[-1] in "<>" and parts[i + 1:i + 2] == ["("]:
+            part = part[:-1]
+        if part:
+            out.append(part)
+    return out
 
 
 def without_heredoc_bodies(command: str) -> str:
@@ -302,8 +321,9 @@ def parse_git(args: list[str], here: str, names: dict | None = None) -> dict | N
 def steps(command: str, cwd: str):
     """Each simple command on the line (as parse gives it, its words unwrapped) with the folder it
     runs in, and `names`, the variables the line assigned before it. `cd`, `pushd` and `popd` are
-    followed and not given out, and neither is a command that only sets variables."""
-    here, stack, names = cwd, [], {}
+    followed and not given out, and neither is a command that only sets variables. `$PWD` is the
+    folder the shell is in at that point, as the shell keeps it, not the hook's own."""
+    here, stack, names = cwd, [], {"PWD": cwd}
     for cmd in parse(command):
         set_now = assignments(cmd["words"], names)
         if set_now is not None:
@@ -313,13 +333,14 @@ def steps(command: str, cwd: str):
         if not words:
             continue
         name = os.path.basename(words[0])
-        if name == "cd":
-            here = change_dir(here, words[1:], names)
-        elif name == "pushd":
-            stack.append(here)
-            here = change_dir(here, words[1:], names)
-        elif name == "popd":
-            here = stack.pop() if stack else here
+        if name in ("cd", "pushd", "popd"):
+            if name == "pushd":
+                stack.append(here)
+            if name == "popd":
+                here = stack.pop() if stack else here
+            else:
+                here = change_dir(here, words[1:], names)
+            names = dict(names, PWD=here)
         else:
             front = cmd["words"][:len(cmd["words"]) - len(words)]
             env = dict(w.split("=", 1) for w in front if ASSIGNMENT.match(w))
@@ -337,8 +358,29 @@ def writes(command: str, cwd: str) -> list[tuple[str, str]]:
     given to a command whose output goes to a file or to `tee`, and the words of `echo` or `printf`
     redirected to a file. Text a program makes itself is not known here and is not given out. A
     target's variables are expanded with those the line assigned (`D=/tmp/x && cat > $D/f`), so the
-    file is judged where it really goes, not as a path under the current folder."""
-    out = []
+    file is judged where it really goes, not as a path under the current folder. A target that still
+    starts with a variable after that (one the line did not assign and the environment does not
+    hold, or a `$(...)`) is joined to the current folder, the cautious reading for a hook that keeps
+    text out of a folder. `write_targets` gives each target as written, for a hook that must not
+    guess where it goes."""
+    return [(os.path.normpath(os.path.join(here, target)), text)
+            for here, target, text in write_targets(command, cwd)]
+
+
+def unknown_start(target: str) -> bool:
+    """Whether a path, after expansion, still starts with a variable or a command substitution."""
+    return target.startswith(("$", "`"))
+
+
+def after_unknown(target: str) -> str:
+    """The part of a path after the last piece the hook cannot read, from its first `/` on:
+    `/worktrees/x` for `$T/worktrees/x`, and "" when nothing known follows."""
+    rest = re.split(r"[$`]", target)[-1]
+    return rest[rest.find("/"):] if "/" in rest else ""
+
+
+def write_targets(command: str, cwd: str):
+    """(folder, target with the line's variables expanded, text) for each write `writes` reads."""
     piped_text = None                        # what the command before a `|` printed, when known
     for cmd, here in steps(command, cwd):
         words = cmd["words"]
@@ -359,8 +401,7 @@ def writes(command: str, cwd: str) -> list[tuple[str, str]]:
             continue
         for t in targets:
             if t not in NOT_FILES:
-                out.append((os.path.normpath(os.path.join(here, expand(t, cmd.get("names")))), text))
-    return out
+                yield here, expand(t, cmd.get("names")), text
 
 
 def git_invocations(command: str, cwd: str) -> list[dict]:
