@@ -28,7 +28,9 @@ rows are left out first, and `allow` patterns are removed before matching.
 
 It reads the text of `gh pr|issue|release|repo` commands that write (title, body, notes, and their
 files or here-documents), `gh api` calls to a repository, and the text arguments of GitHub MCP calls
-that write, with the command-line reading the public-voice hook uses. Commit messages are not
+that write, with the command-line reading the public-voice hook uses. A `gh api --input` file or
+here-document that is a JSON object is judged by its title and body values only, so the JSON's own
+`"key": ` separators never read as prose; input that is not JSON is judged as text. Commit messages are not
 checked: git shows them as they were written. The configuration is `--config`, else
 `CLAUDE_OPS_PLAIN_VOICE_CONFIG`, else `~/.config/claude-ops/plain-voice.json`; without it, only the
 line-break check runs. On anything unexpected the call goes through: a broken hook must never stop
@@ -305,14 +307,35 @@ def joined_input(payload: dict) -> tuple[dict, list[str]] | None:
     return new, got[1]
 
 
+#: the keys of a `gh api --input` JSON object whose text GitHub shows to a reader
+SHOWN_KEYS = ("title", "body")
+
+
+def shown(text: str) -> list[str]:
+    """The texts of a `gh api` input that GitHub shows: the title and body string values when it is a
+    JSON object, so the JSON's own `"key": ` separators are never judged as prose, else the text."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return [text]
+    if not isinstance(data, dict):
+        return [text]
+    return [data[k] for k in SHOWN_KEYS if isinstance(data.get(k), str)]
+
+
 def texts_of(payload: dict) -> list[tuple[str, str]]:
     """(where, text) for every text a tool call would show on GitHub."""
     tool = payload.get("tool_name", "")
     ti = payload.get("tool_input") or {}
     if tool == "Bash":
         cwd = payload.get("cwd") or os.getcwd()
-        return [(where, text) for where, _target, text in published(str(ti.get("command", "")), cwd)
-                if where.startswith("the gh")]
+        out = []
+        for where, _target, text in published(str(ti.get("command", "")), cwd):
+            if where == "the gh api call":
+                out += [(where, t) for t in shown(text)]
+            elif where.startswith("the gh"):
+                out.append((where, text))
+        return out
     if tool.startswith("mcp__github__") and not tool[len("mcp__github__"):].startswith(GITHUB_READS):
         return [("the GitHub call", ti[k]) for k in MCP_TEXT_KEYS if isinstance(ti.get(k), str)]
     return []
