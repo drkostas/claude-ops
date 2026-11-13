@@ -27,6 +27,19 @@ def _no_real_tmux():
             os.environ[k] = v
 
 
+@pytest.fixture(autouse=True)
+def _no_real_meter_store(monkeypatch, tmp_path):
+    """No test opens the meter's store of the person running the suite. `meter.connect()` with no path opens
+    ~/.local/state/claude-ops/meter.sqlite3, and opening an older store changes its format and makes it read every
+    transcript again. Every test gets an empty store in its own folder, through `meter.DB` for this process and
+    CLAUDE_OPS_METER_DB for any process it starts. A test that needs another store still names its own."""
+    from claude_ops import meter
+
+    store = tmp_path / "meter-store" / "meter.sqlite3"
+    monkeypatch.setenv("CLAUDE_OPS_METER_DB", str(store))
+    monkeypatch.setattr(meter, "DB", store)
+
+
 def write_chat(root: Path, folder: str, sid: str, records: list[dict]) -> Path:
     d = root / folder
     d.mkdir(parents=True, exist_ok=True)
