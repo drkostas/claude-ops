@@ -268,6 +268,46 @@ def test_change_id_holds_through_a_rebase_and_changes_with_an_edit(world):
     assert cw.change_id(repo, edited, "master") not in (None, seen)
 
 
+def _rebase(repo, branch, onto):
+    git(repo, "checkout", "-q", branch)
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "rebase", "-q", onto)
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
+def test_change_id_holds_through_a_rebase_over_a_line_the_base_appended_next_to_it(world):
+    # two branches that each append an entry to the same list, the second rebased after the first merged:
+    # the file merges by union, so the rebase is clean and the change is the same, only its neighbour moved
+    repo = world["repo"]
+    (repo / ".gitattributes").write_text("list.txt merge=union\n")
+    (repo / "list.txt").write_text("".join(f"entry {i}\n" for i in range(1, 7)))
+    git(repo, "add", ".gitattributes", "list.txt")
+    commit(repo, "a list")
+    listed = (repo / "list.txt").read_text()
+    read = _on(repo, "topic", "list.txt", listed + "entry from topic\n", start="master")
+    seen, seen_wide = cw.change_id(repo, read, "master"), cw.change_id(repo, read, "master", context=3)
+    _on(repo, "master", "list.txt", listed + "entry from master\n")
+    rebased = _rebase(repo, "topic", "master")
+    assert (repo / "list.txt").read_text() == listed + "entry from master\nentry from topic\n"
+    assert rebased != read and seen and cw.change_id(repo, rebased, "master") == seen
+    # with git's usual three lines of context the base's new line is part of the diff, and the id moves
+    assert seen_wide and cw.change_id(repo, rebased, "master", context=3) != seen_wide
+
+
+def test_change_id_holds_when_the_base_changed_a_line_near_the_change(world):
+    repo = world["repo"]
+    (repo / "near.txt").write_text("".join(f"{i}\n" for i in range(1, 7)))
+    git(repo, "add", "near.txt")
+    commit(repo, "numbers")
+    read = _on(repo, "topic", "near.txt", (repo / "near.txt").read_text() + "7\n", start="master")
+    seen, seen_wide = cw.change_id(repo, read, "master"), cw.change_id(repo, read, "master", context=3)
+    _on(repo, "master", "near.txt", "1\n2\n3\nfour\n5\n6\n")         # two lines above the change
+    rebased = _rebase(repo, "topic", "master")
+    assert rebased != read and seen and cw.change_id(repo, rebased, "master") == seen
+    assert cw.change_id(repo, rebased, "master", context=3) != seen_wide
+    edited = _on(repo, "topic", "near.txt", (repo / "near.txt").read_text() + "8\n")
+    assert cw.change_id(repo, edited, "master") not in (None, seen)
+
+
 def test_change_id_of_a_stacked_branch_holds_when_the_one_below_is_rebased(world):
     repo = world["repo"]
     _on(repo, "low", "low.txt", "low\n", start="master")
