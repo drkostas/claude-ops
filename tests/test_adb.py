@@ -321,3 +321,39 @@ def test_fd_room_leaves_a_reserve_under_the_limit(monkeypatch):
     assert adb.fd_room() == 192 and adb.fd_room(reserve=6) == 250
     monkeypatch.setattr(adb.resource, "getrlimit", lambda what: (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
     assert adb.fd_room() is None
+
+
+def test_a_scan_that_read_every_port_says_so():
+    found = scan(Link({41759: ["open"]}), range(41700, 41800))
+    assert found == [41759] and isinstance(found, list)
+    assert (found.unanswered, found.unasked) == (0, 0)
+
+
+def test_a_port_silent_on_both_passes_is_unanswered_but_was_asked_again():
+    found = scan(Link({41759: ["silent"]}), range(41700, 41800))
+    assert found == [] and (found.unanswered, found.unasked) == (1, 0)
+
+
+def test_ports_the_second_pass_did_not_reach_are_counted_as_unasked():
+    link = Link(default=["silent", "late"])          # each answers on the second ask, too slowly for all
+    found = scan(link, range(5000), timeout=0.01, retry_concurrency=10, retry_budget=0.5)
+    asked_again = sum(1 for p in range(5000) if link.asked[p] == 2)
+    assert found == [] and 0 < found.unasked == found.unanswered <= 5000 - asked_again + 10
+
+
+def test_a_budget_of_zero_leaves_every_silent_port_unasked():
+    found = scan(Link({41759: ["silent", "open"], 41760: ["silent"]}), range(41700, 41800), retry_budget=0)
+    assert found == [] and (found.unanswered, found.unasked) == (2, 2)
+
+
+def test_reach_says_how_much_of_the_scan_it_could_not_read():
+    r = go(Device(), scan=lambda h, p: adb.Ports([], unanswered=1200, unasked=900))
+    assert r.serial is None and (r.unanswered, r.unasked) == (1200, 900)
+    assert "1200 ports gave no answer and 900 of them were not asked again" in r.detail
+    r = go(Device(tls=41759), scan=lambda h, p: adb.Ports([41759], unanswered=3, unasked=0))
+    assert r.how == "wireless" and (r.unanswered, r.unasked) == (3, 0)
+
+
+def test_reach_takes_a_plain_list_from_a_scan_of_its_own():
+    r = go(Device(), scan=lambda h, p: [])
+    assert (r.unanswered, r.unasked) == (0, 0) and "gave no answer" not in r.detail

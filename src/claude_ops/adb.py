@@ -54,6 +54,20 @@ class Reach:
     detail: str
     wireless_port: int | None = None
     wireless_on: bool | None = None   # whether wireless debugging is still on afterwards (None: not asked)
+    unanswered: int = 0     # ports the scan got no answer from, so it cannot say nothing listens there
+    unasked: int = 0        # of those, the ports its second pass did not ask again before it ended
+
+
+class Ports(list):
+    """The open ports a scan found, in order, and how much of the range it could not read.
+    `unanswered` counts the ports that neither connected nor refused on any ask, and `unasked` those
+    of them the second pass did not ask again before it ended (on its budget, on a link that answered
+    nothing, or with `retry_budget=0`). With both 0 every other port refused, so nothing else listens.
+    A scan that leaves ports unanswered found no port there, which is not the same as no port."""
+
+    def __init__(self, ports=(), *, unanswered: int = 0, unasked: int = 0):
+        super().__init__(ports)
+        self.unanswered, self.unasked = unanswered, unasked
 
 
 def default_run(argv: list[str], *, timeout: float = 15, env: dict[str, str] | None = None
@@ -108,9 +122,10 @@ def fd_room(reserve: int = FD_RESERVE) -> int | None:
 
 def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: int = 800,
                retry_timeout: float | None = None, retry_concurrency: int = 200, retry_budget: float = 90.0,
-               connect=None) -> list[int]:
-    """The ports of `host` that accept a TCP connection, in order. Over a VPN with a 100 ms round
-    trip, 35,000 ports take about ten seconds.
+               connect=None) -> Ports:
+    """The ports of `host` that accept a TCP connection, in order, as a `Ports` list that also says
+    how many ports gave no answer. Over a VPN with a 100 ms round trip, 35,000 ports take about ten
+    seconds.
 
     The first pass asks every port, `concurrency` at once, and waits `timeout` seconds for each. With
     no `timeout` it is measured first, from a connect to a port nothing listens on
@@ -141,9 +156,10 @@ def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: i
     def at_once(n: int) -> int:
         return max(1, min(n, room) if room else n)
 
-    async def scan() -> list[int]:
+    async def scan() -> Ports:
         found: list[int] = []
         silent: list[int] = []
+        again: list[int] = []
         heard = 0
 
         async def ask(port: int, gate: asyncio.Semaphore, wait: float, misses: list[int] | None) -> None:
@@ -165,10 +181,10 @@ def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: i
         gate = asyncio.Semaphore(at_once(concurrency))
         await asyncio.gather(*(ask(p, gate, timeout, silent) for p in ports))
         if not silent or retry_budget <= 0:
-            return sorted(found)
+            return Ports(sorted(found), unanswered=len(silent), unasked=len(silent))
         heard = 0
         gate = asyncio.Semaphore(at_once(retry_concurrency))
-        second = asyncio.ensure_future(asyncio.gather(*(ask(p, gate, retry_timeout, None) for p in silent)))
+        second = asyncio.ensure_future(asyncio.gather(*(ask(p, gate, retry_timeout, again) for p in silent)))
         quiet = min(retry_budget, 2 * retry_timeout)
         await asyncio.wait({second}, timeout=quiet)
         if not second.done() and heard:
@@ -177,7 +193,9 @@ def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: i
             second.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await second
-        return sorted(found)
+        # a port the second pass answered counts in `heard`, one it asked in vain is in `again`, and
+        # one it never finished asking is in neither
+        return Ports(sorted(found), unanswered=len(silent) - heard, unasked=len(silent) - heard - len(again))
     return asyncio.run(scan())
 
 
@@ -229,7 +247,9 @@ def reach(host: str, *, fixed: int = FIXED, ports=WIRELESS_PORTS, skip=(), keep_
     if _connect(fixed_serial, run, adb):
         return Reach(fixed_serial, "fixed", f"port {fixed} answered")
     find = scan if scan_wait is None else functools.partial(scan, timeout=scan_wait)
-    candidates = [p for p in find(host, [p for p in ports if p != fixed and p not in skip])]
+    found = find(host, [p for p in ports if p != fixed and p not in skip])
+    candidates = list(found)
+    unread = {"unanswered": getattr(found, "unanswered", 0), "unasked": getattr(found, "unasked", 0)}
     for port in candidates:
         serial = f"{host}:{port}"
         if not _connect(serial, run, adb):
@@ -241,12 +261,16 @@ def reach(host: str, *, fixed: int = FIXED, ports=WIRELESS_PORTS, skip=(), keep_
         if _connect(fixed_serial, run, adb):
             on = wireless_on(fixed_serial, turn_on=keep_wireless, run=run, adb=adb, sleep=sleep)
             return Reach(fixed_serial, "wireless", f"wireless debugging answered on port {port}; "
-                         f"port {fixed} listens again", port, on)
+                         f"port {fixed} listens again", port, on, **unread)
         if _connect(serial, run, adb):
             return Reach(serial, "wireless-only", f"wireless debugging answered on port {port}, but "
-                         f"port {fixed} did not after tcpip ({(r.stdout + r.stderr).strip()[:120]})", port)
+                         f"port {fixed} did not after tcpip ({(r.stdout + r.stderr).strip()[:120]})", port,
+                         **unread)
     tried = f"{len(candidates)} open port{'s' if len(candidates) != 1 else ''} tried"
-    return Reach(None, None, f"port {fixed} refused and no wireless debugging answered ({tried})")
+    if unread["unanswered"]:
+        tried += (f", {unread['unanswered']} port{'s' if unread['unanswered'] != 1 else ''} gave no answer "
+                  f"and {unread['unasked']} of them were not asked again")
+    return Reach(None, None, f"port {fixed} refused and no wireless debugging answered ({tried})", **unread)
 
 
 def main(argv: list[str] | None = None) -> int:
