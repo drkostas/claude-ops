@@ -175,11 +175,17 @@ def last_checked_out(root: Path, branches, *, env: Env = None) -> dict[str, tupl
     return found
 
 
-def change_id(root: Path, head: str, base: str, *, env: Env = None) -> str | None:
+def change_id(root: Path, head: str, base: str, *, context: int = 0, env: Env = None) -> str | None:
     """The id of `head`'s own change: `git patch-id --stable` of its diff from where it left `base`
     (their merge base). The same change made again on another base, as a rebase with no edit makes it,
     has the same id, and any edit to the change gives another. None when a commit cannot be read or the
     change is empty.
+
+    The diff carries `context` lines around each hunk, none by default. A context line is the base's
+    text, not the change's, so with git's usual three a rebase over a line the base changed next to
+    the change (two branches that each append an entry to the same list) gave a new id. With none, a
+    change that only moves an added line to another place in the same file keeps its id, because
+    patch-id ignores line numbers. Pass `context` when that matters more than a rebase.
 
     Use it to tell whether a branch was only rebased since someone read it: keep the id from the read,
     and compare it with the id of the branch's new head against its new base."""
@@ -188,7 +194,8 @@ def change_id(root: Path, head: str, base: str, *, env: Env = None) -> str | Non
     except (RuntimeError, OSError):
         return None
     try:
-        diff = subprocess.run([GIT, "-C", str(root), "diff", "--no-color", "--no-ext-diff", start, head],
+        diff = subprocess.run([GIT, "-C", str(root), "diff", "--no-color", "--no-ext-diff", f"-U{int(context)}",
+                               start, head],
                               capture_output=True, timeout=120, env=env)
         if diff.returncode != 0 or not diff.stdout.strip():
             return None
