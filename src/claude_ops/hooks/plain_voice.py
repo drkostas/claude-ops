@@ -29,9 +29,9 @@ rows are left out first, and `allow` patterns are removed before matching.
 It reads the text of `gh pr|issue|release|repo` commands that write (title, body, notes, and their
 files or here-documents), `gh api` calls to a repository, and the text arguments of GitHub MCP calls
 that write, with the command-line reading the public-voice hook uses. A `gh api --input` file or
-here-document that is a JSON object is judged by its title and body values only, so the JSON's own
-`"key": ` separators never read as prose; input that is not JSON is judged as text. Commit messages are not
-checked: git shows them as they were written. The configuration is `--config`, else
+here-document that is a JSON object is judged by its title, body, name and description values only,
+so the JSON's own `"key": ` separators never read as prose; input that is not JSON is judged as text.
+Commit messages are not checked: git shows them as they were written. The configuration is `--config`, else
 `CLAUDE_OPS_PLAIN_VOICE_CONFIG`, else `~/.config/claude-ops/plain-voice.json`; without it, only the
 line-break check runs. On anything unexpected the call goes through: a broken hook must never stop
 work.
@@ -307,13 +307,14 @@ def joined_input(payload: dict) -> tuple[dict, list[str]] | None:
     return new, got[1]
 
 
-#: the keys of a `gh api --input` JSON object whose text GitHub shows to a reader
-SHOWN_KEYS = ("title", "body")
+#: the keys of a `gh api --input` JSON object whose text GitHub shows to a reader: a pull request's or an
+#: issue's title and body, a comment's body, a release's name and a repository's description
+SHOWN_KEYS = ("title", "body", "name", "description")
 
 
 def shown(text: str) -> list[str]:
-    """The texts of a `gh api` input that GitHub shows: the title and body string values when it is a
-    JSON object, so the JSON's own `"key": ` separators are never judged as prose, else the text."""
+    """The texts of a `gh api` input that GitHub shows: the string values of SHOWN_KEYS when it is a JSON
+    object, so the JSON's own `"key": ` separators are never judged as prose, else the text."""
     try:
         data = json.loads(text)
     except ValueError:

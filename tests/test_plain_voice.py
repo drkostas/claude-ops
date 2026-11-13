@@ -129,6 +129,13 @@ def test_a_gh_api_json_input_is_judged_by_its_title_and_body_only(tmp_path):
     notes.write_text("Checked: the suite passed.\n")
     assert "a colon in prose" in say(f"gh api repos/someone/demo/issues/3/comments --input {notes}")
     assert pv.shown(json.dumps(pr)) == [pr["title"], pr["body"]] and pv.shown("[1, 2]") == ["[1, 2]"]
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps({"tag_name": "v1.0", "name": "Note: x", "body": "The first release."}))
+    assert "a colon in prose" in say(f"gh api repos/someone/demo/releases --input {release}")
+    release.write_text(json.dumps({"tag_name": "v1.0", "name": "Version one", "body": "The first release."}))
+    assert say(f"gh api repos/someone/demo/releases --input {release}") is None
+    assert "a colon in prose" in say("gh api -X PATCH repos/someone/demo --input - <<'EOF'\n"
+                                     + json.dumps({"description": "Tools: many"}) + "\nEOF")
 
 
 def test_the_patterns_come_from_the_file(tmp_path, monkeypatch):
