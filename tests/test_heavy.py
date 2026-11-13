@@ -34,6 +34,56 @@ def test_a_slot_given_back_while_it_is_looked_at_is_no_error(monkeypatch, tmp_pa
     assert not slot.exists()
 
 
+def test_a_held_job_says_a_new_waiting_line_only_when_the_kinds_of_reason_change(monkeypatch, tmp_path):
+    """The gate's words carry figures that move on almost every poll, and a job the gate held for
+    hours printed a waiting line each time one moved. A held job now says a line when a kind of reason
+    comes or goes, and the turn's words (who holds the slot) once while they stay the same."""
+    for k in [k for k in os.environ if k.startswith("HEAVY_")]:
+        monkeypatch.delenv(k)
+    for k, v in {"HEAVY_DIR": str(tmp_path), "HEAVY_MIN_FREE_GB": "6", "HEAVY_MAX_SWAP_GB": "14",
+                 "HEAVY_SWAP_DISK_FACTOR": "3", "HEAVY_MIN_DISK_PCT": "10"}.items():
+        monkeypatch.setenv(k, v)
+    sys.modules.pop("claude_ops.heavy", None)
+    h = importlib.import_module("claude_ops.heavy")
+    monkeypatch.setattr(h, "POLL", 0)
+    said = []
+    monkeypatch.setattr(h, "say", said.append)
+    h.SLOT.mkdir(parents=True)
+    (h.SLOT / "who.json").write_text(json.dumps(
+        {"chat": "other", "what": "build", "pid": os.getpid(), "since": "00:00", "at": time.time()}))
+    roomy = (20, 2, 50, 1, 500)
+    readings = [roomy, roomy, roomy,              # the slot is held: one line for the three polls
+                (5.9, 2, 50, 1, 500),              # the holder is gone and memory is short: a line
+                (5.8, 2, 50, 1, 500),              # the same kind with other figures: no line
+                (5.7, 2, 50, 1, 500),
+                (5.6, 19, 50, 1, 50),              # swap comes too: a line
+                (5.5, 19.2, 50, 1, 50),            # the same two kinds: no line
+                (5.4, 2, 50, 1, 500),              # swap goes: a line
+                roomy]                             # room, and the slot is free: it takes the slot
+    calls = []
+
+    def machine():
+        calls.append(1)
+        if len(calls) == 4:
+            shutil.rmtree(h.SLOT)
+        return readings[min(len(calls), len(readings)) - 1]
+    monkeypatch.setattr(h, "machine", machine)
+
+    assert h.wait_turn("t", "quiet", os.getpid())
+    assert len(calls) == len(readings), f"it took the slot at the first reading with room ({len(calls)})"
+    assert len(said) == 4, f"one line for each change of what holds it, not for each reading: {said}"
+    assert "slot is held by other: build" in said[0]
+    assert "5.9 GB of memory free" in said[1] and "swap" not in said[1]
+    assert "5.7" not in " ".join(said) and "19.2" not in " ".join(said), \
+        f"a figure moving under the same kinds says nothing: {said}"
+    assert "5.6 GB of memory free" in said[2] and "swap at 19" in said[2]
+    assert "5.4 GB of memory free" in said[3] and "swap" not in said[3]
+    assert h.wait_key([("memory", "a"), ("swap", "b")], "") == h.wait_key([("swap", "c"), ("memory", "d")], "")
+    assert h.wait_key([], "the slot is held by a: b") != h.wait_key([], "the slot is held by c: d")
+    h.release(os.getpid())
+    sys.modules.pop("claude_ops.heavy", None)
+
+
 def test_heavy_queue(monkeypatch):
     failures = []
     for k in [k for k in os.environ if k.startswith("HEAVY_")]:
