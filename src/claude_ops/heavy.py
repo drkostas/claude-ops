@@ -41,6 +41,12 @@ beside it as soon as the machine has room. `status` says how long the slot has b
 a job past its turn that still runs. A job that should end by itself takes `--max-hold <minutes>`,
 and it is ended there with a line that says so.
 
+A JOB PAST ITS TURN MAY GROW BACK. A running job writes its sampled memory, now and its peak so far, to
+HEAVY_DIR/taking/<pid>.json each time it is sampled. A waiter that would start beside a job past its turn
+counts the room that job may take again (its peak less what it uses now) as memory that is not free, so a
+build that shrank between two steps cannot let a second job in that the build then pushes into swap. The
+waiter says so in the same measured words, and waits until both fit.
+
 WHAT IT TOOK. Every job's finished or ENDED line says its peak memory, and HEAVY_DIR/done/<pid>.json
 keeps it with the exit code and the minutes, so a chat knows the cap a job needs before running it
 again. The peak is the largest of the group's sampled memory and the biggest child's own maximum
@@ -95,6 +101,8 @@ DIR = Path(os.environ.get("HEAVY_DIR", "/tmp/claude-ops-heavy"))
 SLOT, QUEUE, LAST = DIR / "slot", DIR / "queue", DIR / "last"
 #: jobs that held the slot past their turn and gave it up, still running, one file per pid
 PAST = DIR / "past"
+#: jobs that run now, one file per pid: the memory each uses and its peak so far, as last sampled
+TAKING = DIR / "taking"
 #: jobs that finished, one file per pid: what each took (peak memory, minutes, exit code)
 DONE = DIR / "done"
 #: how many finished jobs DONE keeps (about 200 bytes each, so well under its 1 MB)
@@ -244,6 +252,51 @@ def past_turn(h: dict | None) -> bool:
     return h is not None and held_min(h) > TURN_MIN
 
 
+def taking(pid: int, now_gb: float, peak_gb: float) -> None:
+    """Write what the job of slot pid `pid` uses now and its peak so far, for a waiter beside it."""
+    try:
+        TAKING.mkdir(parents=True, exist_ok=True)
+        tmp = TAKING / f".{pid}.json"
+        tmp.write_text(json.dumps({"now_gb": round(now_gb, 2), "peak_gb": round(peak_gb, 2), "at": time.time()}))
+        os.replace(tmp, TAKING / f"{pid}.json")
+    except OSError:
+        pass
+
+
+def may_take_again(h: dict | None) -> tuple[float, float]:
+    """(GB the job of holder `h` may take again, its peak so far): its sampled peak less what it uses now,
+    (0, 0) when it has written no sample or has ended."""
+    if not h:
+        return 0.0, 0.0
+    try:
+        pid = int(h["pid"])
+        rec = json.loads((TAKING / f"{pid}.json").read_text())
+        now, peak = float(rec.get("now_gb", 0)), float(rec.get("peak_gb", 0))
+    except (KeyError, TypeError, ValueError, OSError):
+        return 0.0, 0.0
+    if not alive(pid):
+        return 0.0, 0.0
+    return round(max(0.0, peak - now), 1), peak
+
+
+def taking_back(h: dict | None) -> tuple[float, str]:
+    """(GB every running job past its turn may take again, the words for it): the slot's holder when it is past
+    its turn, and each job that gave the slot up and still runs (past_jobs). A job that took over the slot is
+    within its turn, and the one it took over from keeps running in PAST, so both are read."""
+    jobs = ([h] if past_turn(h) else []) + [j for j in past_jobs() if not h or int(j["pid"]) != int(h["pid"])]
+    got = [(j, *may_take_again(j)) for j in jobs]
+    got = [(j, back, top) for j, back, top in got if back > 0]
+    if not got:
+        return 0.0, ""
+    total = round(sum(back for _j, back, _top in got), 1)
+    j, back, top = max(got, key=lambda g: g[1])
+    if len(got) == 1:
+        return total, (f"{j['chat']}: {j['what']}, past its turn, takes back the {back:g} GB under its peak "
+                       f"of {top:g} GB")
+    return total, (f"{len(got)} jobs past their turn take back {total:g} GB, the most {j['chat']}: {j['what']} "
+                   f"with {back:g} GB under its peak of {top:g} GB")
+
+
 def _ago(minutes: float) -> str:
     m = int(minutes)
     return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min"
@@ -271,6 +324,12 @@ def clear_stale() -> None:
     the folder but no record may find no folder a moment later. That is a slot given back, not an
     error: it raised FileNotFoundError here, and the waiter that looked ended without running its job
     (about 1 job in 45 when twelve short jobs queued at once)."""
+    for f in TAKING.glob("*.json") if TAKING.is_dir() else ():
+        try:
+            if not alive(int(f.stem)):
+                f.unlink(missing_ok=True)       # a job killed before it could remove its own sample
+        except (ValueError, OSError):
+            pass
     if not SLOT.is_dir():
         return
     h = holder()
@@ -376,6 +435,11 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
             clear_stale()
             m = machine()
             held = reasons(m)
+            # beside jobs past their turn, the room they may take again is not free
+            back, words = taking_back(holder())
+            if not held and back and m[0] - back < MIN_FREE_GB:
+                held = [("memory", f"only {round(m[0] - back, 1):g} GB of memory free once {words} "
+                                   f"(needs {MIN_FREE_GB:g})")]
             why = "; ".join(words for _kind, words in held)
             if why:
                 held_since = held_since or time.time()
@@ -691,6 +755,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 break
             used = group_gb(job.pid)
             peak = max(peak, used)
+            taking(os.getpid(), used, peak)
             if used > MAX_GB:
                 over = used
                 stop()
@@ -703,6 +768,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 break
     finally:
         release(os.getpid())
+        (TAKING / f"{os.getpid()}.json").unlink(missing_ok=True)
     time.sleep(0.2 if notify_chat else 0)      # the relay prints the job's last lines first
     peak = round(max(peak, peak_of_children()), 2)
     minutes = (time.time() - began) / 60
