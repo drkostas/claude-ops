@@ -79,10 +79,15 @@ CREATE TABLE IF NOT EXISTS telemetry(
 """
 
 
+#: how long an OTLP exporter waits for an answer before it gives up on a request (OTEL_EXPORTER_OTLP_TIMEOUT,
+#: 10 s by default), when env_block sets no other
+EXPORTER_TIMEOUT_S = 10.0
 #: how long the collector waits for another writer before it answers 503, which an OTLP exporter retries. A
 #: reading pass holds the write lock while it reads one transcript, which can take seconds on a busy machine,
 #: and a wait of 5 s ended in "database is locked" and a traceback, with that minute's figures lost.
-COLLECT_WAIT_S = 30.0
+#: ⛔ It stays under the exporter's timeout. A handler still waiting after the exporter gave up would save a
+#: batch the exporter then sends again, and save_metrics adds on conflict, so it would count twice.
+COLLECT_WAIT_S = 8.0
 
 
 def connect(db: "Path | str | None" = None, *, timeout: float = 5) -> sqlite3.Connection:
@@ -659,19 +664,23 @@ def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" 
                     rows = metric_rows(json.loads(raw), seen)
                 except ValueError:
                     return self._answer(400, b'{"error": "not json"}')
-                conn = connect(db, timeout=COLLECT_WAIT_S)
+                conn = None
                 try:
+                    # inside the try, so a lock met while connect sets the store up answers 503 too
+                    conn = connect(db, timeout=COLLECT_WAIT_S)
                     save_metrics(conn, rows)
                     conn.commit()
                 except sqlite3.OperationalError as e:
                     if "locked" not in str(e) and "busy" not in str(e):
                         raise
                     # nothing was saved, so the exporter may send the same minutes again
-                    conn.rollback()
+                    if conn is not None:
+                        conn.rollback()
                     return self._answer(503, b'{"error": "the store is busy, send it again"}',
                                         {"Retry-After": str(int(COLLECT_WAIT_S))})
                 finally:
-                    conn.close()
+                    if conn is not None:
+                        conn.close()
             return self._answer(200)
 
     (server or ThreadingHTTPServer)((host, port), Handler).serve_forever()

@@ -214,6 +214,38 @@ def test_the_collector_answers_503_while_another_writer_holds_the_store(tmp_path
     assert rows(db, "SELECT kind, value FROM telemetry") == [("cacheRead", 10.0)]
 
 
+def test_the_collector_gives_up_before_the_exporter_does():
+    e = meter.env_block(4999)
+    ms = e.get("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT") or e.get("OTEL_EXPORTER_OTLP_TIMEOUT")
+    exporter_s = int(ms) / 1000 if ms else meter.EXPORTER_TIMEOUT_S
+    assert meter.COLLECT_WAIT_S < exporter_s, "a batch saved after the exporter gave up is sent again and counted twice"
+
+
+def test_a_lock_met_while_connecting_answers_503(tmp_path, monkeypatch):
+    db = tmp_path / "m.sqlite3"
+    made = {}
+
+    from http.server import ThreadingHTTPServer
+
+    def factory(addr, handler):
+        made["server"] = ThreadingHTTPServer((addr[0], 0), handler)
+        return made["server"]
+
+    def locked(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(meter, "connect", locked)
+    threading.Thread(target=meter.serve, kwargs={"db": db, "server": factory}, daemon=True).start()
+    while "server" not in made:
+        time.sleep(0.01)
+    req = urllib.request.Request(f"http://127.0.0.1:{made['server'].server_address[1]}/v1/metrics",
+                                 data=json.dumps(metrics(1.0)).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as got:
+        urllib.request.urlopen(req, timeout=5)
+    made["server"].shutdown()
+    assert got.value.code == 503
+
+
 def test_the_environment_turns_telemetry_on_toward_this_machine():
     e = meter.env_block(4999)
     assert e["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1" and e["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:4999"
