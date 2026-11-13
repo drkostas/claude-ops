@@ -1343,7 +1343,8 @@ def newest_api_error(path: Path | None, scan: int = 2000) -> dict | None:
     the session then waits at its prompt as if it had finished. This answers {"uuid", "at", "error",
     "text"} when that record is the conversation's newest message (nothing typed or queued after it,
     and a subagent's record does not count). `error` is Claude Code's kind ("server_error",
-    "rate_limit", "authentication_failed", ...). At most `scan` lines are read from the end."""
+    "rate_limit", "authentication_failed", ...) and `status` the HTTP status when it recorded one. At
+    most `scan` lines are read from the end."""
     if path is None:
         return None
     try:
@@ -1359,10 +1360,24 @@ def newest_api_error(path: Path | None, scan: int = 2000) -> dict | None:
             if d.get("type") != "assistant" or not d.get("isApiErrorMessage"):
                 return None
             return {"uuid": d.get("uuid"), "at": d.get("timestamp"), "error": d.get("error"),
-                    "text": _text_of(d).strip()}
+                    "text": _text_of(d).strip(), "status": d.get("apiErrorStatus")}
     except OSError:
         return None
     return None
+
+
+def gateway_refused(err: dict | None) -> bool:
+    """Whether an API error is a 403 from something in front of the API rather than from the API.
+
+    Claude Code files every 403 under authentication_failed and starts its text with "Please run
+    /login", also when the refusal came from a proxy or a dropped connection ("API Error: 403
+    Attention Required! | Cloudflare", "API Error: 403 The socket connection was closed
+    unexpectedly"). The login still works and the refusal passes by itself. The API's own refusals
+    carry a JSON body ("API Error: 403 {"type":"error",...}"), and those are not this."""
+    if not err or err.get("status") != 403:
+        return False
+    _, sep, body = str(err.get("text") or "").partition("API Error: 403")
+    return bool(sep) and not body.strip().startswith("{")
 
 
 def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
@@ -1370,10 +1385,13 @@ def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
 
     When the connection to the API drops mid-turn ("API Error: Connection lost mid-response"), the
     session waits at its prompt as if it had finished (newest_api_error). This answers that error
-    when it is transient: the text starts with "API Error:" and the kind is not one of NOT_TRANSIENT.
+    when it is transient: the text starts with "API Error:" and the kind is not one of NOT_TRANSIENT,
+    or it is a 403 from in front of the API (gateway_refused).
     A usage limit ("You've hit your session limit"), a prompt that is too long, billing or an expired
     login are not, since asking again cannot help."""
     err = newest_api_error(path, scan)
+    if gateway_refused(err):
+        return err
     if not err or not err["text"].startswith("API Error:") or err["error"] in NOT_TRANSIENT:
         return None
     return err
@@ -1385,9 +1403,10 @@ def stopped_on_login_error(path: Path | None, scan: int = 2000) -> dict | None:
     A session whose login expired or was revoked ends every turn this way and answers nothing until
     it is signed in again, and a running session does not read a login put back after it signed
     itself out: it needs a restart. Answers newest_api_error's record when its kind is
-    authentication_failed. login_lost reads the same from a screen; this needs no terminal."""
+    authentication_failed, except a 403 from in front of the API (gateway_refused), which passes by
+    itself. login_lost reads the same from a screen; this needs no terminal."""
     err = newest_api_error(path, scan)
-    return err if err and err["error"] == "authentication_failed" else None
+    return err if err and err["error"] == "authentication_failed" and not gateway_refused(err) else None
 
 
 def continue_after_error(err: dict | None, answered: str | None, told: int, *,
