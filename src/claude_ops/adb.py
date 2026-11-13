@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import functools
 import json
 import subprocess
@@ -28,12 +29,21 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 
+try:
+    import resource
+except ImportError:      # not on Windows
+    resource = None
+
 #: the port `adb tcpip` listens on unless told otherwise
 FIXED = 5555
 
 #: where wireless debugging's random port falls: the ephemeral range of Linux (32768-60999), with
 #: room on both sides for a device that changed it
 WIRELESS_PORTS = range(30000, 65536)
+
+#: file descriptors a port scan leaves to the rest of the program when it keeps its connections
+#: under the process's open-file limit
+FD_RESERVE = 64
 
 
 @dataclass
@@ -82,28 +92,91 @@ def scan_timeout(rtt: float | None, *, floor: float = 2.0, factor: float = 4.0, 
     return min(ceiling, max(floor, factor * rtt))
 
 
-def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: int = 800) -> list[int]:
-    """The ports of `host` that accept a TCP connection, in order. A port that refuses or does not
-    answer within `timeout` seconds is left out. With no `timeout` it is measured first, from a
-    connect to a port nothing listens on (`scan_timeout(round_trip(host))`), so a slow link gets a
-    longer wait and a near one the usual two seconds. Over a VPN with a 100 ms round trip, 35,000
-    ports take about ten seconds."""
+def fd_room(reserve: int = FD_RESERVE) -> int | None:
+    """How many connections can be open at once under this process's open-file limit, leaving
+    `reserve` files to the rest of the program. None when the limit is unlimited or cannot be read."""
+    if resource is None:
+        return None
+    try:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return None
+    if soft == resource.RLIM_INFINITY:
+        return None
+    return max(1, soft - reserve)
+
+
+def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: int = 800,
+               retry_timeout: float | None = None, retry_concurrency: int = 200, retry_budget: float = 90.0,
+               connect=None) -> list[int]:
+    """The ports of `host` that accept a TCP connection, in order. Over a VPN with a 100 ms round
+    trip, 35,000 ports take about ten seconds.
+
+    The first pass asks every port, `concurrency` at once, and waits `timeout` seconds for each. With
+    no `timeout` it is measured first, from a connect to a port nothing listens on
+    (`scan_timeout(round_trip(host))`), so a slow link gets a longer wait and a near one the usual two
+    seconds. A port that refuses has answered and is never asked again. A port that gave no answer (a
+    timeout, or a local error such as too many open files) is asked again in a second pass,
+    `retry_concurrency` at once with `retry_timeout` seconds each (with none, twice the first pass's
+    wait and never under four seconds). Over a slow link, hundreds of connections at once can crowd
+    it until most of them time out, where fewer at once all answer.
+
+    The second pass ends after `retry_budget` seconds whatever is left, and after `2 * retry_timeout`
+    seconds when no port has answered it yet, so a link that drops everything is not asked again
+    port by port. `retry_budget=0` leaves the second pass out.
+
+    Both passes keep the connections open at once under the process's open-file limit (`fd_room`).
+    A connection over that limit fails at once without asking the host, so a scan above it misses
+    ports that are open.
+
+    `connect(host, port)` is the coroutine that opens a connection, `asyncio.open_connection` unless
+    the caller gives another (a test does)."""
     if timeout is None:
         timeout = scan_timeout(round_trip(host))
+    if retry_timeout is None:
+        retry_timeout = max(4.0, 2 * timeout)
+    connect = connect or asyncio.open_connection
+    room = fd_room()
+
+    def at_once(n: int) -> int:
+        return max(1, min(n, room) if room else n)
 
     async def scan() -> list[int]:
         found: list[int] = []
-        gate = asyncio.Semaphore(concurrency)
+        silent: list[int] = []
+        heard = 0
 
-        async def one(port: int) -> None:
+        async def ask(port: int, gate: asyncio.Semaphore, wait: float, misses: list[int] | None) -> None:
+            nonlocal heard
             async with gate:
                 try:
-                    _, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
-                except (OSError, asyncio.TimeoutError):
+                    _, w = await asyncio.wait_for(connect(host, port), wait)
+                except (ConnectionRefusedError, ConnectionResetError):
+                    heard += 1                  # the host answered, and nothing listens there
                     return
+                except (OSError, asyncio.TimeoutError):
+                    if misses is not None:
+                        misses.append(port)
+                    return
+                heard += 1
                 found.append(port)
                 w.close()
-        await asyncio.gather(*(one(p) for p in ports))
+
+        gate = asyncio.Semaphore(at_once(concurrency))
+        await asyncio.gather(*(ask(p, gate, timeout, silent) for p in ports))
+        if not silent or retry_budget <= 0:
+            return sorted(found)
+        heard = 0
+        gate = asyncio.Semaphore(at_once(retry_concurrency))
+        second = asyncio.ensure_future(asyncio.gather(*(ask(p, gate, retry_timeout, None) for p in silent)))
+        quiet = min(retry_budget, 2 * retry_timeout)
+        await asyncio.wait({second}, timeout=quiet)
+        if not second.done() and heard:
+            await asyncio.wait({second}, timeout=retry_budget - quiet)
+        if not second.done():
+            second.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second
         return sorted(found)
     return asyncio.run(scan())
 

@@ -1,8 +1,18 @@
 """adb.reach: the fixed port, else the wireless-debugging port found by a scan and tcpip from there."""
 from __future__ import annotations
 
+import asyncio
+import collections
+import errno
+import os
 import socket
 import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+import pytest
 
 from claude_ops import adb, cli
 
@@ -187,3 +197,127 @@ def test_the_cli_takes_a_scan_wait(monkeypatch):
     assert got["scan_wait"] == 4.5
     adb.main([HOST])
     assert got["scan_wait"] is None
+
+
+class Link:
+    """A connector for open_ports: `plan[port]` says what each ask of that port does in turn, and the
+    last step repeats. "open" connects, "refuse" is refused, "silent" never answers, "late" is refused
+    after a twentieth of a second, "slow" connects after half a second and "emfile" fails at once with
+    too many open files. A port not in
+    the plan is refused. Every ask is counted."""
+
+    class Writer:
+        def close(self):
+            pass
+
+    def __init__(self, plan=None, default=("refuse",)):
+        self.plan = {p: list(v) for p, v in (plan or {}).items()}
+        self.default = list(default)
+        self.asked = collections.Counter()
+
+    async def __call__(self, host, port):
+        self.asked[port] += 1
+        steps = self.plan.get(port, self.default)
+        what = steps[min(self.asked[port], len(steps)) - 1]
+        if what == "refuse":
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
+        if what == "emfile":
+            raise OSError(errno.EMFILE, "Too many open files")
+        if what == "silent":
+            await asyncio.sleep(3600)
+        if what == "late":
+            await asyncio.sleep(0.05)
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
+        if what == "slow":
+            await asyncio.sleep(0.5)
+        return None, self.Writer()
+
+
+def scan(link, ports, **kw):
+    kw = {"timeout": 0.05, "retry_timeout": 0.2, "retry_budget": 5, **kw}
+    return adb.open_ports(HOST, ports, connect=link, **kw)
+
+
+def test_a_port_that_gave_no_answer_is_asked_again_and_a_refused_one_never():
+    link = Link({41759: ["silent", "open"], 41800: ["emfile", "open"], 41900: ["silent"]})
+    assert scan(link, range(41000, 42000)) == [41759, 41800]
+    assert link.asked[41759] == link.asked[41800] == link.asked[41900] == 2
+    refused = [p for p in range(41000, 42000) if p not in (41759, 41800, 41900)]
+    assert all(link.asked[p] == 1 for p in refused)
+
+
+def test_the_second_pass_runs_fewer_at_once_than_the_first(monkeypatch):
+    monkeypatch.setattr(adb, "fd_room", lambda: None)   # whatever this machine's file limit
+    seen, now = [], [0]
+
+    async def counting(host, port):
+        now[0] += 1
+        seen.append(now[0])
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            now[0] -= 1
+    adb.open_ports(HOST, range(300), connect=counting, timeout=0.05, concurrency=150,
+                   retry_concurrency=7, retry_timeout=0.05, retry_budget=0.3)
+    assert max(seen) == 150 and max(seen[300:]) == 7
+
+
+def test_a_link_that_drops_everything_is_not_asked_again_port_by_port():
+    link = Link(default=["silent"])
+    t = time.monotonic()
+    assert scan(link, range(2000), timeout=0.01, retry_timeout=0.2, retry_concurrency=10, retry_budget=60) == []
+    assert time.monotonic() - t < 5
+    assert sum(link.asked.values()) - 2000 < 100     # the second pass gave up after 0.4 s of silence
+
+
+def test_the_second_pass_ends_at_its_budget():
+    link = Link(default=["silent", "late"])          # each answers, but 10 at once take 25 s for 5000
+    t = time.monotonic()
+    assert scan(link, range(5000), timeout=0.01, retry_concurrency=10, retry_budget=0.5) == []
+    assert time.monotonic() - t < 4
+    assert sum(link.asked.values()) - 5000 < 1000
+
+
+def test_the_second_pass_waits_at_least_four_seconds_by_default():
+    link = Link({41759: ["silent", "slow"]})       # half a second, over twice the first pass's wait
+    assert adb.open_ports(HOST, range(41700, 41800), connect=link, timeout=0.02) == [41759]
+
+
+def test_a_budget_of_zero_leaves_the_second_pass_out():
+    link = Link({41759: ["silent", "open"]})
+    assert scan(link, [41759, 41760], retry_budget=0) == []
+    assert link.asked[41759] == 1
+
+
+def test_connections_stay_under_the_open_file_limit():
+    """A scan with more connections at once than the process may open files lost the ports over the
+    limit to "too many open files" without a word, an open one among them. A launch agent on macOS
+    starts with a limit of 256."""
+    resource = pytest.importorskip("resource")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 256:
+        pytest.skip("the hard open-file limit is under 256")
+    child = textwrap.dedent("""
+        import resource, socket, sys
+        from claude_ops import adb
+        resource.setrlimit(resource.RLIMIT_NOFILE, (256, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1000)
+        port = s.getsockname()[1]
+        hi = min(65536, port + 500)
+        found = adb.open_ports("127.0.0.1", range(hi - 2000, hi), timeout=2, retry_budget=0)
+        print(port in found)
+    """)
+    src = str(Path(adb.__file__).resolve().parents[1])
+    r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, timeout=120,
+                       env={**os.environ, "PYTHONPATH": src})
+    assert r.stdout.strip() == "True", r.stdout + r.stderr
+
+
+def test_fd_room_leaves_a_reserve_under_the_limit(monkeypatch):
+    resource = pytest.importorskip("resource")
+    monkeypatch.setattr(adb.resource, "getrlimit", lambda what: (256, resource.RLIM_INFINITY))
+    assert adb.fd_room() == 192 and adb.fd_room(reserve=6) == 250
+    monkeypatch.setattr(adb.resource, "getrlimit", lambda what: (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+    assert adb.fd_room() is None
