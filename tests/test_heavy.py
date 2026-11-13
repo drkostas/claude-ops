@@ -121,6 +121,55 @@ def test_a_waiter_beside_a_job_past_its_turn_counts_the_room_that_job_may_take_a
         holder.wait()
 
 
+def test_a_job_that_gave_the_slot_up_still_counts_for_the_next_waiter(tmp_path):
+    """Once a waiter takes over, the job past its turn moves to past/<pid>.json and the slot's holder is within its
+    turn. A third waiter still counts what the job in past/ may take again, and every such job together."""
+    state = tmp_path / "heavy"
+    old, new, other = (subprocess.Popen(["sleep", "120"]) for _ in range(3))
+    try:
+        (state / "slot").mkdir(parents=True)
+        (state / "slot" / "who.json").write_text(json.dumps(
+            {"chat": "n-chat", "what": "newer job", "pid": new.pid, "since": "05:21", "at": time.time() - 60}))
+        (state / "past").mkdir()
+        (state / "past" / f"{old.pid}.json").write_text(json.dumps(
+            {"chat": "s-chat", "what": "big build", "pid": old.pid, "since": "03:21", "at": time.time() - 7200}))
+        (state / "taking").mkdir()
+        sample = state / "taking" / f"{old.pid}.json"
+        sample.write_text(json.dumps({"now_gb": 2.0, "peak_gb": 9.0, "at": time.time()}))
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC,
+               "HEAVY_TURN_MIN": "60"}
+        os.environ["HEAVY_DIR"] = str(state)   # the words for two jobs, read in this process, with this folder
+        sys.modules.pop("claude_ops.heavy", None)
+        h = importlib.import_module("claude_ops.heavy")
+        (state / "past" / f"{other.pid}.json").write_text(json.dumps(
+            {"chat": "o-chat", "what": "other build", "pid": other.pid, "since": "04:00", "at": time.time() - 5000}))
+        (state / "taking" / f"{other.pid}.json").write_text(json.dumps({"now_gb": 3.0, "peak_gb": 4.0, "at": time.time()}))
+        back, words = h.taking_back(h.holder())
+        assert back == 8.0 and words == ("2 jobs past their turn take back 8 GB, the most s-chat: big build with 7 GB "
+                                         "under its peak of 9 GB"), (back, words)
+        (state / "past" / f"{other.pid}.json").unlink()
+        (state / "taking" / f"{other.pid}.json").unlink()
+        # the newer job holds the slot within its turn, so the waiter waits for the slot; once it is gone, the
+        # waiter would take it, and the job in past/ still counts
+        new.kill(); new.wait()
+        waiter = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "third", "--", "echo", "ran"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        time.sleep(2)
+        assert waiter.poll() is None, "with 10 GB free and 7 GB the job in past/ may take again, the third job waits"
+        sample.write_text(json.dumps({"now_gb": 9.0, "peak_gb": 9.0, "at": time.time()}))
+        out = waiter.communicate(timeout=30)[0]
+        assert ("only 3 GB of memory free once s-chat: big build, past its turn, takes back the 7 GB under its "
+                "peak of 9 GB (needs 6)") in out, out
+        assert waiter.returncode == 0 and "ran" in out, out
+    finally:
+        os.environ.pop("HEAVY_DIR", None)
+        sys.modules.pop("claude_ops.heavy", None)   # the tests after import it again with their own folder
+        for p in (old, new, other):
+            p.kill()
+            p.wait()
+
+
 def test_a_running_job_writes_its_sample_and_takes_it_away(tmp_path):
     """What a waiter reads: the job's memory now and its peak so far, while it runs, and nothing after."""
     state = tmp_path / "heavy"

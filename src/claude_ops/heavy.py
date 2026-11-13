@@ -279,6 +279,24 @@ def may_take_again(h: dict | None) -> tuple[float, float]:
     return round(max(0.0, peak - now), 1), peak
 
 
+def taking_back(h: dict | None) -> tuple[float, str]:
+    """(GB every running job past its turn may take again, the words for it): the slot's holder when it is past
+    its turn, and each job that gave the slot up and still runs (past_jobs). A job that took over the slot is
+    within its turn, and the one it took over from keeps running in PAST, so both are read."""
+    jobs = ([h] if past_turn(h) else []) + [j for j in past_jobs() if not h or int(j["pid"]) != int(h["pid"])]
+    got = [(j, *may_take_again(j)) for j in jobs]
+    got = [(j, back, top) for j, back, top in got if back > 0]
+    if not got:
+        return 0.0, ""
+    total = round(sum(back for _j, back, _top in got), 1)
+    j, back, top = max(got, key=lambda g: g[1])
+    if len(got) == 1:
+        return total, (f"{j['chat']}: {j['what']}, past its turn, takes back the {back:g} GB under its peak "
+                       f"of {top:g} GB")
+    return total, (f"{len(got)} jobs past their turn take back {total:g} GB, the most {j['chat']}: {j['what']} "
+                   f"with {back:g} GB under its peak of {top:g} GB")
+
+
 def _ago(minutes: float) -> str:
     m = int(minutes)
     return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min"
@@ -417,12 +435,10 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
             clear_stale()
             m = machine()
             held = reasons(m)
-            # beside a job past its turn, the room it may take again is not free
-            h = holder()
-            back, top = may_take_again(h) if past_turn(h) else (0.0, 0.0)
+            # beside jobs past their turn, the room they may take again is not free
+            back, words = taking_back(holder())
             if not held and back and m[0] - back < MIN_FREE_GB:
-                held = [("memory", f"only {round(m[0] - back, 1):g} GB of memory free once {h['chat']}: {h['what']}, "
-                                   f"past its turn, takes back the {back:g} GB under its peak of {top:g} GB "
+                held = [("memory", f"only {round(m[0] - back, 1):g} GB of memory free once {words} "
                                    f"(needs {MIN_FREE_GB:g})")]
             why = "; ".join(words for _kind, words in held)
             if why:
