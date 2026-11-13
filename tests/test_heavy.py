@@ -208,9 +208,10 @@ def test_heavy_queue(monkeypatch):
     check(h.short((20, 19, 30, 1, 38)) == "" and "needs 2 times the swap, 38 GB" in h.short((20, 19, 30, 1, 37.9)),
           "⭐ HEAVY_SWAP_DISK_FACTOR sets how many times the swap must be free, at its edge too")
     h = module()
-    m = h.machine()
-    check(len(m) == 5 and isinstance(m[4], float) and m[4] > 0,
-          f"the machine's own reading has the data volume's free GB ({m})")
+    if sys.platform == "darwin":        # the memory readings come from macOS's own tools
+        m = h.machine()
+        check(len(m) == 5 and isinstance(m[4], float) and m[4] > 0,
+              f"the machine's own reading has the data volume's free GB ({m})")
     # ⭐ the note after a long hold names what held the job, in the gate's own words. module() only sets, so the
     # limits the checks above set are taken away first: a setting in the environment is the job's own limit
     for k in ("HEAVY_MIN_FREE_GB", "HEAVY_MAX_SWAP_GB", "HEAVY_MIN_DISK_PCT", "HEAVY_SWAP_DISK_FACTOR"):
