@@ -245,6 +245,9 @@ class FakeRepo:
         return run(0)
 
     def _api(self, path):
+        if "/commits/" in path and path.rsplit("/", 2)[-2] == "commits":
+            sha = path.rsplit("/", 1)[-1]      # update-branch's commit sits on the head it updated
+            return run(out=(sha[:-1] if sha.endswith("u") else "") + "\n")
         if "check-runs" in path:
             return run(out=json.dumps({"check_runs": [{"name": "ci", "status": "completed",
                                                        "conclusion": self.checks}]}))
@@ -290,6 +293,70 @@ def test_cascade_updates_a_behind_pull_request_then_merges_it():
     code, said = casc(gh, ["1"])
     assert code == 0 and "#1  merged" in said
     assert any(c[:2] == ["pr", "update-branch"] and c[2] == "1" for c in gh.calls)
+
+
+def test_a_head_that_moves_while_it_waits_is_not_merged():
+    """The person who typed the command looked at one head. A push during the wait for the checks
+    is a head nobody looked at, so it ends the merge with nothing merged."""
+    class Moving(FakeGh):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.looks = 0
+
+        def __call__(self, args):
+            out = super().__call__(args)
+            if args[:2] == ["pr", "view"] and out.returncode == 0:
+                self.looks += 1
+                if self.looks >= 2:
+                    pr = json.loads(out.stdout)
+                    pr["headRefOid"] = "fff000fff0001"
+                    return run(out=json.dumps(pr))
+            return out
+    running = [check_run("ci", status="IN_PROGRESS", conclusion="")]
+    gh = Moving([running, [check_run("ci")]])
+    code, said = go(gh)
+    assert code == 8 and "abc123def456 to fff000fff000" in said and not gh.merged
+    gh = Moving([running, [check_run("ci")]])
+    code, said = go(gh, follow_head=True)
+    assert code == 0 and gh.merged, "--follow-head merges the head green at the end, as before"
+    merge_call = [c for c in gh.calls if c[:2] == ["pr", "merge"]][0]
+    assert merge_call[merge_call.index("--match-head-commit") + 1] == "fff000fff0001"
+
+
+def test_an_expected_head_that_is_not_the_head_is_not_merged():
+    gh = FakeGh([[check_run("ci")]])
+    code, said = go(gh, expect_head="0123456789ab")
+    assert code == 8 and not gh.merged
+    gh = FakeGh([[check_run("ci")]])
+    assert go(gh, expect_head="abc123def4567")[0] == 0 and gh.merged
+
+
+def test_cascade_refuses_a_head_pushed_while_it_waits_but_takes_its_own_update():
+    """update-branch makes a merge commit on top of the head it found, so that head is the new head's
+    first parent and the cascade merges it. Any other new head is a push nobody looked at."""
+    gh = FakeRepo([PR(1, status="BEHIND", update_to="CLEAN")])
+    code, said = casc(gh, ["1"])
+    assert code == 0 and gh.prs["1"].merged
+    merged_head = merges_of(gh, 1)[0]
+    assert merged_head[merged_head.index("--match-head-commit") + 1] == "oid1u"
+
+    gh = FakeRepo([PR(1, status="BLOCKED", blocked_polls=2), PR(2)])
+    looks = {"n": 0}
+    view = gh._view
+
+    def pushed(args):
+        out = view(args)
+        if args[2] == "1":
+            looks["n"] += 1
+            if looks["n"] == 2:
+                gh.prs["1"].oid = "pushed-by-hand"
+        return out
+    gh._view = pushed
+    code, said = casc(gh, ["1", "2"])
+    assert code == 3 and "#1  refused: its head moved from oid1 to pushed-by-ha" in said
+    assert not gh.prs["1"].merged and not merges_of(gh, 1)
+    code, said = casc(FakeRepo([PR(3, status="BEHIND", update_to="CLEAN")]), ["3"], follow_head=True)
+    assert code == 0
 
 
 def test_cascade_waits_while_blocked_and_never_merges_until_clean():

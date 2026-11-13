@@ -45,7 +45,13 @@ repository, the number and that head's full sha. Exit 0 lets the merge through. 
 refuses it with the command's own last line: an exit code, no answer within `timeout` seconds, a
 command that cannot start, a head GitHub would not give, or a merge whose number the hook cannot
 read (`gh pr merge` on the current branch). This list exists to stop exactly those merges, so here a
-failure refuses instead of letting the call through.
+failure refuses instead of letting the call through, and so does a command the hook cannot read that
+names `merge` and one of the repositories.
+
+A merge that would take a head other than the one approved is refused in these repositories too:
+`gh pr merge --auto` (GitHub merges later, whatever the head is then), `claude-ops merge
+--follow-head`, and GraphQL's `enablePullRequestAutoMerge`, whose pull request id does not say the
+repository, so it is refused in any repository while an approval list is set.
 
     python3 -P -m claude_ops.hooks.merge_gate [--repo OWNER/NAME ...] [--message TEXT] [--config FILE]
 """
@@ -211,8 +217,15 @@ def merged_repo(words: list[str], here: str) -> str | None:
     return merge_target(words, here)[0]
 
 
-def merge_calls(payload: dict) -> list[tuple[str, list[int], str]]:
-    """Each merge the call makes: (repository, the numbers it merges, the words that make it)."""
+#: options that hand the merge to a later moment, when the head may be one nobody approved
+LATER_HEAD = {"gh": ("--auto",), "claude-ops": ("--follow-head",)}
+#: GraphQL's mutation that turns auto-merge on
+AUTO_MERGE_MUTATION = re.compile(r"enablePullRequestAutoMerge", re.I)
+
+
+def merge_calls(payload: dict) -> list[tuple[str, list[int], str, list[str]]]:
+    """Each merge the call makes: (repository, the numbers it merges, the words that make it, its
+    options that take a later head)."""
     tool = str(payload.get("tool_name") or "")
     ti = payload.get("tool_input") or {}
     out = []
@@ -220,12 +233,23 @@ def merge_calls(payload: dict) -> list[tuple[str, list[int], str]]:
         for words, here in commandline.walk(str(ti.get("command", "")), payload.get("cwd") or os.getcwd()):
             repo, numbers = merge_target(words, here)
             if repo:
-                out.append((repo, numbers, f"`{' '.join(words[:4])}`"))
+                later = LATER_HEAD.get(os.path.basename(words[0]), ())
+                flags = [w for w in words if w in later or any(w.startswith(f + "=") for f in later)]
+                out.append((repo, numbers, f"`{' '.join(words[:4])}`", flags))
     elif MCP_MERGE.match(tool):
         repo = f"{ti.get('owner', '')}/{ti.get('repo', '')}".lower()
         number = str(ti.get("pullNumber", ""))
-        out.append((repo, [int(number)] if number.isdigit() else [], tool))
+        out.append((repo, [int(number)] if number.isdigit() else [], tool, []))
     return out
+
+
+def names_a_listed_merge(payload: dict, gate: dict) -> bool:
+    """Whether the raw call holds the word merge and one of the gate's repositories (by owner/name or
+    by name), for a call the hook could not read word by word."""
+    text = json.dumps(payload.get("tool_input") or {}).lower()
+    if "merge" not in text and "merge" not in str(payload.get("tool_name") or "").lower():
+        return False
+    return any(r in text or r.split("/", 1)[1] in text for r in gate["repositories"])
 
 
 def head_of(repo: str, number: int, timeout: float = HEAD_TIMEOUT_S) -> tuple[str | None, str]:
@@ -273,9 +297,17 @@ def approve(payload: dict, gate: dict | None, *, head=None, answer=None) -> str 
     if not gate:
         return None
     head, answer = head or head_of, answer or ask
-    for repo, numbers, what in merge_calls(payload):
+    if payload.get("tool_name") == "Bash" and AUTO_MERGE_MUTATION.search(
+            str((payload.get("tool_input") or {}).get("command", ""))):
+        return ("GraphQL's enablePullRequestAutoMerge turns on auto-merge, which merges whatever head the "
+                "pull request has when its checks pass, and its pull request id does not say the repository, so "
+                "it cannot be approved for one head")
+    for repo, numbers, what, later in merge_calls(payload):
         if repo not in gate["repositories"]:
             continue
+        if later:
+            return (f"{what} in {repo} with {later[0]} merges whatever head the pull request has later, and an "
+                    "approval holds for one head only. Merge it without " + later[0])
         if not numbers:
             return (f"{what} merges a pull request in {repo} without naming its number, so its approval "
                     "cannot be checked. Name the pull request by its number")
@@ -313,25 +345,31 @@ def check(payload: dict, repos: set[str]) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        repos, message = config(argv)
         payload = json.load(sys.stdin)
-        why = check(payload, repos)
-        gate = approval_config(argv)
-        gated = gate and any(repo in gate["repositories"] for repo, _n, _w in merge_calls(payload))
     except Exception:  # noqa: BLE001 - a broken hook must never stop work
         return 0
+    try:
+        repos, message = config(argv)
+        why = check(payload, repos)
+    except Exception:  # noqa: BLE001 - a broken hook must never stop work
+        why = None
     if why:
         print(f"Blocked: {why}. This repository merges only through its ship script, which runs the "
               "whole suite on the branch rebased onto the newest main branch, under a lock, before it "
               "merges. A merge by hand skips both, and when it breaks the main branch every waiting ship "
               "holds on that red." + (f" {message}" if message else ""), file=sys.stderr)
         return 2
-    if not gated:
+    try:
+        gate = approval_config(argv)
+    except Exception:  # noqa: BLE001 - no list can be read, so none is set
+        gate = None
+    if not gate:
         return 0
     try:
         refused = approve(payload, gate)
     except Exception as e:  # noqa: BLE001 - this list exists to stop a merge, so a check that breaks refuses it
-        refused = f"the approval check failed ({type(e).__name__}: {e})"
+        refused = (f"the approval check failed ({type(e).__name__}: {e}) on a call that names merge and a "
+                   "repository whose merges need an approval") if names_a_listed_merge(payload, gate) else None
     if refused:
         print(f"Blocked: {refused}. This repository merges a pull request only once its head is approved."
               + (f" {gate['message']}" if gate["message"] else ""), file=sys.stderr)

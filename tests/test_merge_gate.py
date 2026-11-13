@@ -254,3 +254,41 @@ def test_main_refuses_an_unapproved_head_and_refuses_when_the_check_breaks(tmp_p
     assert run("claude-ops merge 7 --repo example-org/other") == 0
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert mg.main(["--config", str(f)]) == 0
+
+
+@pytest.mark.parametrize("command, flag", [
+    ("gh pr merge 7 -R example-org/library --auto", "--auto"),
+    ("gh pr merge 7 -R example-org/library --merge --auto", "--auto"),
+    ("claude-ops merge 7 --repo example-org/library --follow-head", "--follow-head"),
+])
+def test_a_merge_that_takes_a_later_head_is_refused_even_when_this_head_is_approved(gate, command, flag):
+    """Auto-merge merges whatever head the pull request has when its checks pass, so a push after the
+    approval would merge unread. An approval holds for one head."""
+    head = github(A_SHA)
+    why = mg.approve(merge_call(command), gate, head=head)
+    assert why and flag in why and "one head only" in why
+    assert mg.approve(merge_call(command.replace("library", "other")), gate, head=head) is None
+
+
+def test_graphql_auto_merge_is_refused_while_an_approval_list_is_set(gate):
+    call = merge_call("gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: "
+                      "{pullRequestId: \"PR_kw\"}) { clientMutationId } }'")
+    assert "enablePullRequestAutoMerge" in mg.approve(call, gate, head=github(A_SHA))
+    assert mg.approve(call, None) is None
+
+
+def test_a_merge_the_hook_cannot_read_is_refused_when_it_names_a_listed_repository(tmp_path, monkeypatch, capsys, gate):
+    f = tmp_path / "gate.json"
+    f.write_text(json.dumps({"approval": {"repositories": ["example-org/library"], "command": gate["command"]}}))
+
+    def unreadable(command, cwd):
+        raise ValueError("a line the reader cannot split")
+    monkeypatch.setattr(mg.commandline, "walk", unreadable)
+
+    def run(command):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(merge_call(command))))
+        return mg.main(["--config", str(f)])
+    assert run("gh pr merge 7 -R example-org/library") == 2
+    assert "names merge and a repository whose merges need an approval" in capsys.readouterr().err
+    assert run("gh pr merge 7 -R example-org/other") == 0
+    assert run("echo library") == 0
