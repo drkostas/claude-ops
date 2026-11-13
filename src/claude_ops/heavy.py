@@ -15,8 +15,10 @@ a memory cap, and gives the slot back.
 
 THE GATE. A job starts only with HEAVY_MIN_FREE_GB (6) of free and reclaimable memory, macOS not
 rating the memory pressure critical, and the data volume over HEAVY_MIN_DISK_PCT (10) free; swap over
-HEAVY_MAX_SWAP_GB (14) holds it only while the disk is also under HEAVY_SWAP_DISK_PCT (12) free (swap
-is history, and hurts when it fills the disk). Otherwise it waits and says why.
+HEAVY_MAX_SWAP_GB (14) holds it only while the free disk is also under HEAVY_SWAP_DISK_FACTOR (3)
+times the swap in use. Swap is history, and hurts only when its files could fill the disk, so the
+room it needs grows with the swap and not with the size of the disk: a share of a large disk counted
+a hundred gigabytes free as short. Otherwise it waits and says why.
 
 THE CAP. A gate at the start is not enough, since a job that starts within limits can grow. A job
 runs in its own process group, and every HEAVY_CHECK seconds (10) the memory of the whole group (top's
@@ -26,10 +28,12 @@ caller is told why, in its own output. A job that needs more sets HEAVY_MAX_GB o
 THE TURN. Each waiter leaves a ticket. The next holder is the oldest ticket of the chat that held the
 slot least recently, so a chat that queues eight jobs takes every other turn instead of all eight
 before anyone else. Waiters look every HEAVY_POLL seconds (5). A ticket or a slot whose process is
-gone is cleared by whoever looks next. A waiter held back by its own limits (one big job run with
-HEAVY_MIN_FREE_GB=16) is passed over until they are met, so it never holds up the jobs behind it.
-Once they have held it for HEAVY_OWN_LIMIT_NOTE_MIN minutes (60) it says, once, the most memory it
-saw free in that time, and `status` shows the same beside it.
+gone is cleared by whoever looks next. A waiter held back by its gate (one big job run with
+HEAVY_MIN_FREE_GB=16, or a machine short of room) is passed over until it has room, so it never holds
+up the jobs behind it. Once the gate has held it for HEAVY_OWN_LIMIT_NOTE_MIN minutes (60) it says,
+once, what holds it in the gate's own words, whether that is the machine or a limit set in the job's
+own environment, and the most memory it saw free when memory was short. `status` shows the same
+beside it.
 
 A TURN HAS AN END. A job that has held the slot for HEAVY_TURN_MIN minutes (60) is past its turn:
 it keeps running and is never stopped for it, but it gives the slot up, so the next waiter starts
@@ -66,6 +70,9 @@ job starts to wait, `admitted` when it takes the slot, `released` when it gives 
 holder ended, or the waiter was stopped). A job run inside another heavy job tells nothing, since it
 takes no slot. The hook is told and never asked: it runs for at most HEAVY_HOOK_TIMEOUT seconds (5),
 and a hook that fails, hangs or is missing never holds up or stops a job. The first failure is said.
+A hook that timed out was ended before it could write anything, and a job's own output is often kept
+nowhere, so with HEAVY_HOOK_LOG set every failure is also one line in that file: the time, the event,
+the chat, the job, the pid and why.
 
 The state lives in HEAVY_DIR (/tmp/claude-ops-heavy). Every caller on the machine must use the same.
 macOS only: the memory readings come from vm_stat, sysctl and proc_pid_rusage.
@@ -108,15 +115,18 @@ def _num(name: str, default: float) -> float:
 
 MIN_FREE_GB = _num("HEAVY_MIN_FREE_GB", 6)
 MAX_SWAP_GB = _num("HEAVY_MAX_SWAP_GB", 14)
-#: swap over its limit holds a job only while the disk is under this share free (see short)
-SWAP_DISK_PCT = _num("HEAVY_SWAP_DISK_PCT", 12)
+#: swap over its limit holds a job only while the free disk is under this many times the swap (see reasons)
+SWAP_DISK_FACTOR = _num("HEAVY_SWAP_DISK_FACTOR", 3)
 MIN_DISK_PCT = _num("HEAVY_MIN_DISK_PCT", 10)
 MAX_GB = _num("HEAVY_MAX_GB", 8)
 POLL = _num("HEAVY_POLL", 5)
 CHECK = _num("HEAVY_CHECK", 10)
 TURN_MIN = _num("HEAVY_TURN_MIN", 60)
-#: how long a waiter's own limits may hold it before it is told the most memory it saw free
+#: how long the gate may hold a waiter before it is told what holds it
 OWN_LIMIT_NOTE_MIN = _num("HEAVY_OWN_LIMIT_NOTE_MIN", 60)
+#: the settings behind each kind of reason the gate gives, to tell a job's own limit from the machine
+LIMIT_VARS = {"memory": ("HEAVY_MIN_FREE_GB",), "pressure": (),
+              "swap": ("HEAVY_MAX_SWAP_GB", "HEAVY_SWAP_DISK_FACTOR"), "disk": ("HEAVY_MIN_DISK_PCT",)}
 #: how many runs in a row of one job that fail the same way are worth saying
 REPEAT_FAILS = int(_num("HEAVY_REPEAT_FAILS", 3))
 #: how far back `status` and failing() look for such a run of failures
@@ -135,14 +145,16 @@ def _out(*cmd: str) -> str:
     return subprocess.run(cmd, capture_output=True, text=True, env=TOOLS_ENV).stdout
 
 
-def machine() -> tuple[float, float, float, float]:
+def machine() -> tuple[float, float, float, float, float | None]:
     """(free and reclaimable memory GB, swap used GB, data volume free %, macOS's memory pressure
-    level: 1 normal, 2 warn, 4 critical). HEAVY_FAKE_MACHINE ("free swap disk [level]") stands in for
-    the readings in tests."""
+    level: 1 normal, 2 warn, 4 critical, data volume free GB). HEAVY_FAKE_MACHINE ("free swap disk
+    [level [disk GB]]") stands in for the readings in tests; without the disk's GB the swap rule has
+    nothing to compare with, and holds nothing."""
     fake = os.environ.get("HEAVY_FAKE_MACHINE")
     if fake:
         vals = [float(x) for x in fake.split()]
-        return vals[0], vals[1], vals[2], (vals[3] if len(vals) > 3 else 1.0)
+        return (vals[0], vals[1], vals[2], (vals[3] if len(vals) > 3 else 1.0),
+                (vals[4] if len(vals) > 4 else None))
     vm = _out("/usr/bin/vm_stat")
     page = int(re.search(r"page size of (\d+)", vm).group(1)) if "page size of" in vm else 16384
     pages = {k: int(v) for k, v in re.findall(r"Pages (free|inactive|speculative):\s+(\d+)", vm)}
@@ -151,28 +163,57 @@ def machine() -> tuple[float, float, float, float]:
     swap = float(m.group(1)) / 1024 if m else 0.0
     st = os.statvfs("/System/Volumes/Data" if Path("/System/Volumes/Data").exists() else "/")
     disk = st.f_bavail * 100 / st.f_blocks
+    disk_gb = st.f_bavail * st.f_frsize / 1e9
     level = _out("/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level").strip()
-    return round(free, 1), round(swap, 1), round(disk, 1), float(level) if level.isdigit() else 1.0
+    return (round(free, 1), round(swap, 1), round(disk, 1), float(level) if level.isdigit() else 1.0,
+            round(disk_gb, 1))
 
 
-def short(m: tuple[float, ...]) -> str:
-    """Why the machine is too short to start a heavy job, or ""."""
+def reasons(m: tuple) -> list[tuple[str, str]]:
+    """What holds a heavy job on a machine read as `m` (machine()'s tuple), each as (kind, words), the kind
+    being memory, pressure, swap or disk. Empty when it has room."""
     free, swap, disk = m[:3]
     level = m[3] if len(m) > 3 else 1.0
+    disk_gb = m[4] if len(m) > 4 else None
     why = []
     if free < MIN_FREE_GB:
-        why.append(f"only {free} GB of memory free (needs {MIN_FREE_GB:g})")
+        why.append(("memory", f"only {free} GB of memory free (needs {MIN_FREE_GB:g})"))
     if level >= 4:
-        why.append("macOS rates the memory pressure critical")
+        why.append(("pressure", "macOS rates the memory pressure critical"))
     # Swap counts only beside a short disk. Swap used is history: pages pushed out earlier stay in
     # swap until something touches them, so a machine can show many gigabytes of swap with plenty
     # of memory free and macOS rating the pressure normal. Swap hurts when its files fill the disk,
-    # so it holds a job only while the disk is short as well.
-    if swap > MAX_SWAP_GB and disk < SWAP_DISK_PCT:
-        why.append(f"swap at {swap} GB (limit {MAX_SWAP_GB:g}) with the disk at {disk}% free")
+    # so it holds a job only while the free disk is under a few times the swap. A share of the disk
+    # was the measure before, and on a large disk it held jobs with far more room than swap could fill.
+    if swap > MAX_SWAP_GB and disk_gb is not None and disk_gb < SWAP_DISK_FACTOR * swap:
+        why.append(("swap", f"swap at {swap} GB (limit {MAX_SWAP_GB:g}) with {disk_gb:g} GB of disk free "
+                            f"(needs {SWAP_DISK_FACTOR:g} times the swap, {round(SWAP_DISK_FACTOR * swap, 1):g} GB)"))
     if disk < MIN_DISK_PCT:
-        why.append(f"disk at {disk}% free (needs {MIN_DISK_PCT:g}%)")
-    return "; ".join(why)
+        why.append(("disk", f"disk at {disk}% free (needs {MIN_DISK_PCT:g}%)"))
+    return why
+
+
+def short(m: tuple) -> str:
+    """Why the machine is too short to start a heavy job, or ""."""
+    return "; ".join(words for _kind, words in reasons(m))
+
+
+def held_note(why: str, kinds: set[str], minutes: float, most_free: float) -> str:
+    """What a waiter says once its gate has held it for OWN_LIMIT_NOTE_MIN: for how long, what holds it in the
+    gate's own words, whether that is a limit set in the job's own environment or the machine, and what would
+    let it start."""
+    own = [v for k in sorted(kinds) for v in LIMIT_VARS.get(k, ()) if v in os.environ]
+    note = (f"the gate has held this job for {_ago(minutes)}: {why}. "
+            + (f"That is this job's own limit ({', '.join(f'{v}={os.environ[v]}' for v in own)})"
+               if own else "That is the machine, not a limit this job set"))
+    if "memory" in kinds:
+        note += (f", and the most memory free in that time was {most_free:g} GB against the "
+                 f"{MIN_FREE_GB:g} GB it asks for")
+    if own:
+        return note + f". Lower {' or '.join(own)} to what the job needs, or stop the job"
+    needs = {"memory": "free memory", "pressure": "free memory", "swap": "free disk", "disk": "free disk"}
+    room = " and ".join(dict.fromkeys(needs[k] for k in sorted(kinds) if k in needs)) or "room"
+    return note + f". It starts when the machine has more {room}, or stop the job"
 
 
 def alive(pid: int) -> bool:
@@ -310,30 +351,30 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
     hook("asked", chat, what, holder_pid)
     took = False
     said = ""
-    # A limit out of reach is said, once: a job that asks for more free memory than the machine
-    # ever has would otherwise wait for hours with only its first waiting line. While its own limits
-    # hold it, the waiter keeps since when and the most memory it saw free, says both once after
-    # OWN_LIMIT_NOTE_MIN, and status shows them beside it. A moment with room starts the count again.
-    held_since, most_free, noted = None, 0.0, False
+    # A long hold is said, once: a job that asks for more free memory than the machine ever has, or
+    # waits on a machine short of room, would otherwise wait for hours with only its first waiting
+    # line. While its gate holds it, the waiter keeps since when, what kinds of reason held it and
+    # the most memory it saw free, says them once after OWN_LIMIT_NOTE_MIN, and status shows them
+    # beside it. A moment with room starts the count again.
+    held_since, most_free, noted, kinds = None, 0.0, False, set()
     try:
         while True:
             if not alive(holder_pid):
                 return False
             clear_stale()
             m = machine()
-            why = short(m)
+            held = reasons(m)
+            why = "; ".join(words for _kind, words in held)
             if why:
                 held_since = held_since or time.time()
                 most_free = max(most_free, m[0])
+                kinds |= {kind for kind, _words in held}
                 mins = (time.time() - held_since) / 60
                 if mins >= OWN_LIMIT_NOTE_MIN and not noted:
-                    say(f"this job's own limits have held it for {_ago(mins)}, and the most memory free "
-                        f"in that time was {most_free:g} GB against the {MIN_FREE_GB:g} GB it asks for. "
-                        f"Lower HEAVY_MIN_FREE_GB (or the limit in the waiting line above) to what the "
-                        f"job needs, or stop the job")
+                    say(held_note(why, kinds, mins, most_free))
                     noted = True
             else:
-                held_since, most_free, noted = None, 0.0, False
+                held_since, most_free, noted, kinds = None, 0.0, False, set()
             # A waiter held by its own gate does not hold up the others. The gate's limits come from
             # each caller's own environment (one big job asks for HEAVY_MIN_FREE_GB=16), so a job at
             # the head of the queue that waits for room only it needs would stop every job behind
@@ -676,9 +717,11 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
 
 
 def status() -> int:
-    free, swap, disk, level = machine()
+    m = machine()
+    free, swap, disk, level, disk_gb = m
     rated = {1.0: "normal", 2.0: "raised", 4.0: "critical"}.get(level, f"level {level:g}")
-    print(f"machine: {free} GB memory free, swap {swap} GB, disk {disk}% free, pressure {rated}")
+    room = f" ({disk_gb:g} GB)" if disk_gb is not None else ""
+    print(f"machine: {free} GB memory free, swap {swap} GB, disk {disk}% free{room}, pressure {rated}")
     clear_stale()
     h = holder()
     if h:
@@ -695,7 +738,7 @@ def status() -> int:
     if order:
         print("next, in turn:")
         for i, w in enumerate(order, 1):
-            held = f"; held by its own limits: {w['short']}" if w.get("short") else ""
+            held = f"; held by its gate: {w['short']}" if w.get("short") else ""
             gate = w.get("held") or {}
             if w.get("short") and gate.get("at"):
                 held += (f", for {_ago((time.time() - float(gate['at'])) / 60)}, the most memory free in "
@@ -704,7 +747,7 @@ def status() -> int:
     for s in failing():
         print(f"failing the same way: {s['chat']}: {s['what']} ({s['how']}, {s['count']} times in a row, "
               f"the last at {time.strftime('%H:%M', time.localtime(s['last']))})")
-    why = short((free, swap, disk, level))
+    why = short(m)
     if why:
         print(f"short: {why}")
     return 0
@@ -736,10 +779,28 @@ def hook(event: str, chat: str, what: str, pid: int) -> bool:
         why = f"it took longer than {HOOK_TIMEOUT:g} s"
     except (OSError, subprocess.SubprocessError) as e:
         why = str(e)
+    if why:
+        hook_log(event, chat, what, pid, why)
     if why and not _hook_said[0]:
         _hook_said[0] = True
         say(f"the HEAVY_HOOK command was not told that {what} was {event} ({why}); the job goes on")
     return not why
+
+
+def hook_log(event: str, chat: str, what: str, pid: int, why: str) -> None:
+    """One line in HEAVY_HOOK_LOG, when it is set, for a hook call that failed: a hook that timed out was
+    ended before it could write anything, and the job's own output is often kept nowhere. A log that
+    cannot be written is left alone, since the hook only tells."""
+    path = os.environ.get("HEAVY_HOOK_LOG")
+    if not path:
+        return
+    line = (f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {event} chat={chat} pid={pid} "
+            f"what={json.dumps(what)} why={json.dumps(why)}\n")
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
 
 
 def _quit(signum, _frame):
