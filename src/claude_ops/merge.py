@@ -7,6 +7,10 @@ hide a red job. This does both in one step through the gh CLI. It reads the chec
 checks at all, and merges with --match-head-commit, so a push between the reading and the merge
 makes GitHub refuse the merge instead of merging code nobody checked.
 
+It merges only the head the pull request had when the command started. A push while it waits for the
+checks ends it with exit 8 and nothing merged, because the new head is not what the person who typed
+the command looked at. `--follow-head` merges whatever head is green at the end instead, as before.
+
     claude-ops merge 123                         # the repository of the current folder
     claude-ops merge 123 --repo owner/name --method squash --timeout 45
     claude-ops merge 123 --repo owner/name --dependency-bump minor   # only a bot's dependency update
@@ -24,9 +28,9 @@ under a branch rule that requires them to be up to date merges one after another
 succeed.
 
 Exit codes: 0 merged, 2 checks still running at the timeout (or none reported), 3 a check did not
-pass, 4 gh refused the merge, 5 the pull request is not open, 6 not the dependency update asked for.
-The cascade uses 0 all merged, 2 some still not ready at the timeout, 3 one refused, 7 the
-production confirmation did not pass.
+pass, 4 gh refused the merge, 5 the pull request is not open, 6 not the dependency update asked for,
+8 its head moved while it waited. The cascade uses 0 all merged, 2 some still not ready at the
+timeout, 3 one refused (a moved head among the reasons), 7 the production confirmation did not pass.
 """
 from __future__ import annotations
 
@@ -245,7 +249,7 @@ def allowed_methods(repo: str | None, gh) -> list[str]:
 def merge_when_green(number: str, repo: str | None = None, *, method: str = "merge",
                      timeout_s: float = 1800, poll_s: float = 20, settle_s: float = 60,
                      allow_no_checks: bool = False, dependency_bump: str | None = None,
-                     dependency_bots=None,
+                     dependency_bots=None, expect_head: str | None = None, follow_head: bool = False,
                      gh=None, env: dict | None = None, sleep=time.sleep,
                      clock=time.monotonic) -> tuple[int, str]:
     """Wait for every check on the pull request's head, then merge it if all passed.
@@ -260,7 +264,10 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
 
     `settle_s` is also how long "no checks yet" counts as waiting. `dependency_bump` ("patch" or
     "minor") merges only a bot's update of lockfiles and manifests within that level, read once
-    before any waiting."""
+    before any waiting.
+
+    It merges only `expect_head`, or the head of its first look when that is None: a head that moves
+    while it waits returns 8 with nothing merged. `follow_head` merges the head green at the end."""
     if method not in METHODS:
         return 2, f"method is one of {', '.join(METHODS)}"
     if gh is None:
@@ -285,6 +292,7 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
         method = allowed[0]
     t0 = clock()
     ready_at = None
+    pinned = None if follow_head else expect_head
     while True:
         try:
             pr = _view(number, repo, gh)
@@ -292,6 +300,12 @@ def merge_when_green(number: str, repo: str | None = None, *, method: str = "mer
             return 4, f"could not read the pull request: {e}"
         if pr.get("state") != "OPEN":
             return 5, f"the pull request is {(pr.get('state') or 'unknown').lower()}, not open"
+        head = pr.get("headRefOid") or ""
+        if not follow_head:
+            pinned = pinned or head
+            if head and head != pinned:
+                return 8, (f"its head moved from {pinned[:12]} to {head[:12]} while this waited, so nothing was "
+                           "merged. Run it again to merge the new head")
         rollup = pr.get("statusCheckRollup") or []
         state, names = verdict(rollup)
         waited = clock() - t0
@@ -413,10 +427,20 @@ def _name_with_owner(repo: str | None, gh) -> str | None:
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
+def first_parent(repo: str | None, sha: str, gh) -> str:
+    """The first parent of commit `sha`, or "" when it cannot be read."""
+    name = _name_with_owner(repo, gh)
+    if not name or not sha:
+        return ""
+    r = gh(["api", f"repos/{name}/commits/{sha}", "--jq", ".parents[0].sha"])
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def cascade(numbers, repo: str | None = None, *, method: str = "merge", timeout_s: float = 1800,
             poll_s: float = 20, settle_s: float = 60, confirm_prod: bool = False,
-            prod_environment: str | None = None, gh=None, env: dict | None = None,
-            sleep=time.sleep, clock=time.monotonic, merge_one=None) -> tuple[int, str]:
+            prod_environment: str | None = None, follow_head: bool = False, gh=None,
+            env: dict | None = None, sleep=time.sleep, clock=time.monotonic,
+            merge_one=None) -> tuple[int, str]:
     """Merge several pull requests, each only when every check on its head has passed.
 
     Each pass looks at every pull request still open and merges the first that is clean, through
@@ -435,6 +459,10 @@ def cascade(numbers, repo: str | None = None, *, method: str = "merge", timeout_
     deployment of it to reach success (`confirm_production`); `prod_environment` keeps only
     deployments whose environment name contains it.
 
+    Each pull request merges only the head it had at the first look, or the merge commit its own
+    `update-branch` made on top of that head (its first parent). A head that moved any other way is
+    refused, unless `follow_head`.
+
     `timeout_s` is the budget for the next merge to happen, reset by each merge. Returns (exit code,
     one line per pull request): 0 every one merged, 2 some still not ready at the timeout, 3 one was
     refused, 7 merged but the production confirmation did not pass.
@@ -451,6 +479,8 @@ def cascade(numbers, repo: str | None = None, *, method: str = "merge", timeout_
     kinds: dict = {}
     refused = False
     last_sha = ""
+    pins: dict = {}            # the head each one may merge
+    updated: set = set()       # the ones this brought up to date since their pin
     deadline = clock() + timeout_s
     while remaining:
         try:
@@ -460,6 +490,28 @@ def cascade(numbers, repo: str | None = None, *, method: str = "merge", timeout_
             refused = True
             break
         kinds = {n: classify(states[n]) for n in remaining}
+
+        moved = None
+        for n in remaining:
+            head = states[n].get("headRefOid") or ""
+            if follow_head or not head or kinds[n] == "merged":
+                continue
+            if n not in pins:
+                pins[n] = head
+            elif head != pins[n]:
+                if n in updated and first_parent(repo, head, gh) == pins[n]:
+                    pins[n] = head
+                    updated.discard(n)
+                else:
+                    moved = (n, pins[n], head)
+                    break
+        if moved:
+            n, was, now = moved
+            outcome[n] = (f"refused: its head moved from {was[:12]} to {now[:12]} while this waited, and not by "
+                          "its own update-branch. Run it again to merge the new head")
+            remaining.remove(n)
+            refused = True
+            break
 
         for n in [m for m in remaining if kinds[m] == "merged"]:
             if not outcome[n].startswith("merged"):
@@ -472,7 +524,8 @@ def cascade(numbers, repo: str | None = None, *, method: str = "merge", timeout_
         if clean:
             n = clean[0]
             code, said = merge_one(n, repo, method=method, timeout_s=timeout_s, poll_s=poll_s,
-                                   settle_s=settle_s, gh=gh, env=env, sleep=sleep, clock=clock)
+                                   settle_s=settle_s, expect_head=pins.get(n), follow_head=follow_head,
+                                   gh=gh, env=env, sleep=sleep, clock=clock)
             if code == 0:
                 outcome[n] = said
                 remaining.remove(n)
@@ -503,6 +556,7 @@ def cascade(numbers, repo: str | None = None, *, method: str = "merge", timeout_
                 refused = True
                 break
             outcome[n] = "brought up to date, its checks are running"
+            updated.add(n)
 
         if clock() >= deadline:
             break

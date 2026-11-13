@@ -259,6 +259,7 @@ def cmd_merge(a) -> int:
         code, said = merge.merge_when_green(a.numbers[0], a.repo, method=a.method,
                                             timeout_s=a.timeout * 60, poll_s=a.poll,
                                             allow_no_checks=a.allow_no_checks,
+                                            follow_head=a.follow_head,
                                             dependency_bump=a.dependency_bump,
                                             dependency_bots=tuple(merge.dependency_bump.UPDATERS) + tuple(a.bot or ()))
         print(said, file=sys.stdout if code == 0 else sys.stderr)
@@ -268,7 +269,7 @@ def cmd_merge(a) -> int:
               file=sys.stderr)
         return 2
     code, said = merge.cascade(a.numbers, a.repo, method=a.method, timeout_s=a.timeout * 60,
-                               poll_s=a.poll, confirm_prod=a.confirm_prod,
+                               poll_s=a.poll, confirm_prod=a.confirm_prod, follow_head=a.follow_head,
                                prod_environment=a.prod_environment)
     print(said, file=sys.stdout if code == 0 else sys.stderr)
     return code
@@ -399,6 +400,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "prints (Dependabot and Renovate are known); repeatable")
     s.add_argument("--confirm-prod", action="store_true",
                    help="after the last merge, wait for that commit's checks and a deployment of it to succeed")
+    s.add_argument("--follow-head", action="store_true",
+                   help="merge whatever head is green at the end; without it a head that moves while this "
+                        "waits ends it (exit 8) with nothing merged")
     s.add_argument("--prod-environment",
                    help="with --confirm-prod, keep only deployments whose environment name contains this")
     s.set_defaults(func=cmd_merge)

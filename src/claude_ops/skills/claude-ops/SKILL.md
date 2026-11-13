@@ -475,8 +475,11 @@ outside the repository's folder) instead of waiting for checks and then calling 
 separate steps can merge a pull request whose checks went red in between, or whose failure was cut
 from a shortened log. The command waits for every check on the current head, refuses any that did
 not pass and a pull request with no checks, and merges that exact head with `--match-head-commit`.
-Read its exit code: 0 merged, 2 still running or no checks, 3 a check failed (its names are
-printed), 4 the merge was refused, 5 not open, 6 not the dependency update asked for.
+It merges only the head the pull request had when it started, so a push while it waits merges
+nothing (exit 8): look at the new head, then run it again. `--follow-head` merges whatever head is
+green at the end. Read its exit code: 0 merged, 2 still running or no checks, 3 a check failed (its
+names are printed), 4 the merge was refused, 5 not open, 6 not the dependency update asked for,
+8 the head moved while it waited.
 
 A bot's dependency update (Dependabot, Renovate) is merged with `--dependency-bump patch` or
 `minor`: the command refuses, with the reason, anything that is not a bot's change of lockfiles and
