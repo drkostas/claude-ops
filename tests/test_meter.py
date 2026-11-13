@@ -3,6 +3,7 @@ it, a transcript read from its position, telemetry through the collector, and th
 import gzip
 import io
 import json
+import os
 import pathlib
 import sqlite3
 import subprocess
@@ -30,6 +31,14 @@ def rows(db, q="SELECT * FROM statusline"):
         return conn.execute(q).fetchall()
     finally:
         conn.close()
+
+
+def test_no_test_opens_the_real_store():
+    real = pathlib.Path.home() / ".local" / "state" / "claude-ops"
+    named = os.environ.get("CLAUDE_OPS_METER_DB", "")
+    assert named and str(meter.DB) == named and real not in pathlib.Path(named).parents
+    meter.connect().close()
+    assert pathlib.Path(named).exists()
 
 
 def test_a_reading_keeps_the_figures_and_a_missing_one_stays_unknown():
