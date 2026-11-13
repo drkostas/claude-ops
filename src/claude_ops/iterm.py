@@ -19,6 +19,7 @@ be taken is None, never "no windows".
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 
@@ -609,6 +610,24 @@ class Processes:
             return False
         return True
 
+    def table(self) -> list[tuple[int, str, float | None, str]]:
+        """Every process as (pid, ps state, seconds since it started, command line); [] when ps does
+        not answer."""
+        try:
+            r = subprocess.run(["/bin/ps", "-Ao", "pid=,stat=,etime=,command="], capture_output=True, text=True,
+                               timeout=10, env=self.env)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        return parse_table(r.stdout)
+
+    def now(self) -> float:
+        import time   # noqa: PLC0415
+        return time.monotonic()
+
+    def resume(self, pid: int) -> None:
+        import os, signal   # noqa: E401, PLC0415
+        os.kill(pid, signal.SIGCONT)
+
     def open(self) -> bool:
         try:
             return subprocess.run(["/usr/bin/open", "-a", "iTerm"], capture_output=True, timeout=30,
@@ -624,6 +643,79 @@ class Processes:
         time.sleep(s)
 
 
+def etime_seconds(text: str) -> float | None:
+    """Pure. ps's elapsed time ("[[dd-]hh:]mm:ss") in seconds, or None."""
+    days, _, rest = text.strip().rpartition("-")
+    parts = rest.split(":")
+    if not 2 <= len(parts) <= 3 or not all(x.isdigit() for x in parts) or (days and not days.isdigit()):
+        return None
+    secs = 0
+    for x in parts:
+        secs = secs * 60 + int(x)
+    return float(secs + (int(days) * 86400 if days else 0))
+
+
+def parse_table(text: str) -> list[tuple[int, str, float | None, str]]:
+    """Pure. `ps -Ao pid=,stat=,etime=,command=` as (pid, state, seconds since start, command line)."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[1], etime_seconds(parts[2]), parts[3]))
+    return rows
+
+
+#: an app's own executable, inside its bundle: what a launch through the Finder, the Dock or `open` starts
+APP_EXECUTABLE = re.compile(r"\.app/Contents/MacOS/[^/ ]+(?: |$)")
+
+
+def launches_held(table: list[tuple[int, str, float | None, str]]) -> str | None:
+    """Pure. Why an app opened now would not finish its launch, or None. macOS can hold launches back
+    and leave each new app stopped (state T) until it gets SIGCONT; when the app launched most
+    recently on this Mac is stopped, an app stopped now could not be opened again."""
+    # ⭐ an app inside a framework is no launch: Homebrew's Python runs every script as
+    # Python.framework/.../Python.app/Contents/MacOS/Python, and was always the newest "app"
+    apps = [(age, pid, stat, cmd) for pid, stat, age, cmd in table
+            if age is not None and ".framework/" not in cmd
+            and APP_EXECUTABLE.search(cmd)]
+    if not apps:
+        return None
+    age, pid, stat, cmd = min(apps)
+    if not stat.startswith("T"):
+        return None
+    name = cmd.split(".app/", 1)[0].rsplit("/", 1)[-1]
+    return (f"the app launched most recently on this Mac, {name} (pid {pid}, {int(age)} s ago), is "
+            "stopped, so launches are not finishing and iTerm2 could not be opened again")
+
+
+def _wait_answer(p: Processes, answer_wait: float, opened: float) -> tuple[bool, list[int]]:
+    """Wait up to `answer_wait` seconds for the iTerm2 opened at `opened` (p.now()) to answer:
+    (answered, the pids it resumed). An app that macOS left stopped (state T) at launch never
+    answers, however long it is given, and SIGCONT lets its launch finish. Only an iTerm2 that
+    started after `opened` is resumed, once: this call's own launch, never another stopped process."""
+    waited, resumed = 0.0, []
+    while not p.answers():
+        mine = set(p.app())
+        since = p.now() - opened + 2   # ps counts whole seconds
+        for pid, stat, age, _cmd in p.table():
+            if pid in mine and pid not in resumed and stat.startswith("T") and age is not None and age <= since:
+                p.resume(pid)
+                resumed.append(pid)
+        if waited >= answer_wait:
+            return False, resumed
+        p.sleep(3)
+        waited += 3
+    return True, resumed
+
+
+def _resumed(detail: dict, resumed: list[int]) -> dict:
+    """The result's word that the launch had to be resumed, so a caller can count how often it is."""
+    if not resumed:
+        return {**detail, "resumed": [], "launch_resumed": False}
+    return {**detail, "message": detail["message"] + "; macOS had left its launch stopped, and it was resumed",
+            "resumed": resumed, "launch_resumed": True}
+
+
 def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
                 env: Mapping[str, str] | None = None) -> tuple[str, dict]:
     """Restart iTerm2's app while its terminals stay, for an iTerm2 that stopped answering.
@@ -634,7 +726,11 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
     with SIGKILL, because an app that stopped answering usually ignores a polite quit too.
 
     Refused, with nothing stopped, unless exactly one iTerm2 and one iTermServer run, the server
-    holds at least one terminal and the app itself holds none (stopping it would end those). The
+    holds at least one terminal and the app itself holds none (stopping it would end those), and
+    while the Mac holds app launches back (launches_held), since the app could not be opened again.
+    The guard and the resume of this call's own launch (_wait_answer) are each needed: a held launch
+    that something else ended leaves a running app as the newest, the guard lets the restart through,
+    and the resume is then what lets the new iTerm2 finish its launch. The
     server is not counted as the app's own when the app started it.
     Returns (outcome, detail): "success" when iTerm2 answers again and the server still holds as
     many terminals as before, "partial" when it holds fewer, "failure" otherwise; detail carries
@@ -656,6 +752,11 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
     if own != 0:
         return "failure", {"message": f"iTerm2 itself holds {own} process(es), which stopping it would end; "
                                       "nothing was stopped"}
+    # ⛔ NEVER STOP AN APP THAT CANNOT BE STARTED AGAIN: while the Mac holds launches back, the new
+    # iTerm2 would stay stopped and every window with it
+    held_back = launches_held(p.table())
+    if held_back:
+        return "failure", {"message": f"{held_back}; nothing was stopped", "launches_held": True}
     p.kill(app)
     for _ in range(40):
         if not p.alive(app):
@@ -663,19 +764,17 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
         p.sleep(0.25)
     else:
         return "failure", {"message": "iTerm2 did not stop"}
+    opened = p.now()
     if not p.open():
         return "failure", {"message": "iTerm2 stopped, and could not be opened again"}
-    waited = 0.0
-    while not p.answers():
-        if waited >= answer_wait:
-            return "failure", {"message": f"iTerm2 opened again but did not answer within {answer_wait:.0f} s",
-                               "terminals_before": held}
-        p.sleep(3)
-        waited += 3
+    answered, resumed = _wait_answer(p, answer_wait, opened)
+    if not answered:
+        return "failure", _resumed({"message": f"iTerm2 opened again but did not answer within {answer_wait:.0f} s",
+                                    "terminals_before": held}, resumed)
     kept = p.children(server)
-    return ("success" if kept >= held else "partial"), {
+    return ("success" if kept >= held else "partial"), _resumed({
         "message": f"iTerm2 restarted; its session server holds {kept} of {held} terminals",
-        "terminals_before": held, "terminals_after": kept}
+        "terminals_before": held, "terminals_after": kept}, resumed)
 
 
 def start_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
@@ -689,15 +788,14 @@ def start_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
     p = procs or Processes(env)
     if p.app():
         return "skipped", {"message": "iTerm2 is running; nothing was started"}
+    opened = p.now()
     if not p.open():
         return "failure", {"message": "iTerm2 could not be opened"}
-    waited = 0.0
-    while not p.answers():
-        if waited >= answer_wait:
-            return "failure", {"message": f"iTerm2 opened but did not answer within {answer_wait:.0f} s"}
-        p.sleep(3)
-        waited += 3
-    return "success", {"message": "iTerm2 was not running, and it is open and answering"}
+    answered, resumed = _wait_answer(p, answer_wait, opened)
+    if not answered:
+        return "failure", _resumed({"message": f"iTerm2 opened but did not answer within {answer_wait:.0f} s"},
+                                   resumed)
+    return "success", _resumed({"message": "iTerm2 was not running, and it is open and answering"}, resumed)
 
 
 # --------------------------------------------------------------------------- one tab, its profile, its keys

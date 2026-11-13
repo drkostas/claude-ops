@@ -146,16 +146,32 @@ class FakeProcs:
     def alive(self, pid):
         return not self.dies
 
+    #: (pid, state, seconds since start, command line) rows, as ps gives them
+    rows = ()
+    t = 0.0
+    resumed = None
+
+    def table(self):
+        return [(pid, "S" if pid in (self.resumed or []) else stat, age, cmd) for pid, stat, age, cmd in self.rows]
+
+    def now(self):
+        return self.t
+
+    def resume(self, pid):
+        self.resumed = (self.resumed or []) + [pid]
+
     def open(self):
         self.opened += 1
         return self.opens
 
     def answers(self):
         self.asked += 1
+        if any(pid in self.apps and stat.startswith("T") for pid, stat, _a, _c in self.table()):
+            return False
         return self.asked >= self.answers_after
 
     def sleep(self, s):
-        pass
+        self.t += s
 
 
 def test_restart_stops_only_the_app_and_waits_for_it_to_answer():
@@ -207,6 +223,68 @@ def test_start_opens_an_iterm2_that_is_not_running_and_waits_for_it():
     assert outcome == "failure" and "did not answer" in detail["message"]
     p = FakeProcs(apps=(), opens=False)
     assert iterm.start_app(procs=p)[0] == "failure"
+
+
+ITERM = "/Applications/iTerm.app/Contents/MacOS/iTerm2"
+
+
+def test_an_iterm2_left_stopped_at_launch_is_resumed_and_the_result_says_so():
+    # macOS can hold a launch back and leave the new app stopped (state T): it never answers until
+    # it gets SIGCONT, and then its launch finishes
+    p = FakeProcs(apps=(), answers_after=1)
+    real_open = p.open
+
+    def open_stopped():
+        p.apps, p.rows = [200], [(200, "T", 1.0, ITERM), (300, "T", 4000.0, "/usr/bin/osascript")]
+        return real_open()
+    p.open = open_stopped
+    outcome, detail = iterm.start_app(procs=p)
+    assert outcome == "success" and p.resumed == [200] and detail["launch_resumed"] is True, detail
+    assert "it was resumed" in detail["message"], "the result says the launch had to be resumed"
+
+
+def test_only_the_iterm2_this_call_opened_is_resumed():
+    # an iTerm2 that was already stopped before the open (it started 600 s ago) is not this call's
+    # launch, and a stopped process that is not iTerm2 is never touched
+    p = FakeProcs(apps=(), answers_after=10**6)
+    real_open = p.open
+
+    def open_old():
+        p.apps, p.rows = [200], [(200, "T", 600.0, ITERM), (300, "T", 2.0, "/usr/bin/osascript")]
+        return real_open()
+    p.open = open_old
+    outcome, detail = iterm.start_app(procs=p, answer_wait=9)
+    assert outcome == "failure" and p.resumed is None and detail["launch_resumed"] is False, detail
+    p = FakeProcs(answers_after=3, )
+    p.rows = [(100, "S", 50.0, ITERM)]
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "success" and p.resumed is None and detail["resumed"] == [], "a running app gets no signal"
+
+
+def test_a_restart_refuses_while_the_mac_holds_launches_back():
+    # the app launched most recently is stopped: an iTerm2 stopped now could not be opened again
+    p = FakeProcs()
+    p.rows = [(100, "S", 9000.0, ITERM),
+              (400, "T", 30.0, "/Users/x/Applications/Some Tool.app/Contents/MacOS/some-tool --flag"),
+              (401, "S", 900.0, "/Applications/Other.app/Contents/MacOS/Other")]
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "failure" and p.killed == [] and p.opened == 0 and detail["launches_held"] is True
+    assert "Some Tool (pid 400" in detail["message"] and "nothing was stopped" in detail["message"], detail
+    p.rows = [(100, "S", 9000.0, ITERM), (400, "T", 30.0, "/Applications/Some Tool.app/Contents/MacOS/some-tool"),
+              (402, "S", 1.0, "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/"
+                              "Contents/MacOS/Python script.py")]
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "failure" and detail.get("launches_held"), "a script run by Python.app is no newer launch"
+    p.rows = [(100, "S", 9000.0, ITERM), (400, "T", 3000.0, "/Applications/Old.app/Contents/MacOS/Old"),
+              (401, "S", 30.0, "/Applications/Other.app/Contents/MacOS/Other")]
+    assert iterm.restart_app(procs=p)[0] == "success", "an old stopped app behind a newer launch that finished"
+
+
+def test_the_process_table_is_read_from_ps():
+    assert iterm.etime_seconds("05:03") == 303 and iterm.etime_seconds("1:00:00") == 3600
+    assert iterm.etime_seconds("2-01:00:00") == 2 * 86400 + 3600 and iterm.etime_seconds("x") is None
+    rows = iterm.parse_table("  12 Ss   1-02:03:04 /sbin/launchd\n 51177 T    00:16 /Applications/iTerm.app/Contents/MacOS/iTerm2\n")
+    assert rows == [(12, "Ss", 93784.0, "/sbin/launchd"), (51177, "T", 16.0, ITERM)]
 
 
 def test_start_leaves_a_running_iterm2_alone():
