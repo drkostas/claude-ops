@@ -136,3 +136,54 @@ def test_env_reaches_every_adb_command(monkeypatch):
                         lambda argv, timeout=15, env=None: seen.append(env) or subprocess.CompletedProcess(argv, 1, "", ""))
     adb.reach(HOST, scan=lambda h, p: [], env={"PATH": "/x"}, sleep=lambda s: None)
     assert seen and all(e == {"PATH": "/x"} for e in seen)
+
+
+def test_the_scan_wait_follows_the_measured_round_trip():
+    assert adb.scan_timeout(0.7) == 2.8                 # a slow link waits longer than the usual two seconds
+    assert adb.scan_timeout(0.1) == 2.0                 # a near one keeps the floor
+    assert adb.scan_timeout(None) == 2.0                # nothing measured: the floor
+    assert adb.scan_timeout(10.0) == 15.0               # and never past the ceiling
+    assert adb.scan_timeout(1.0, floor=1.0, factor=2.0, ceiling=9.0) == 2.0
+
+
+def test_round_trip_counts_a_refusal_and_gives_none_for_silence():
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    gone = closed.getsockname()[1]
+    closed.close()
+    rtt = adb.round_trip("127.0.0.1", gone)
+    assert rtt is not None and 0 <= rtt < 1
+
+
+def test_open_ports_measures_its_wait_when_none_is_given(monkeypatch):
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen()
+    port = s.getsockname()[1]
+    asked = []
+    monkeypatch.setattr(adb, "round_trip", lambda host, *a, **k: asked.append(host) or 0.5)
+    try:
+        assert adb.open_ports("127.0.0.1", [port]) == [port]
+    finally:
+        s.close()
+    assert asked == ["127.0.0.1"]
+
+
+def test_reach_hands_the_scan_its_wait_only_when_one_is_given():
+    seen = []
+
+    def scan(host, ports, **kw):
+        seen.append(kw)
+        return []
+    go(Device(), scan=scan)
+    go(Device(), scan=scan, scan_wait=6.0)
+    assert seen == [{}, {"timeout": 6.0}]
+
+
+def test_the_cli_takes_a_scan_wait(monkeypatch):
+    got = {}
+    monkeypatch.setattr(adb, "reach", lambda host, **kw: got.update(kw) or adb.Reach(None, None, "none"))
+    assert adb.main([HOST, "--scan-wait", "4.5"]) == 1
+    assert got["scan_wait"] == 4.5
+    adb.main([HOST])
+    assert got["scan_wait"] is None
