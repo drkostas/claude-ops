@@ -61,8 +61,9 @@ class Reach:
 class Ports(list):
     """The open ports a scan found, in order, and how much of the range it could not read.
     `unanswered` counts the ports that neither connected nor refused on any ask, and `unasked` those
-    of them the second pass did not ask again before it ended (on its budget, on a link that answered
-    nothing, or with `retry_budget=0`). With both 0 every other port refused, so nothing else listens.
+    of them no pass finished asking a second time (the second pass ended on its budget or on a link
+    that answered nothing, a first pass that heard nothing ended early, or `retry_budget=0`). With
+    both 0 every other port refused, so nothing else listens.
     A scan that leaves ports unanswered found no port there, which is not the same as no port."""
 
     def __init__(self, ports=(), *, unanswered: int = 0, unasked: int = 0):
@@ -140,6 +141,13 @@ def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: i
     seconds when no port has answered it yet, so a link that drops everything is not asked again
     port by port. `retry_budget=0` leaves the second pass out.
 
+    The first pass follows the same rule. When no port has answered it after `2 * timeout` seconds,
+    not even with a refusal, the scan ends there and every port counts as unanswered and unasked.
+    A device that left the network drops every connect, and asking 35,000 ports a few hundred at a
+    time with a two-second wait would take minutes to learn nothing. The cost is that a host whose
+    firewall drops closed ports without a refusal is given up on too, before an open port late in
+    the range is reached.
+
     Both passes keep the connections open at once under the process's open-file limit (`fd_room`).
     A connection over that limit fails at once without asking the host, so a scan above it misses
     ports that are open.
@@ -150,6 +158,7 @@ def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: i
         timeout = scan_timeout(round_trip(host))
     if retry_timeout is None:
         retry_timeout = max(4.0, 2 * timeout)
+    ports = list(ports)
     connect = connect or asyncio.open_connection
     room = fd_room()
 
@@ -162,29 +171,45 @@ def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: i
         again: list[int] = []
         heard = 0
 
-        async def ask(port: int, gate: asyncio.Semaphore, wait: float, misses: list[int] | None) -> None:
+        async def ask(port: int, wait: float, misses: list[int]) -> None:
             nonlocal heard
-            async with gate:
-                try:
-                    _, w = await asyncio.wait_for(connect(host, port), wait)
-                except (ConnectionRefusedError, ConnectionResetError):
-                    heard += 1                  # the host answered, and nothing listens there
-                    return
-                except (OSError, asyncio.TimeoutError):
-                    if misses is not None:
-                        misses.append(port)
-                    return
-                heard += 1
-                found.append(port)
-                w.close()
+            try:
+                _, w = await asyncio.wait_for(connect(host, port), wait)
+            except (ConnectionRefusedError, ConnectionResetError):
+                heard += 1                      # the host answered, and nothing listens there
+                return
+            except (OSError, asyncio.TimeoutError):
+                misses.append(port)
+                return
+            heard += 1
+            found.append(port)
+            w.close()
 
-        gate = asyncio.Semaphore(at_once(concurrency))
-        await asyncio.gather(*(ask(p, gate, timeout, silent) for p in ports))
+        def asking(todo: list[int], at: int, wait: float, misses: list[int]) -> asyncio.Future:
+            """`at` workers that take the ports in turn from one iterator. A task per port waiting
+            on a semaphore would cost a cancel quadratic in the ports still waiting."""
+            left = iter(todo)
+
+            async def worker() -> None:
+                for port in left:
+                    await ask(port, wait, misses)
+            return asyncio.ensure_future(asyncio.gather(*(worker() for _ in range(max(1, min(at_once(at), len(todo)))))))
+
+        first = asking(ports, concurrency, timeout, silent)
+        await asyncio.wait({first}, timeout=2 * timeout)
+        if not first.done() and heard:
+            await first
+        if not first.done():
+            # nothing answered, not even a refusal: the host drops every connect, so every port is
+            # unread and asking them again would hear nothing either
+            first.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await first
+            return Ports([], unanswered=len(ports), unasked=len(ports))
         if not silent or retry_budget <= 0:
             return Ports(sorted(found), unanswered=len(silent), unasked=len(silent))
         heard = 0
-        gate = asyncio.Semaphore(at_once(retry_concurrency))
-        second = asyncio.ensure_future(asyncio.gather(*(ask(p, gate, retry_timeout, again) for p in silent)))
+        second = asking(silent, retry_concurrency, retry_timeout, again)
         quiet = min(retry_budget, 2 * retry_timeout)
         await asyncio.wait({second}, timeout=quiet)
         if not second.done() and heard:

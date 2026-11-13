@@ -251,6 +251,8 @@ def test_the_second_pass_runs_fewer_at_once_than_the_first(monkeypatch):
     seen, now = [], [0]
 
     async def counting(host, port):
+        if port == 0:                                   # one refusal, so the first pass runs to its end
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
         now[0] += 1
         seen.append(now[0])
         try:
@@ -259,11 +261,11 @@ def test_the_second_pass_runs_fewer_at_once_than_the_first(monkeypatch):
             now[0] -= 1
     adb.open_ports(HOST, range(300), connect=counting, timeout=0.05, concurrency=150,
                    retry_concurrency=7, retry_timeout=0.05, retry_budget=0.3)
-    assert max(seen) == 150 and max(seen[300:]) == 7
+    assert max(seen) == 150 and max(seen[299:]) == 7
 
 
 def test_a_link_that_drops_everything_is_not_asked_again_port_by_port():
-    link = Link(default=["silent"])
+    link = Link({0: ["refuse"]}, default=["silent"])   # the first pass hears one refusal, then silence
     t = time.monotonic()
     assert scan(link, range(2000), timeout=0.01, retry_timeout=0.2, retry_concurrency=10, retry_budget=60) == []
     assert time.monotonic() - t < 5
@@ -271,7 +273,7 @@ def test_a_link_that_drops_everything_is_not_asked_again_port_by_port():
 
 
 def test_the_second_pass_ends_at_its_budget():
-    link = Link(default=["silent", "late"])          # each answers, but 10 at once take 25 s for 5000
+    link = Link({0: ["refuse"]}, default=["silent", "late"])   # each answers, but 10 at once take 25 s
     t = time.monotonic()
     assert scan(link, range(5000), timeout=0.01, retry_concurrency=10, retry_budget=0.5) == []
     assert time.monotonic() - t < 4
@@ -335,7 +337,7 @@ def test_a_port_silent_on_both_passes_is_unanswered_but_was_asked_again():
 
 
 def test_ports_the_second_pass_did_not_reach_are_counted_as_unasked():
-    link = Link(default=["silent", "late"])          # each answers on the second ask, too slowly for all
+    link = Link({0: ["refuse"]}, default=["silent", "late"])   # each answers the second ask, too slowly
     found = scan(link, range(5000), timeout=0.01, retry_concurrency=10, retry_budget=0.5)
     asked_again = sum(1 for p in range(5000) if link.asked[p] == 2)
     assert found == [] and 0 < found.unasked == found.unanswered <= 5000 - asked_again + 10
@@ -357,3 +359,16 @@ def test_reach_says_how_much_of_the_scan_it_could_not_read():
 def test_reach_takes_a_plain_list_from_a_scan_of_its_own():
     r = go(Device(), scan=lambda h, p: [])
     assert (r.unanswered, r.unasked) == (0, 0) and "gave no answer" not in r.detail
+
+
+def test_a_host_that_answers_nothing_ends_the_first_pass_in_seconds(monkeypatch):
+    """A device that left the network drops every connect. 35,535 ports 192 at once (an open-file
+    limit of 256) with this wait would take about nine seconds, and with the usual two seconds about
+    370. The first pass ends once twice its wait passes with no answer at all."""
+    monkeypatch.setattr(adb, "fd_room", lambda: 192)
+    link = Link(default=["silent"])
+    t = time.monotonic()
+    found = scan(link, range(30000, 65535), timeout=0.05)
+    assert time.monotonic() - t < 3
+    assert found == [] and (found.unanswered, found.unasked) == (35535, 35535)
+    assert sum(link.asked.values()) < 35535 // 10       # most ports were never asked
