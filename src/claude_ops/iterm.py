@@ -787,7 +787,8 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
 
     Refused, with nothing stopped, unless exactly one iTerm2 and one iTermServer run, the server
     holds at least one terminal and the app itself holds none (stopping it would end those), and
-    while the Mac holds app launches back (launches_held), since the app could not be opened again.
+    while the Mac holds app launches back (launches_held), or while its list of registered apps
+    (lsappinfo) does not answer, since the app could then not be opened again.
     The guard is what protects: a launch macOS held back runs again after the resume of this call's
     own launch (_wait_answer), but it is never registered with LaunchServices, so it does not answer
     and the restart still ends in failure. The server is not counted as the app's own when the app
@@ -814,7 +815,13 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
                                       "nothing was stopped"}
     # ⛔ NEVER STOP AN APP THAT CANNOT BE STARTED AGAIN: while the Mac holds launches back, the new
     # iTerm2 would stay stopped and every window with it
-    held_back = launches_held(p.table(), p.registered(), p.jobs())
+    # ⛔ AND NEVER WHEN WHETHER THEY FINISH IS UNKNOWN: lsappinfo asks LaunchServices, the part that
+    # holds launches back, so the day it does not answer is the day this guard matters most
+    registered = p.registered()
+    if registered is None:
+        return "failure", {"message": "macOS's list of registered apps did not answer, so whether launches "
+                                      "finish is unknown; nothing was stopped", "launches_held": None}
+    held_back = launches_held(p.table(), registered, p.jobs())
     if held_back:
         return "failure", {"message": f"{held_back}; nothing was stopped", "launches_held": True}
     p.kill(app)

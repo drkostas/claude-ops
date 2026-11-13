@@ -151,10 +151,13 @@ class FakeProcs:
     t = 0.0
     resumed = None
 
-    reg = None
+    #: the pids macOS has registered: "all" registers every pid in `rows`, None is lsappinfo not answering
+    reg = "all"
     jobs_running: dict = {}
 
     def registered(self):
+        if self.reg == "all":
+            return {pid for pid, _s, _a, _c in self.rows} | {1}
         return self.reg
 
     def jobs(self):
@@ -311,6 +314,18 @@ def test_a_launch_macos_never_registered_holds_restarts_back():
     p.rows, p.reg, p.jobs_running = table, {100}, jobs
     outcome, detail = iterm.restart_app(procs=p)
     assert outcome == "failure" and p.killed == [] and detail["launches_held"] is True, detail
+
+
+def test_a_restart_refuses_when_registration_cannot_be_read():
+    # lsappinfo asks LaunchServices, the part that holds launches back, so an unread list is no all-clear
+    p = FakeProcs()
+    p.reg = None
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "failure" and p.killed == [] and p.opened == 0 and detail["launches_held"] is None
+    assert "did not answer" in detail["message"] and "nothing was stopped" in detail["message"], detail
+    p = FakeProcs()
+    p.rows, p.jobs_running = [(100, "S", 50.0, ITERM)], {}
+    assert iterm.restart_app(procs=p)[0] == "success", "launchctl not answering leaves the bundle's place to decide"
 
 
 def test_lsappinfo_and_launchctl_are_read():
