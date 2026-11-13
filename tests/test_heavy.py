@@ -84,6 +84,70 @@ def test_a_held_job_says_a_new_waiting_line_only_when_the_kinds_of_reason_change
     sys.modules.pop("claude_ops.heavy", None)
 
 
+def test_a_waiter_beside_a_job_past_its_turn_counts_the_room_that_job_may_take_again(tmp_path):
+    """A build past its turn that shrank between two steps let a second job in, then grew back, and both
+    crawled on swap. A waiter beside it counts the room it may take again (its sampled peak less what it
+    uses now) as memory that is not free."""
+    state = tmp_path / "heavy"
+    holder = subprocess.Popen(["sleep", "120"])
+    try:
+        (state / "slot").mkdir(parents=True)
+        (state / "slot" / "who.json").write_text(json.dumps(
+            {"chat": "s-chat", "what": "big build", "pid": holder.pid, "since": "03:21", "at": time.time() - 7200}))
+        (state / "taking").mkdir()
+        sample = state / "taking" / f"{holder.pid}.json"
+        sample.write_text(json.dumps({"now_gb": 2.0, "peak_gb": 9.0, "at": time.time()}))
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC}
+        waiter = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "second", "--", "echo", "ran"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        time.sleep(2)
+        assert waiter.poll() is None, "with 10 GB free and 7 GB the build may take again, the second job waits"
+        sample.write_text(json.dumps({"now_gb": 8.5, "peak_gb": 9.0, "at": time.time()}))
+        out = waiter.communicate(timeout=30)[0]
+        assert ("waiting, only 3 GB of memory free once s-chat: big build, past its turn, takes back the 7 GB "
+                "under its peak of 9 GB (needs 6)") in out, out
+        assert waiter.returncode == 0 and "ran" in out and "past its turn" in out, out
+        # without a sample (a job from before samples were written) it starts beside it as before
+        sample.unlink()
+        (state / "slot").mkdir(exist_ok=True)
+        (state / "slot" / "who.json").write_text(json.dumps(
+            {"chat": "s-chat", "what": "big build", "pid": holder.pid, "since": "03:21", "at": time.time() - 7200}))
+        r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "third", "--", "echo", "ran3"],
+                           capture_output=True, text=True, timeout=30, env=env)
+        assert r.returncode == 0 and "ran3" in r.stdout + r.stderr and "takes back" not in r.stdout + r.stderr
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_a_running_job_writes_its_sample_and_takes_it_away(tmp_path):
+    """What a waiter reads: the job's memory now and its peak so far, while it runs, and nothing after."""
+    state = tmp_path / "heavy"
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+           "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_POLL": "0.2", "HEAVY_CHECK": "0.2",
+           "PYTHONPATH": SRC}
+    job = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "sampled", "--", "sleep", "3"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    seen = None
+    for _ in range(100):
+        files = list((state / "taking").glob("*.json")) if (state / "taking").is_dir() else []
+        if files:
+            seen = json.loads(files[0].read_text())
+            break
+        time.sleep(0.05)
+    job.communicate(timeout=30)
+    assert seen is not None and {"now_gb", "peak_gb", "at"} <= set(seen) and seen["peak_gb"] >= seen["now_gb"], seen
+    assert not list((state / "taking").glob("*.json")), "and the sample goes when the job ends"
+    # one left by a job killed before it could remove it goes at the next look
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (state / "taking" / f"{dead.pid}.json").write_text(json.dumps({"now_gb": 1, "peak_gb": 5, "at": 0}))
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "after", "--", "true"],
+                       capture_output=True, text=True, timeout=30, env=env)
+    assert r.returncode == 0 and not (state / "taking" / f"{dead.pid}.json").exists()
+
+
 def test_heavy_queue(monkeypatch):
     failures = []
     for k in [k for k in os.environ if k.startswith("HEAVY_")]:
