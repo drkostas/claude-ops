@@ -79,10 +79,16 @@ CREATE TABLE IF NOT EXISTS telemetry(
 """
 
 
-def connect(db: "Path | str | None" = None) -> sqlite3.Connection:
+#: how long the collector waits for another writer before it answers 503, which an OTLP exporter retries. A
+#: reading pass holds the write lock while it reads one transcript, which can take seconds on a busy machine,
+#: and a wait of 5 s ended in "database is locked" and a traceback, with that minute's figures lost.
+COLLECT_WAIT_S = 30.0
+
+
+def connect(db: "Path | str | None" = None, *, timeout: float = 5) -> sqlite3.Connection:
     path = Path(db or DB)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=5)
+    conn = sqlite3.connect(path, timeout=timeout)
     conn.execute("PRAGMA journal_mode=WAL")
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.executescript(SCHEMA)
@@ -633,8 +639,10 @@ def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" 
         def log_message(self, *a):
             return
 
-        def _answer(self, code: int, body: bytes = b"{}") -> None:
+        def _answer(self, code: int, body: bytes = b"{}", headers: "dict | None" = None) -> None:
             self.send_response(code)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -651,10 +659,17 @@ def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" 
                     rows = metric_rows(json.loads(raw), seen)
                 except ValueError:
                     return self._answer(400, b'{"error": "not json"}')
-                conn = connect(db)
+                conn = connect(db, timeout=COLLECT_WAIT_S)
                 try:
                     save_metrics(conn, rows)
                     conn.commit()
+                except sqlite3.OperationalError as e:
+                    if "locked" not in str(e) and "busy" not in str(e):
+                        raise
+                    # nothing was saved, so the exporter may send the same minutes again
+                    conn.rollback()
+                    return self._answer(503, b'{"error": "the store is busy, send it again"}',
+                                        {"Retry-After": str(int(COLLECT_WAIT_S))})
                 finally:
                     conn.close()
             return self._answer(200)

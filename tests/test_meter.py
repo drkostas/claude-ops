@@ -178,6 +178,42 @@ def test_the_collector_binds_this_machine_sums_by_the_minute_and_refuses_another
     assert rows(db, "SELECT session_id, account, kind, value FROM telemetry") == [("s-1", "acc-1", "cacheRead", 15.0)]
 
 
+def test_the_collector_answers_503_while_another_writer_holds_the_store(tmp_path, monkeypatch):
+    db = tmp_path / "m.sqlite3"
+    meter.connect(db).close()
+    monkeypatch.setattr(meter, "COLLECT_WAIT_S", 0.2)
+    made = {}
+
+    from http.server import ThreadingHTTPServer
+
+    def factory(addr, handler):
+        made["server"] = ThreadingHTTPServer((addr[0], 0), handler)
+        return made["server"]
+
+    threading.Thread(target=meter.serve, kwargs={"db": db, "server": factory}, daemon=True).start()
+    while "server" not in made:
+        time.sleep(0.01)
+    url = f"http://127.0.0.1:{made['server'].server_address[1]}/v1/metrics"
+
+    def post():
+        req = urllib.request.Request(url, data=json.dumps(metrics(10.0)).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, None
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Retry-After")
+
+    holder = sqlite3.connect(db)
+    holder.execute("BEGIN IMMEDIATE")
+    assert post() == (503, "0")
+    holder.rollback()
+    holder.close()
+    assert post() == (200, None)
+    made["server"].shutdown()
+    assert rows(db, "SELECT kind, value FROM telemetry") == [("cacheRead", 10.0)]
+
+
 def test_the_environment_turns_telemetry_on_toward_this_machine():
     e = meter.env_block(4999)
     assert e["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1" and e["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:4999"
