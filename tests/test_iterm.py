@@ -151,6 +151,15 @@ class FakeProcs:
     t = 0.0
     resumed = None
 
+    reg = None
+    jobs_running: dict = {}
+
+    def registered(self):
+        return self.reg
+
+    def jobs(self):
+        return self.jobs_running
+
     def table(self):
         return [(pid, "S" if pid in (self.resumed or []) else stat, age, cmd) for pid, stat, age, cmd in self.rows]
 
@@ -278,6 +287,38 @@ def test_a_restart_refuses_while_the_mac_holds_launches_back():
     p.rows = [(100, "S", 9000.0, ITERM), (400, "T", 3000.0, "/Applications/Old.app/Contents/MacOS/Old"),
               (401, "S", 30.0, "/Applications/Other.app/Contents/MacOS/Other")]
     assert iterm.restart_app(procs=p)[0] == "success", "an old stopped app behind a newer launch that finished"
+
+
+def test_a_launch_macos_never_registered_holds_restarts_back():
+    # a launch held back and resumed runs (state S) but is never registered, so the newest app being
+    # stopped is no longer the only sign
+    tool = "/Users/x/Applications/Some Tool.app/Contents/MacOS/some-tool --flag"
+    agent = "/Users/x/Applications/An Agent.app/Contents/MacOS/an-agent -m serve"
+    helper = "/Applications/Big.app/Contents/Frameworks/Big Helper.app/Contents/MacOS/Big Helper"
+    table = [(100, "S", 9000.0, ITERM), (400, "S", 300.0, tool), (500, "S", 60.0, agent), (600, "S", 30.0, helper)]
+    jobs = {100: "application.com.example.term.1", 400: "application.com.example.tool.2", 500: "com.example.agent"}
+    why = iterm.launches_held(table, {100}, jobs)
+    assert why and "Some Tool (pid 400" in why and "never registered" in why, why
+    assert iterm.launches_held(table, {100, 400}, jobs) is None, \
+        "an agent's app under its own launchd label and a helper inside another app are no launches"
+    old = [(100, "S", 30000.0, ITERM)] + table[1:]
+    assert iterm.launches_held(old, {400}, jobs) is None, "a launch older than the window does not count"
+    started = [(700, "S", 3.0, "/tmp/t/Stand In.app/Contents/MacOS/stand-in")] + table
+    assert iterm.launches_held(started, {100, 400}, jobs) is None, \
+        "an app's program a script started itself runs under no application job, so it is no launch"
+    assert iterm.launches_held(table, None, jobs) is None, "unread registration falls back to the stopped check"
+    p = FakeProcs()
+    p.rows, p.reg, p.jobs_running = table, {100}, jobs
+    outcome, detail = iterm.restart_app(procs=p)
+    assert outcome == "failure" and p.killed == [] and detail["launches_held"] is True, detail
+
+
+def test_lsappinfo_and_launchctl_are_read():
+    text = ('"LSApplicationList" = [\n  "iTerm2" ASN:0x0-0x1:\n    pid = 51177 type="Foreground"\n'
+            '  "Finder" ASN:0x0-0x2:\n    pid = 30075 type="Foreground"\n]\n')
+    assert iterm.parse_registered(text) == {51177, 30075} and iterm.parse_registered("") is None
+    jobs = "PID\tStatus\tLabel\n33470\t0\tcom.example.agent\n-\t0\tcom.example.idle\n8874\t-9\tapplication.x.1\n"
+    assert iterm.parse_jobs(jobs) == {33470: "com.example.agent", 8874: "application.x.1"}
 
 
 def test_the_process_table_is_read_from_ps():

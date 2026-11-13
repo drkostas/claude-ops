@@ -624,6 +624,23 @@ class Processes:
         import time   # noqa: PLC0415
         return time.monotonic()
 
+    def registered(self) -> set[int] | None:
+        """The pids macOS has registered as apps (lsappinfo), or None when it did not answer."""
+        try:
+            r = subprocess.run(["/usr/bin/lsappinfo", "list"], capture_output=True, text=True, timeout=10,
+                               env=self.env)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return parse_registered(r.stdout) if r.returncode == 0 else None
+
+    def jobs(self) -> dict[int, str]:
+        """launchd's running jobs as {pid: label} ({} when launchctl does not answer)."""
+        try:
+            r = subprocess.run(["/bin/launchctl", "list"], capture_output=True, text=True, timeout=10, env=self.env)
+        except (OSError, subprocess.TimeoutExpired):
+            return {}
+        return parse_jobs(r.stdout) if r.returncode == 0 else {}
+
     def resume(self, pid: int) -> None:
         import os, signal   # noqa: E401, PLC0415
         os.kill(pid, signal.SIGCONT)
@@ -667,31 +684,74 @@ def parse_table(text: str) -> list[tuple[int, str, float | None, str]]:
 
 #: an app's own executable, inside its bundle: what a launch through the Finder, the Dock or `open` starts
 APP_EXECUTABLE = re.compile(r"\.app/Contents/MacOS/[^/ ]+(?: |$)")
+#: an app's own executable in a bundle that sits in no other bundle: a helper inside another app
+#: (Contents/Frameworks/X Helper.app) is started by its app, not launched
+TOP_APP = re.compile(r"^(?:(?!\.app/).)*\.app/Contents/MacOS/[^/ ]+(?: |$)")
+#: how far back an app launch counts for launches_held
+LAUNCH_WINDOW_S = 6 * 3600
 
 
-def launches_held(table: list[tuple[int, str, float | None, str]]) -> str | None:
-    """Pure. Why an app opened now would not finish its launch, or None. macOS can hold launches back
-    and leave each new app stopped (state T) until it gets SIGCONT; when the app launched most
-    recently on this Mac is stopped, an app stopped now could not be opened again."""
+def parse_registered(text: str) -> set[int] | None:
+    """Pure. The pids `lsappinfo list` names, the apps macOS has registered; None when it named none
+    (an answer that read nothing is no proof that nothing is registered)."""
+    pids = {int(m) for m in re.findall(r"\bpid = (\d+)", text or "")}
+    return pids or None
+
+
+def parse_jobs(text: str) -> dict[int, str]:
+    """Pure. `launchctl list` as {pid: label}, for the jobs that run now."""
+    jobs = {}
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].isdigit():
+            jobs[int(parts[0])] = parts[2]
+    return jobs
+
+
+def launches_held(table: list[tuple[int, str, float | None, str]], registered: set[int] | None = None,
+                  jobs: dict[int, str] | None = None, *, within_s: float = LAUNCH_WINDOW_S) -> str | None:
+    """Pure. Why an app opened now would not finish its launch, or None.
+
+    An app launch counts here when its process is a bundle's own executable (in no framework and in
+    no other app's bundle), it started within `within_s`, and it runs under launchd's
+    "application.<bundle id>" job, as every app macOS launches does (an agent's app bundle runs under
+    its agent's label, and a program a script started runs under none; neither registers). With no
+    `jobs` (launchctl did not answer) the bundle's place alone decides. macOS can hold launches back:
+    the new app sits stopped (state T) until it gets SIGCONT, and even resumed it is never
+    registered with LaunchServices, so nothing can script it. So launches are not finishing when
+    such an app is missing from `registered` (lsappinfo's pids), or when the newest one is stopped."""
+    jobs = jobs or {}
     # ⭐ an app inside a framework is no launch: Homebrew's Python runs every script as
     # Python.framework/.../Python.app/Contents/MacOS/Python, and was always the newest "app"
-    apps = [(age, pid, stat, cmd) for pid, stat, age, cmd in table
-            if age is not None and ".framework/" not in cmd
-            and APP_EXECUTABLE.search(cmd)]
+    # ⭐ AN APP IS A LAUNCH ONLY UNDER LAUNCHD'S "application." JOB when launchctl answered: a bundle's
+    # program that a script started itself (a test's stand-in app) is no launch and never registers
+    apps = sorted((age, pid, stat, cmd) for pid, stat, age, cmd in table
+                  if age is not None and age <= within_s and ".framework/" not in cmd and TOP_APP.search(cmd)
+                  and (jobs.get(pid, "").startswith("application.") if jobs else True))
     if not apps:
         return None
-    age, pid, stat, cmd = min(apps)
+
+    def named(cmd: str) -> str:
+        return cmd.split(".app/", 1)[0].rsplit("/", 1)[-1]
+    if registered is not None:
+        lost = [a for a in apps if a[1] not in registered]
+        if lost:
+            age, pid, stat, cmd = lost[0]
+            return (f"{named(cmd)} (pid {pid}, launched {int(age)} s ago) runs but macOS never registered it "
+                    "as an app, so launches are not finishing and iTerm2 could not be opened again")
+    age, pid, stat, cmd = apps[0]
     if not stat.startswith("T"):
         return None
-    name = cmd.split(".app/", 1)[0].rsplit("/", 1)[-1]
-    return (f"the app launched most recently on this Mac, {name} (pid {pid}, {int(age)} s ago), is "
+    return (f"the app launched most recently on this Mac, {named(cmd)} (pid {pid}, {int(age)} s ago), is "
             "stopped, so launches are not finishing and iTerm2 could not be opened again")
 
 
 def _wait_answer(p: Processes, answer_wait: float, opened: float) -> tuple[bool, list[int]]:
     """Wait up to `answer_wait` seconds for the iTerm2 opened at `opened` (p.now()) to answer:
     (answered, the pids it resumed). An app that macOS left stopped (state T) at launch never
-    answers, however long it is given, and SIGCONT lets its launch finish. Only an iTerm2 that
+    answers, however long it is given. SIGCONT makes its process run, but macOS does not register a
+    launch it held back, so it may still never answer (the guard in restart_app is what protects).
+    Only an iTerm2 that
     started after `opened` is resumed, once: this call's own launch, never another stopped process."""
     waited, resumed = 0.0, []
     while not p.answers():
@@ -728,10 +788,10 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
     Refused, with nothing stopped, unless exactly one iTerm2 and one iTermServer run, the server
     holds at least one terminal and the app itself holds none (stopping it would end those), and
     while the Mac holds app launches back (launches_held), since the app could not be opened again.
-    The guard and the resume of this call's own launch (_wait_answer) are each needed: a held launch
-    that something else ended leaves a running app as the newest, the guard lets the restart through,
-    and the resume is then what lets the new iTerm2 finish its launch. The
-    server is not counted as the app's own when the app started it.
+    The guard is what protects: a launch macOS held back runs again after the resume of this call's
+    own launch (_wait_answer), but it is never registered with LaunchServices, so it does not answer
+    and the restart still ends in failure. The server is not counted as the app's own when the app
+    started it.
     Returns (outcome, detail): "success" when iTerm2 answers again and the server still holds as
     many terminals as before, "partial" when it holds fewer, "failure" otherwise; detail carries
     "message", "terminals_before" and "terminals_after"."""
@@ -754,7 +814,7 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
                                       "nothing was stopped"}
     # ⛔ NEVER STOP AN APP THAT CANNOT BE STARTED AGAIN: while the Mac holds launches back, the new
     # iTerm2 would stay stopped and every window with it
-    held_back = launches_held(p.table())
+    held_back = launches_held(p.table(), p.registered(), p.jobs())
     if held_back:
         return "failure", {"message": f"{held_back}; nothing was stopped", "launches_held": True}
     p.kill(app)
