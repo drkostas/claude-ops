@@ -656,3 +656,260 @@ def test_carrying_with_nothing_read_is_unknown_and_not_zero(tmp_path):
     got = meter.carrying(db=tmp_path / "m.sqlite3", since=1.0, until=2.0)
     assert got["parts"] == [] and got["rest"] is None and got["first_call"] is None and got["skills"] == []
     assert got["responses_read"] == 0
+
+
+# ------------------------------------------------------------------------------ what each response was for
+import datetime as _dt  # noqa: E402
+
+import pytest  # noqa: E402
+
+BASE = _dt.datetime(2027, 1, 15, 8, 0, tzinfo=_dt.timezone.utc)
+MARKS = meter.Marks(prompt=r"Ticket (TKT-\d+)", calls={"close_ticket": ["ticket"], "reply": ["about"]})
+
+
+@pytest.fixture(autouse=True)
+def _no_marks_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(meter, "MARKS", tmp_path / "no-marks.json")
+
+
+def iso(s):
+    return (BASE + _dt.timedelta(seconds=s)).isoformat().replace("+00:00", "Z")
+
+
+def compact(d):
+    return (json.dumps(d, separators=(",", ":")) + "\n").encode()
+
+
+def ask(text, s, *, sid="s-1"):
+    return compact({"type": "user", "sessionId": sid, "timestamp": iso(s), "message": {"role": "user", "content": text}})
+
+
+def result(s, text, *, sid="s-1"):
+    return compact({"type": "user", "sessionId": sid, "timestamp": iso(s), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_x", "content": text}]}})
+
+
+def queued(text, s, *, sid="s-1"):
+    return compact({"type": "attachment", "sessionId": sid, "timestamp": iso(s),
+                    "attachment": {"type": "queued_command", "prompt": text}})
+
+
+def said(mid, s, *, output=7, calls=(), sid="s-1", side=False, agent=None):
+    blocks = [{"type": "tool_use", "id": use, "name": name, "input": given} for name, given, use in calls] or \
+             [{"type": "text", "text": "secret words"}]
+    d = {"type": "assistant", "sessionId": sid, "timestamp": iso(s), "isSidechain": side,
+         "message": {"id": mid, "model": "claude-opus-9", "content": blocks,
+                     "usage": {"input_tokens": 3, "output_tokens": output, "cache_read_input_tokens": 1001,
+                               "cache_creation_input_tokens": 11}}}
+    if agent:
+        d["agentId"] = agent
+    return compact(d)
+
+
+def notice(use, s):
+    return ask(f"<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>{use}</tool-use-id>\n"
+               "<status>completed</status>\n<summary>done</summary>\n</task-notification>", s)
+
+
+def chat(root):
+    """One invented chat with every case of the rule, and a subagent."""
+    (root / "p" / "s-1" / "subagents").mkdir(parents=True)
+    (root / "p" / "s-1.jsonl").write_bytes(b"".join([
+        said("m0", -5),
+        ask("Ticket TKT-1, please fix the secret words", 0), said("m1", 1),
+        said("m2", 2, calls=[("close_ticket", {"ticket": "TKT-1"}, "toolu_c1"), ("Agent", {"prompt": "look"}, "toolu_agent")]),
+        result(3, "a result that names Ticket TKT-9"),
+        ask("Ticket TKT-2\n\nTicket TKT-3", 10), said("m3", 11),
+        said("m4", 12, output=1), said("m4", 12.5, calls=[("close_ticket", {"ticket": "TKT-3"}, "toolu_c2")]),
+        said("m5", 13, calls=[("reply", {"about": "not an id at all"}, "toolu_c3")]),
+        ask("Ticket TKT-4", 20), said("m6", 21, calls=[("Bash", {"command": "make", "run_in_background": True}, "toolu_bg")]),
+        notice("toolu_bg", 30), said("m7", 31),
+        ask("hello", 40), said("m8", 41),
+        ask("next", 70), said("m10", 71), queued("Ticket TKT-5 arrived", 72), said("m11", 73),
+    ]))
+    sub = root / "p" / "s-1" / "subagents"
+    (sub / "agent-x1.jsonl").write_bytes(said("sa1", 50, side=True, agent="x1") + said("sa2", 51, side=True, agent="x1"))
+    (sub / "agent-x1.meta.json").write_text(json.dumps({"toolUseId": "toolu_agent"}))
+
+
+def test_each_response_goes_to_the_item_its_turn_names_and_says_how_sure(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    meter.read_all(root=root, db=db, marks=MARKS)
+    got = {a["message_id"]: (a["items"], a["kind"]) for a in meter.assignments("s-1", since=0, until=NOW * 2, db=db)}
+    assert got == {
+        "m0": ([], "unattributed"),  # before the first prompt
+        "m1": (["TKT-1"], "measured"), "m2": (["TKT-1"], "measured"),
+        "m3": (["TKT-2", "TKT-3"], "shared"),  # a prompt that pasted two, before any call
+        "m4": (["TKT-3"], "split"),  # its call's line came after its first line
+        "m5": (["TKT-3"], "split"),  # a field that is not an id names nothing
+        "m6": (["TKT-4"], "measured"), "m7": (["TKT-4"], "linked"),
+        "m8": ([], "unattributed"),
+        "sa1": (["TKT-1"], "measured"), "sa2": (["TKT-1"], "measured"),  # where the call that started it was made
+        "m10": (["TKT-5"], "measured"), "m11": (["TKT-5"], "measured"),  # a message that arrived while the turn ran
+    }
+    turns = {a["message_id"]: a["turn"] for a in meter.assignments("s-1", since=0, until=NOW * 2, db=db)}
+    assert turns["m0"] is None and turns["sa1"] == turns["m1"] == BASE.timestamp()
+
+
+def test_the_items_and_the_rest_add_up_to_the_report_to_the_token(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    meter.read_all(root=root, db=db, marks=MARKS)
+    since, until = BASE.timestamp() - 3600, BASE.timestamp() + 3600
+    got = meter.attribute("s-1", since=since, until=until, db=db)
+    chat_row = next(c for c in meter.report(db=db, since=since, until=until, now=until)["chats"] if c["session_id"] == "s-1")
+    for name in meter.COUNTS:
+        assert got["total"][name] == chat_row[name]
+        assert sum(i[name] for i in got["items"]) + got["unattributed"][name] == chat_row[name]
+    assert got["total"]["responses"] == chat_row["responses"] == 13
+    assert abs(sum(i["weighted"] for i in got["items"]) + got["unattributed"]["weighted"] - chat_row["weighted"]) < 1e-6
+    assert abs(sum(got["kinds"].values()) - chat_row["weighted"]) < 1e-6
+    items = {i["item"]: i for i in got["items"]}
+    # m3 is shared by two: an odd count gives its extra token to the first in order
+    assert (items["TKT-2"]["output"], items["TKT-3"]["output"] - 7 - 7) == (4, 3)
+    assert set(items["TKT-4"]["kinds"]) == {"measured", "linked"}
+    assert got["unattributed"]["responses"] == 2
+
+
+def test_short_forms_of_an_id_name_one_item_through_key(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    (root / "p").mkdir(parents=True)
+    (root / "p" / "s-1.jsonl").write_bytes(ask("Ticket TKT-1234", 0) + said("m1", 1)
+                                           + said("m2", 2, calls=[("close_ticket", {"ticket": "TKT-12"}, "toolu_1")]))
+    meter.read_all(root=root, db=db, marks=MARKS)
+    plain = {a["message_id"]: a["kind"] for a in meter.assignments("s-1", since=0, until=NOW * 2, db=db)}
+    assert plain == {"m1": "split", "m2": "split"}
+    keyed = meter.assignments("s-1", since=0, until=NOW * 2, db=db, key=lambda tag: tag[:6])
+    assert {(tuple(a["items"]), a["kind"]) for a in keyed} == {(("TKT-12",), "measured")}
+
+
+def test_the_store_keeps_ids_and_never_the_text_around_them(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    meter.read_all(root=root, db=db, marks=MARKS)
+    conn = meter.connect(db)
+    try:
+        dump = json.dumps([conn.execute(f"SELECT * FROM {t}").fetchall()  # noqa: S608 - the store's own tables
+                           for (t,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")])
+        tags = {r[0] for r in conn.execute("SELECT tag FROM marks WHERE place IN ('prompt', 'call')")}
+    finally:
+        conn.close()
+    assert "secret" not in dump and "please" not in dump and "not an id" not in dump
+    assert tags == {"TKT-1", "TKT-2", "TKT-3", "TKT-4", "TKT-5"}, "an id in a tool's result is not a prompt's"
+
+
+def test_a_tools_result_is_never_parsed(tmp_path, monkeypatch):
+    f = tmp_path / "a.jsonl"
+    f.write_bytes(ask("Ticket TKT-1", 0) + result(1, "x" * 100000) + said("m1", 2))
+    parsed = []
+    real = meter._parse
+    monkeypatch.setattr(meter, "_parse", lambda raw: parsed.append(len(raw)) or real(raw))
+    conn = meter.connect(tmp_path / "m.sqlite3")
+    assert meter.read_file(conn, f, MARKS) == 1
+    conn.close()
+    assert len(parsed) == 2 and max(parsed) < 1000
+
+
+def test_a_skipped_window_keeps_no_prompt_or_mark_and_still_counts_the_spend(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    skip = meter.Marks(prompt=MARKS.prompt.pattern, calls=dict(MARKS.calls),
+                       skip=[{"session": "s-1", "from": iso(9), "to": iso(35)}])
+    meter.read_all(root=root, db=db, marks=skip)
+    assert rows(db, "SELECT count(*) FROM marks WHERE at >= %s AND at < %s" % (BASE.timestamp() + 9, BASE.timestamp() + 35)) == [(0,)]
+    answers = meter.assignments("s-1", since=0, until=NOW * 2, db=db)
+    got = {a["message_id"]: (a["items"], a["kind"]) for a in answers}
+    assert all(got[m] == ([], "unattributed") for m in ("m3", "m4", "m5", "m6", "m7")), "never the turn before the window"
+    assert got["m2"] == (["TKT-1"], "measured") and got["m11"] == (["TKT-5"], "measured")
+    assert next(a["turn"] for a in answers if a["message_id"] == "m3") == BASE.timestamp() + 9, "the window is a turn of its own"
+    assert meter.attribute("s-1", since=0, until=NOW * 2, db=db)["unattributed"]["responses"] == 7
+    assert rows(db, "SELECT count(*) FROM responses") == [(13,)]
+
+
+def test_a_changed_configuration_marks_every_transcript_again(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    meter.read_all(root=root, db=db, marks=meter.Marks())
+    assert rows(db, "SELECT count(*) FROM marks WHERE place IN ('prompt', 'call')") == [(0,)]
+    assert rows(db, "SELECT count(*) FROM prompts") == [(6,)], "the turns are kept with no configuration"
+    assert meter.read_all(root=root, db=db, marks=meter.Marks())["files"] == 2
+    assert meter.read_all(root=root, db=db, marks=meter.Marks())["responses"] == 0
+    assert meter.read_all(root=root, db=db, marks=MARKS)["responses"] == 13, "read again from the start"
+    assert rows(db, "SELECT count(*) FROM marks WHERE place IN ('prompt', 'call')") == [(7,)]
+    assert rows(db, "SELECT count(*), sum(output) FROM responses") == [(13, 7 * 13)], "the counts stay"
+
+
+def test_the_configuration_comes_from_a_file_and_a_bad_one_is_refused(tmp_path):
+    assert meter.Marks.load(tmp_path / "missing.json").fingerprint == meter.Marks().fingerprint
+    f = tmp_path / "marks.json"
+    f.write_text(json.dumps({"prompt": r"Ticket (TKT-\d+)", "calls": {"close_ticket": ["ticket"]},
+                             "skip": [{"session": "s-1", "from": iso(0), "to": iso(5)}]}))
+    got = meter.Marks.load(f)
+    assert got.ids("Ticket TKT-7 and Ticket TKT-8") == ["TKT-7", "TKT-8"] and got.calls == {"close_ticket": ("ticket",)}
+    assert got.skipped("s-1", BASE.timestamp() + 1) and not got.skipped("s-1", BASE.timestamp() + 5)
+    with pytest.raises(ValueError, match="group"):
+        meter.Marks(prompt=r"Ticket TKT-\d+")
+    with pytest.raises(ValueError, match="skipped window"):
+        meter.Marks(skip=[{"session": "s-1", "from": "soon"}])
+    f.write_text("[1]")
+    with pytest.raises(ValueError, match="object"):
+        meter.Marks.load(f)
+    f.write_text("{not json")
+    with pytest.raises(ValueError):
+        meter.Marks.load(f)
+
+
+def test_a_store_from_before_turns_reads_each_transcript_again(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    conn = meter.connect(db)
+    conn.execute("DROP TABLE prompts")
+    conn.execute("INSERT INTO positions VALUES ('/x', 10, 'seam', 10)")
+    conn.commit()
+    conn.close()
+    conn = meter.connect(db)
+    assert conn.execute("SELECT count(*) FROM positions").fetchone() == (0,)
+    assert "agent" in [r[1] for r in conn.execute("PRAGMA table_info(responses)")]
+    conn.close()
+
+
+def test_meter_items_prints_a_chats_split(tmp_path, monkeypatch, capsys):
+    from claude_ops import cli
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    meter.read_all(root=root, db=db, marks=MARKS)
+    monkeypatch.setattr(meter, "DB", db)
+    monkeypatch.setattr(time, "time", lambda: BASE.timestamp() + 3600)
+    assert cli.main(["meter", "items", "--session", "s-1", "--days", "1"]) == 0
+    assert {i["item"] for i in json.loads(capsys.readouterr().out)["items"]} == {"TKT-1", "TKT-2", "TKT-3", "TKT-4", "TKT-5"}
+    with pytest.raises(SystemExit, match="--session"):
+        cli.main(["meter", "items"])
+
+
+def test_jobs_say_when_background_work_started_and_came_back(tmp_path):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    chat(root)
+    meter.read_all(root=root, db=db, marks=MARKS)
+    got = meter.jobs("s-1", since=0, until=NOW * 2, db=db)
+    assert [(j["tool_use_id"], j["started"] - BASE.timestamp(), j["noticed"] and j["noticed"] - BASE.timestamp(),
+             j["last"] and j["last"] - BASE.timestamp()) for j in got] == [("toolu_agent", 2, None, 51), ("toolu_bg", 21, 30, None)]
+    assert meter.jobs("s-1", since=BASE.timestamp() + 10, until=NOW * 2, db=db)[0]["tool_use_id"] == "toolu_bg"
+
+
+def test_a_read_that_is_stopped_keeps_each_file_it_finished(tmp_path, monkeypatch):
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    (root / "p").mkdir(parents=True)
+    for n in range(3):
+        (root / "p" / f"s-{n}.jsonl").write_bytes(said(f"m{n}", n, sid=f"s-{n}"))
+    real, seen = meter.read_file, []
+
+    def stop_at_the_third(conn, path, marks=None):
+        if len(seen) == 2:
+            raise KeyboardInterrupt
+        seen.append(path)
+        return real(conn, path, marks)
+
+    monkeypatch.setattr(meter, "read_file", stop_at_the_third)
+    with pytest.raises(KeyboardInterrupt):
+        meter.read_all(root=root, db=db, marks=MARKS)
+    assert rows(db, "SELECT count(*) FROM responses") == [(2,)] and rows(db, "SELECT count(*) FROM positions") == [(2,)]
