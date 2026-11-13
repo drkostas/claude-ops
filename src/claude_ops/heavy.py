@@ -344,13 +344,25 @@ def _mark(ticket: Path, why: str, held: dict | None = None) -> None:
     tmp.replace(ticket)
 
 
+def wait_key(held: list[tuple[str, str]], why: str) -> tuple:
+    """What a waiting line is about, so a waiter says a new one only when this changes. The gate's
+    words carry figures that move on almost every poll (the memory free, the swap), and a job the gate
+    held for hours printed a line each time one of them moved, thousands in one CI log. So while the
+    gate holds a job, a line is about the kinds of reason (memory, pressure, swap, disk), and a new one
+    is said when a kind comes or goes. The turn's words (who holds the slot, how many jobs go first)
+    are said whenever they change."""
+    if held:
+        return ("gate", tuple(sorted({kind for kind, _words in held})))
+    return ("turn", why)
+
+
 def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
     """Wait for this caller's turn, then take the slot for `holder_pid`. False when `holder_pid`
     ended while it waited (a CI worker that was cancelled)."""
     ticket = _ticket(chat, what, holder_pid)
     hook("asked", chat, what, holder_pid)
     took = False
-    said = ""
+    said: tuple | None = None
     # A long hold is said, once: a job that asks for more free memory than the machine ever has, or
     # waits on a machine short of room, would otherwise wait for hours with only its first waiting
     # line. While its gate holds it, the waiter keeps since when, what kinds of reason held it and
@@ -410,9 +422,10 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
                 ahead = names.index(ticket.name) if ticket.name in names else 0
                 why = (f"the slot is held by {h['chat']}: {h['what']}" if h else
                        f"{ahead} job(s) go first" if ahead else "the slot is being taken")
-            if why != said:
+            key = wait_key(held, why)
+            if key != said:
                 say(f"waiting, {why}")
-                said = why
+                said = key
             time.sleep(POLL)
     finally:
         ticket.unlink(missing_ok=True)

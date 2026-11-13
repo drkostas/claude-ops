@@ -531,7 +531,9 @@ set `HEAVY_HOOK` to a command that records each job as asked, admitted, released
 running heavy job counts against that work too. The hook never holds up a job, and with
 `HEAVY_HOOK_LOG` set each failed call is one line in that file. A job that has waited an hour says
 what holds it: the machine (memory, or swap with the free disk under `HEAVY_SWAP_DISK_FACTOR` times
-the swap) or a limit set on its own line, which is the one to lower.
+the swap) or a limit set on its own line, which is the one to lower. While the gate holds it, a
+new waiting line comes only when a kind of reason (memory, pressure, swap, disk) comes or goes, so
+the figures in the last line can be older than the machine's. `status` reads them now.
 
 ## Tell chats apart in a shared window by tab color
 
