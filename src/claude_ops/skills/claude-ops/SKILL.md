@@ -528,7 +528,10 @@ status` says who holds the slot and who waits, and why. A job that fails the sam
 says so with `AGAIN:`, and `status` lists it under "failing the same way": fix the cause (often the
 cap it needs) before it runs again. When the machine also queues other work elsewhere (test slots, say),
 set `HEAVY_HOOK` to a command that records each job as asked, admitted, released or withdrawn, so a
-running heavy job counts against that work too. The hook never holds up a job.
+running heavy job counts against that work too. The hook never holds up a job, and with
+`HEAVY_HOOK_LOG` set each failed call is one line in that file. A job that has waited an hour says
+what holds it: the machine (memory, or swap with the free disk under `HEAVY_SWAP_DISK_FACTOR` times
+the swap) or a limit set on its own line, which is the one to lower.
 
 ## Tell chats apart in a shared window by tab color
 

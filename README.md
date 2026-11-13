@@ -334,13 +334,16 @@ claude-ops heavy status                                              # the machi
 
 Chats on one machine share one slot for builds, emulators, renders, crawls and big scans. A job
 waits until the machine has memory and disk to spare and it is its chat's turn (round robin across
-chats), then runs in its own process group under a memory cap (`HEAVY_MAX_GB`, 8), and gives the
+chats). Swap over `HEAVY_MAX_SWAP_GB` (14) holds a job only while the free disk is under
+`HEAVY_SWAP_DISK_FACTOR` (3) times the swap in use, and under `HEAVY_MIN_DISK_PCT` (10) free always
+holds. A job the gate has held for an hour says what holds it, in the gate's words. Then it runs in its own process group under a memory cap (`HEAVY_MAX_GB`, 8), and gives the
 slot up after its turn (`HEAVY_TURN_MIN`, 60) while it keeps running. A CI runner can `hold` the slot
 for a job's worker and `release` it. `--notify` runs `HEAVY_NOTIFY` with the chat's name and a line
 saying how the job ended and what it took. A job that fails the same way three times in a row
 (over the cap, at its `--max-hold`, or with one exit code) says so, and `status` lists it, so a
 caller that retries a failing job is noticed. `HEAVY_HOOK` names a command told when a job is
 asked, admitted, released or withdrawn, for a machine whose other work is queued somewhere else.
+With `HEAVY_HOOK_LOG` set, every call that failed is a line in that file.
 Every caller must share `HEAVY_DIR`. macOS only.
 
 ## Start chats inside tmux

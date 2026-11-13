@@ -174,25 +174,65 @@ def test_heavy_queue(monkeypatch):
 
     # --- the gate ---------------------------------------------------------------------------------
     h = module(HEAVY_MIN_FREE_GB="6", HEAVY_MAX_SWAP_GB="14", HEAVY_MIN_DISK_PCT="10")
-    check(h.short((20, 2, 50)) == "", "a machine with room is not short")
-    why = h.short((3, 18.5, 8))
+    check(h.short((20, 2, 50, 1, 500)) == "", "a machine with room is not short")
+    why = h.short((3, 18.5, 8, 1, 40))
     check("memory free" in why and "swap at 18.5" in why and "disk at 8" in why,
           f"a short machine says each reason ({why})")
-    check(h.short((20, 19, 50)) == "",
+    check([k for k, _w in h.reasons((3, 18.5, 8, 4, 40))] == ["memory", "pressure", "swap", "disk"],
+          "and each reason has its kind")
+    check(h.short((20, 19, 50, 1, 500)) == "",
           "swap far over its limit with memory free and room on the disk holds nothing: swap is history")
-    check("swap at 19" in h.short((20, 19, 11)) and h.short((20, 19, 13)) == "",
-          "it holds a job only while the disk is short too (under HEAVY_SWAP_DISK_PCT, 12)")
+    # ⭐ the room swap needs grows with the swap, not with the size of the disk: 115 GB free of a 1 TB
+    # disk is 11.5%, and a share of the disk held every job there while 19 GB of swap could never fill it
+    check(h.short((20, 17.3, 11.5, 1, 115)) == "",
+          "⭐ high swap with the disk above 3 times the swap passes, whatever share of the disk that is")
+    why = h.short((20, 19, 30, 1, 50))
+    check("swap at 19" in why and "50 GB of disk free" in why and "needs 3 times the swap, 57 GB" in why,
+          f"⭐ high swap with the disk under 3 times the swap holds, and says both sizes ({why})")
+    check("disk at 9.9" in h.short((20, 2, 9.9, 1, 400)) and "disk at 9.9" in h.short((20, 19, 9.9, 1, 400)),
+          "⭐ under HEAVY_MIN_DISK_PCT free always holds, whatever the swap and however many GB that is")
+    check(h.short((20, 19, 11)) == "" and h.short((20, 19, 11, 1)) == "",
+          "a reading without the disk's GB has nothing to compare the swap with, and holds nothing for swap")
     # each limit at its edge: a comparison moved by one (`<` to `<=`) must turn a check red
-    check(h.short((6, 2, 50)) == "" and "memory free" in h.short((5.9, 2, 50)),
+    check(h.short((6, 2, 50, 1, 500)) == "" and "memory free" in h.short((5.9, 2, 50, 1, 500)),
           "exactly HEAVY_MIN_FREE_GB free is enough, a little under is not")
-    check(h.short((20, 2, 10)) == "" and "disk at 9.9" in h.short((20, 2, 9.9)),
+    check(h.short((20, 2, 10, 1, 500)) == "" and "disk at 9.9" in h.short((20, 2, 9.9, 1, 500)),
           "exactly HEAVY_MIN_DISK_PCT free is enough, a little under is not")
-    check(h.short((20, 14, 11)) == "" and "swap at 14.1" in h.short((20, 14.1, 11)),
+    check(h.short((20, 14, 30, 1, 20)) == "" and "swap at 14.1" in h.short((20, 14.1, 30, 1, 20)),
           "swap exactly at HEAVY_MAX_SWAP_GB beside a short disk is allowed, a little over is not")
-    check(h.short((20, 19, 12)) == "" and "swap at 19" in h.short((20, 19, 11.9)),
-          "high swap beside the disk exactly at HEAVY_SWAP_DISK_PCT free is allowed, a little under is not")
-    check("critical" in h.short((20, 2, 50, 4)) and h.short((20, 2, 50, 2)) == "",
+    check(h.short((20, 19, 30, 1, 57)) == "" and "swap at 19" in h.short((20, 19, 30, 1, 56.9)),
+          "high swap beside exactly 3 times the swap free is allowed, a little under is not")
+    check("critical" in h.short((20, 2, 50, 4, 500)) and h.short((20, 2, 50, 2, 500)) == "",
           "macOS rating the pressure critical holds a job; raised does not, the free memory decides")
+    h = module(HEAVY_MAX_SWAP_GB="14", HEAVY_SWAP_DISK_FACTOR="2")
+    check(h.short((20, 19, 30, 1, 38)) == "" and "needs 2 times the swap, 38 GB" in h.short((20, 19, 30, 1, 37.9)),
+          "⭐ HEAVY_SWAP_DISK_FACTOR sets how many times the swap must be free, at its edge too")
+    h = module()
+    m = h.machine()
+    check(len(m) == 5 and isinstance(m[4], float) and m[4] > 0,
+          f"the machine's own reading has the data volume's free GB ({m})")
+    # ⭐ the note after a long hold names what held the job, in the gate's own words. module() only sets, so the
+    # limits the checks above set are taken away first: a setting in the environment is the job's own limit
+    for k in ("HEAVY_MIN_FREE_GB", "HEAVY_MAX_SWAP_GB", "HEAVY_MIN_DISK_PCT", "HEAVY_SWAP_DISK_FACTOR"):
+        monkeypatch.delenv(k, raising=False)
+    h = module()
+    swap_why = h.short((20, 19, 30, 1, 50))
+    note = h.held_note(swap_why, {"swap"}, 400, 20)
+    check(note.startswith("the gate has held this job for") and swap_why in note
+          and "That is the machine, not a limit this job set" in note and "more free disk" in note
+          and "memory free in that time" not in note and "HEAVY_MIN_FREE_GB" not in note,
+          f"⭐ a job the machine's swap and disk held is told so, with no advice about memory ({note})")
+    h = module(HEAVY_MIN_FREE_GB="50")
+    note = h.held_note(h.short((10.6, 2, 50, 1, 500)), {"memory"}, 70, 10.6)
+    check("this job's own limit (HEAVY_MIN_FREE_GB=50)" in note
+          and "the most memory free in that time was 10.6 GB against the 50 GB it asks for" in note
+          and "Lower HEAVY_MIN_FREE_GB" in note,
+          f"⭐ a job held by a limit set in its own environment is told that, and which setting to lower ({note})")
+    monkeypatch.delenv("HEAVY_MIN_FREE_GB")
+    h = module()
+    note = h.held_note(h.short((3, 2, 50, 1, 500)), {"memory"}, 70, 3.4)
+    check("That is the machine" in note and "against the 6 GB it asks for" in note and "more free memory" in note,
+          f"and a machine short of memory with the default limit is the machine ({note})")
     rc, out = heavy("t", "swap-history", "--", "echo", "ran-with-swap", HEAVY_FAKE_MACHINE="20 19 50")
     check(rc == 0 and "ran-with-swap" in out, "and such a job runs")
     p = start("t", "gated", "--", "true", HEAVY_FAKE_MACHINE="3 2 50")
@@ -324,9 +364,9 @@ def test_heavy_queue(monkeypatch):
 
     # --- ⭐ a waiter held by its own limits does not hold up the others ---------------------------
     big = start("big-chat", "needs 50 GB", "--", "true", HEAVY_MIN_FREE_GB="50")
-    st = status_until(lambda s: "held by its own limits" in s and "needs 50" in s)
-    check("held by its own limits" in st and "needs 50" in st,
-          f"status says a waiter is held by its own limits: {st.strip()[-160:]!r}")
+    st = status_until(lambda s: "held by its gate" in s and "needs 50" in s)
+    check("held by its gate" in st and "needs 50" in st,
+          f"status says a waiter is held by its gate: {st.strip()[-160:]!r}")
     t0 = time.time()
     rc, out = heavy("small-chat", "small", "--", "echo", "small-ran", timeout=30)
     check(rc == 0 and "small-ran" in out and time.time() - t0 < 10,
@@ -342,7 +382,7 @@ def test_heavy_queue(monkeypatch):
     # its ticket names: timed from its start instead, a loaded machine had not reached it yet
     at = held_since("needs 50 GB") or time.time()
     time.sleep(max(0.0, at + 1.8 + 4.0 - time.time()))
-    check("held by its own limits" in st and "the most memory free in that time 10.6 GB" in st,
+    check("held by its gate" in st and "the most memory free in that time 10.6 GB" in st,
           f"status shows how long and the most memory free beside the waiter: {st.strip()[-190:]!r}")
     out_of_reach.terminate()
     said = out_of_reach.communicate(timeout=10)[0]
@@ -521,6 +561,24 @@ def test_heavy_hook(monkeypatch):
           f"and one that hangs is left behind after HEAVY_HOOK_TIMEOUT ({time.time() - t0:.1f} s): {out.strip()[-120:]!r}")
     rc, out = heavy("h-chat", "job four", "--", "true", HEAVY_HOOK="")
     check(rc == 0 and not told.exists() and "HEAVY_HOOK" not in out, "without HEAVY_HOOK nobody is told and nothing is said")
+
+    # --- ⭐ every failed hook call is a line in HEAVY_HOOK_LOG -------------------------------------------
+    # a hook that timed out was ended before it could write anything, and the job's own output is
+    # often kept nowhere, so its stderr line alone left no trace anyone could read
+    log = STATE / "hook-failures.log"
+    rc, out = heavy("h-chat", "job five", "--", "true", HEAVY_HOOK=f"bash {slow}", HEAVY_HOOK_TIMEOUT="0.3",
+                    HEAVY_HOOK_LOG=str(log))
+    said = log.read_text().splitlines() if log.exists() else []
+    check(rc == 0 and [ln.split()[1] for ln in said] == ["asked", "admitted", "released"]
+          and all('what="job five"' in ln and "chat=h-chat" in ln and "longer than 0.3 s" in ln for ln in said),
+          f"⭐ each failed call is one line with the event, the chat, the job and why, not only the first: {said}")
+    rc, out = heavy("h-chat", "job six", "--", "true", HEAVY_HOOK=f"bash {bad}", HEAVY_HOOK_LOG=str(log))
+    said = log.read_text().splitlines()
+    check(len(said) == 6 and "exit 3: nobody home" in said[-1],
+          f"and a hook that exits with an error says its own words there: {said[-1:]}")
+    rc, out = heavy("h-chat", "job seven", "--", "true", HEAVY_HOOK=f"bash {bad}",
+                    HEAVY_HOOK_LOG=str(STATE / "no-such-folder" / "x.log"))
+    check(rc == 0, "a log that cannot be written never stops the job")
 
     assert not failures, "\n".join(failures)
 
