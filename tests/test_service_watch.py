@@ -60,9 +60,34 @@ def test_three_failed_restarts_in_the_window_give_up_and_stay_given_up():
     assert w.decide(readings, 520, "on", tried).action == w.GIVE_UP
 
 
-def test_old_failed_restarts_do_not_count():
-    tried = [w.Restart(0, False), w.Restart(10, False), w.Restart(20, False)]
-    assert w.decide(rd((900, DOWN), (960, DOWN)), 960, "on", tried).action == w.RESTART
+def test_giving_up_holds_after_the_old_restarts_leave_the_window():
+    tried = [w.Restart(100, False), w.Restart(200, False), w.Restart(300, False)]
+    readings = rd((0, DOWN), (60, DOWN), (400, DOWN), (460, DOWN), (700, DOWN), (760, DOWN))
+    for now in (500, 690, 710, 760, 5000):
+        assert w.decide(readings, now, "on", tried).action == w.GIVE_UP, now
+
+
+def test_an_answer_ends_giving_up():
+    tried = [w.Restart(100, False), w.Restart(200, False), w.Restart(300, False)]
+    readings = rd((400, UP), (800, DOWN), (860, DOWN))
+    assert w.decide(readings, 860, "on", tried).action == w.RESTART
+
+
+def test_a_further_restart_needs_a_reading_taken_after_the_last_one_had_time():
+    tried = [w.Restart(60, False)]
+    readings = rd((0, DOWN), (60, DOWN))
+    assert w.decide(readings, 80, "on", tried).action == w.WAIT
+    d = w.decide(readings, 95, "on", tried)
+    assert d.action == w.RECHECK
+    assert w.decide(readings, 130, "on", tried).action == w.RECHECK
+    after = rd((0, DOWN), (60, DOWN), (95, DOWN))
+    assert w.decide(after, 130, "on", tried).action == w.RESTART
+
+
+def test_failed_restarts_spread_beyond_the_window_do_not_give_up():
+    tried = [w.Restart(0, False), w.Restart(700, False), w.Restart(1400, False)]
+    readings = rd((1500, DOWN), (1560, DOWN), (1700, DOWN))
+    assert w.decide(readings, 1740, "on", tried).action == w.RESTART
 
 
 def test_a_restart_that_recovered_does_not_count():

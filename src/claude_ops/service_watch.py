@@ -12,13 +12,16 @@ The actions:
 - `recheck`  the last reading says it does not answer, but that is one reading, or the readings are
              too close together. Ask again at `wait_until`.
 - `wait`     a restart was tried a short time ago. Give the service time to start.
+             (A further restart also needs a reading taken after that time, else the action is
+             `recheck`, so a restart is never followed by another with nothing read between.)
 - `restart`  at least two readings in a row say it does not answer, `min_gap` seconds apart or more,
              it is switched on, and few restarts have failed. Restart it.
 - `off`      it is down but its setting is off (disabled, or not loaded). Do not restart it. The
              caller raises a finding for the person.
 - `unknown`  it is down but its setting could not be read. Do not restart it.
-- `give_up`  too many restarts failed in the window. Stop trying and raise a finding. The action
-             stays `give_up` until a reading says the service answers again.
+- `give_up`  `max_failed` restarts within `window` seconds were not followed by an answer. Stop trying
+             and raise a finding. The restarts are counted since the last reading that answered, so
+             the action stays `give_up` until a reading says the service answers again.
 
     from claude_ops import service_watch as w
     d = w.decide(readings, now, setting="on", restarts=tried)
@@ -68,7 +71,7 @@ def decide(readings: Sequence[Reading], now: float, setting: str | None,
 
     `readings` are in time order. `min_gap` is the least time between the first and the last of the
     readings that count as down. `window` and `max_failed` give up after that many restarts that were
-    not followed by an answer, inside `window` seconds. `settle` is how long a restart is given before
+    not followed by an answer, inside `window` seconds, counted since the last reading that answered. `settle` is how long a restart is given before
     the next one."""
     if not readings:
         return Decision(NONE, "no reading")
@@ -87,15 +90,23 @@ def decide(readings: Sequence[Reading], now: float, setting: str | None,
     if len(run) < 2 or run[-1].at - run[0].at < min_gap:
         return Decision(RECHECK, "one reading is not enough", run[0].at + min_gap)
 
-    failed = [t for t in restarts if not t.recovered and now - t.at <= window]
-    if len(failed) >= max_failed:
-        return Decision(GIVE_UP, f"{len(failed)} restarts in {int(window)} seconds did not bring it back")
+    # a restart that was followed by an answer is over. Failed ones are counted since the last reading
+    # that answered, so giving up holds until the service answers again
+    last_ok = max((r.at for r in readings if r.answers), default=float("-inf"))
+    failed = sorted(t.at for t in restarts if not t.recovered and t.at > last_ok)
+    for i in range(len(failed) - max_failed + 1):
+        if failed[i + max_failed - 1] - failed[i] <= window:
+            return Decision(GIVE_UP, f"{max_failed} restarts within {int(window)} seconds did not bring it back")
     if setting == "off":
         return Decision(OFF, "it is switched off, so it is not restarted")
     if setting != "on":
         return Decision(UNKNOWN, "its setting could not be read, so it is not restarted")
-    if restarts and now - restarts[-1].at < settle:
-        return Decision(WAIT, "a restart was tried a moment ago", restarts[-1].at + settle)
+    if restarts:
+        after = max(t.at for t in restarts) + settle
+        if now < after:
+            return Decision(WAIT, "a restart was tried a moment ago", after)
+        if not any(r.at >= after for r in readings):
+            return Decision(RECHECK, "no reading was taken since the last restart had time to start", now)
     return Decision(RESTART, f"{len(run)} readings in a row say it does not answer")
 
 
