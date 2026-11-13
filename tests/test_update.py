@@ -879,7 +879,7 @@ def test_a_turn_cut_by_a_lost_connection_is_a_transient_stop(tmp_path):
     t = _write(tmp_path / "c.jsonl", {"type": "user"}, _err(lost),
                {"type": "system", "subtype": "turn_duration"}, {"type": "last-prompt"})
     assert cu.stopped_on_api_error(t) == {"uuid": "E1", "at": "2026-10-16T18:50:28.314Z",
-                                         "error": "server_error", "text": lost}
+                                         "error": "server_error", "text": lost, "status": None}
     socket = _write(tmp_path / "s.jsonl", _err("API Error: The socket connection was closed "
                                                "unexpectedly.", error="unknown"))
     assert cu.stopped_on_api_error(socket)["error"] == "unknown"
@@ -902,7 +902,8 @@ def test_an_expired_login_is_a_login_stop_and_nothing_else_is(tmp_path):
     login = _write(tmp_path / "l.jsonl", {"type": "user"}, _err("Login expired · Please run /login",
                                                               error="authentication_failed"))
     assert cu.stopped_on_login_error(login) == {"uuid": "E1", "at": "2026-10-16T18:50:28.314Z",
-                                    "error": "authentication_failed", "text": "Login expired · Please run /login"}
+                                    "error": "authentication_failed", "text": "Login expired · Please run /login",
+                                    "status": None}
     assert cu.newest_api_error(login)["error"] == "authentication_failed"
     lost = _write(tmp_path / "c.jsonl", _err("API Error: Connection lost mid-response."))
     assert cu.stopped_on_login_error(lost) is None and cu.newest_api_error(lost)["error"] == "server_error"
@@ -911,6 +912,27 @@ def test_an_expired_login_is_a_login_stop_and_nothing_else_is(tmp_path):
                   {"type": "user"}, {"type": "assistant"})
     assert cu.stopped_on_login_error(back) is None and cu.newest_api_error(back) is None
     assert cu.stopped_on_login_error(None) is None
+
+
+def test_a_403_from_a_gateway_is_not_a_lost_login(tmp_path):
+    # Claude Code files a 403 under authentication_failed and prefixes "Please run /login" even when
+    # the 403 came from a proxy in front of the API (an HTML challenge page, a dropped socket), not
+    # from the API's own JSON error. Such a refusal passes by itself, so it is a transient stop.
+    for body in ("Attention Required! | Cloudflare",
+                 "The socket connection was closed unexpectedly. For more information, pass `verbose: true`"):
+        text = f"Please run /login · API Error: 403 {body}"
+        t = _write(tmp_path / "g.jsonl", _err(text, error="authentication_failed", apiErrorStatus=403))
+        assert cu.stopped_on_login_error(t) is None, body
+        assert cu.stopped_on_api_error(t)["status"] == 403, body
+        assert cu.newest_api_error(t)["error"] == "authentication_failed"
+    # the API's own refusal, a JSON body, is still a lost login, as is every login stop with no status
+    api = ('Please run /login · API Error: 401 {"type":"error","error":{"type":"authentication_error",'
+           '"message":"OAuth token has expired."}}')
+    for text, status in ((api, 401), (api.replace("401", "403", 1), 403), ("Login expired · Please run /login", None),
+                         ("Invalid API key · Please run /login", None), ("Not logged in · Please run /login", None)):
+        t = _write(tmp_path / "l.jsonl", _err(text, error="authentication_failed", apiErrorStatus=status))
+        assert cu.stopped_on_login_error(t) is not None, text
+        assert cu.stopped_on_api_error(t) is None, text
 
 
 def test_anything_after_the_error_means_the_chat_moved_on(tmp_path):
