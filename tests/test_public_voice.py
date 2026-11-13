@@ -433,6 +433,8 @@ def test_more_gh_forms(cfg, public, private):
         "'zorblax' in the gh api call"
     assert pv.check(bash("gh api -X GET repos/example-owner/thing/issues -f q=zorblax", private), cfg) is None
     assert pv.check(bash("gh api repos/example-owner/secret/issues -f body=zorblax", public), cfg) is None
+    assert pv.check(bash("gh api repos/example-owner/thing/issues --input - <<'EOF'\n"
+                         '{"title": "t", "body": "zorblax"}\nEOF', private), cfg) == "'zorblax' in the gh api call"
     assert pv.check(bash("gh repo edit example-owner/thing --description 'zorblax tools'", private), cfg) == \
         "'zorblax' in the gh repo text"
     assert pv.check(bash("gh repo create example-owner/brand-new --public -d zorblax", private), cfg) is not None

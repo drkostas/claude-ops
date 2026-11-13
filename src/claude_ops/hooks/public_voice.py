@@ -320,9 +320,10 @@ def _with_cat(text: str, here: str, written: dict | None) -> str:
                           for m in CAT_SUBST.finditer(text))
 
 
-def _gh_api(words: list[str], here: str, written: dict) -> tuple[str | None, list[str]]:
+def _gh_api(words: list[str], here: str, written: dict, heredoc: str | None = None) -> tuple[str | None, list[str]]:
     """The repository a `gh api` call writes to (from its `repos/OWNER/REPO/...` path) and the text
-    it sends, or (None, []) for a read or a call with no repository in its path."""
+    it sends, or (None, []) for a read or a call with no repository in its path. `--input -` sends
+    the command's here-document."""
     method, slug, texts = None, None, []
     i = 2
     while i < len(words):
@@ -338,7 +339,7 @@ def _gh_api(words: list[str], here: str, written: dict) -> tuple[str | None, lis
                          if a in ("-F", "--field") and value.startswith("@") else value)
             i += 1
         elif a == "--input" and nxt is not None:
-            texts.append(_read(os.path.join(here, expand(nxt)), written))
+            texts.append((heredoc or "") if nxt == "-" else _read(os.path.join(here, expand(nxt)), written))
             i += 1
         elif not a.startswith("-") and slug is None:
             m = re.match(r"/?repos/([^/\s]+)/([^/?#\s]+)", a)
@@ -402,7 +403,7 @@ def published(command: str, cwd: str) -> list[tuple[str, str, str]]:
         if os.path.basename(words[0]) != "gh" or len(words) < 2:
             continue
         if words[1] == "api":
-            slug, texts = _gh_api(words, here, written)
+            slug, texts = _gh_api(words, here, written, cmd.get("heredoc"))
             found += [("the gh api call", "slug:" + slug, t) for t in texts] if slug else []
             continue
         if len(words) < 3 or words[2] not in GH_WRITES.get(words[1], ()):

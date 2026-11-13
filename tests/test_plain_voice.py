@@ -110,6 +110,34 @@ def test_a_listed_phrase_in_the_prose_is_refused_and_code_urls_and_allowed_text_
     assert say("| a: b | c |") is None
 
 
+def test_a_gh_api_json_input_is_judged_by_its_title_and_body_only(tmp_path):
+    cfg = pv.Config([{"regex": r"\w: ", "why": "a colon in prose"}])
+    say = lambda command: pv.check(bash(command, tmp_path), cfg)  # noqa: E731
+    pr = {"title": "One plain title", "head": "a-branch", "base": "main", "body": "One paragraph.\n\nAnd a second."}
+    f = tmp_path / "pr.json"
+    f.write_text(json.dumps(pr))                  # json.dumps writes '"title": "One plain title"'
+    assert '"title": ' in f.read_text()
+    assert say(f"gh api repos/someone/demo/pulls --input {f}") is None
+    f.write_text(json.dumps({**pr, "body": "The fix: it works."}))
+    assert "a colon in prose" in say(f"gh api repos/someone/demo/pulls --input {f}")
+    f.write_text(json.dumps({**pr, "title": "Note: a title"}))
+    assert "a colon in prose" in say(f"gh api repos/someone/demo/pulls --input {f}")
+    heredoc = "gh api repos/someone/demo/pulls --input - <<'EOF'\n{}\nEOF"
+    assert say(heredoc.format(json.dumps(pr))) is None
+    assert "a colon in prose" in say(heredoc.format(json.dumps({**pr, "body": "Why: this."})))
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Checked: the suite passed.\n")
+    assert "a colon in prose" in say(f"gh api repos/someone/demo/issues/3/comments --input {notes}")
+    assert pv.shown(json.dumps(pr)) == [pr["title"], pr["body"]] and pv.shown("[1, 2]") == ["[1, 2]"]
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps({"tag_name": "v1.0", "name": "Note: x", "body": "The first release."}))
+    assert "a colon in prose" in say(f"gh api repos/someone/demo/releases --input {release}")
+    release.write_text(json.dumps({"tag_name": "v1.0", "name": "Version one", "body": "The first release."}))
+    assert say(f"gh api repos/someone/demo/releases --input {release}") is None
+    assert "a colon in prose" in say("gh api -X PATCH repos/someone/demo --input - <<'EOF'\n"
+                                     + json.dumps({"description": "Tools: many"}) + "\nEOF")
+
+
 def test_the_patterns_come_from_the_file(tmp_path, monkeypatch):
     f = tmp_path / "plain.json"
     f.write_text(json.dumps({"patterns": [{"regex": "—", "why": "an em-dash"}], "allow": ["x"]}))
