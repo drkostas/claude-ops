@@ -727,7 +727,10 @@ def restart_app(*, answer_wait: float = 90.0, procs: Processes | None = None,
 
     Refused, with nothing stopped, unless exactly one iTerm2 and one iTermServer run, the server
     holds at least one terminal and the app itself holds none (stopping it would end those), and
-    while the Mac holds app launches back (launches_held), since the app could not be opened again. The
+    while the Mac holds app launches back (launches_held), since the app could not be opened again.
+    The guard and the resume of this call's own launch (_wait_answer) are each needed: a held launch
+    that something else ended leaves a running app as the newest, the guard lets the restart through,
+    and the resume is then what lets the new iTerm2 finish its launch. The
     server is not counted as the app's own when the app started it.
     Returns (outcome, detail): "success" when iTerm2 answers again and the server still holds as
     many terminals as before, "partial" when it holds fewer, "failure" otherwise; detail carries
