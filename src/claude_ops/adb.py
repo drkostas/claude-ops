@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import subprocess
 import sys
@@ -55,10 +56,41 @@ def default_run(argv: list[str], *, timeout: float = 15, env: dict[str, str] | N
         return subprocess.CompletedProcess(argv, 124, "", f"{type(e).__name__}: {e}")
 
 
-def open_ports(host: str, ports, *, timeout: float = 2.0, concurrency: int = 800) -> list[int]:
+def round_trip(host: str, port: int = 1, *, timeout: float = 5.0) -> float | None:
+    """Seconds one TCP connect to `port` of `host` takes. A refusal counts, because it is the device's
+    own answer; None when nothing answered within `timeout`. Pick a port nothing listens on, so the
+    answer comes back at once and the time is the distance."""
+    async def one() -> float | None:
+        start = time.monotonic()
+        try:
+            _, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+            w.close()
+        except ConnectionRefusedError:
+            pass
+        except (OSError, asyncio.TimeoutError):
+            return None
+        return time.monotonic() - start
+    return asyncio.run(one())
+
+
+def scan_timeout(rtt: float | None, *, floor: float = 2.0, factor: float = 4.0, ceiling: float = 15.0) -> float:
+    """How long a scan waits for one port, from the measured round trip: `factor` round trips, never
+    under `floor` and never over `ceiling`. A fixed two seconds missed a port over a link of 700 ms,
+    where a slow connect plus a busy machine took longer. Without a measurement it is `floor`."""
+    if rtt is None:
+        return floor
+    return min(ceiling, max(floor, factor * rtt))
+
+
+def open_ports(host: str, ports, *, timeout: float | None = None, concurrency: int = 800) -> list[int]:
     """The ports of `host` that accept a TCP connection, in order. A port that refuses or does not
-    answer within `timeout` seconds is left out. Over a VPN with a 100 ms round trip, 35,000 ports
-    take about ten seconds."""
+    answer within `timeout` seconds is left out. With no `timeout` it is measured first, from a
+    connect to a port nothing listens on (`scan_timeout(round_trip(host))`), so a slow link gets a
+    longer wait and a near one the usual two seconds. Over a VPN with a 100 ms round trip, 35,000
+    ports take about ten seconds."""
+    if timeout is None:
+        timeout = scan_timeout(round_trip(host))
+
     async def scan() -> list[int]:
         found: list[int] = []
         gate = asyncio.Semaphore(concurrency)
@@ -109,19 +141,22 @@ def wireless_on(serial: str, *, turn_on: bool = False, run=default_run, adb: str
 
 def reach(host: str, *, fixed: int = FIXED, ports=WIRELESS_PORTS, skip=(), keep_wireless: bool = False,
           run=None, scan=open_ports, adb: str = "adb", settle: float = 4.0,
-          sleep=time.sleep, env: dict[str, str] | None = None) -> Reach:
+          sleep=time.sleep, env: dict[str, str] | None = None,
+          scan_wait: float | None = None) -> Reach:
     """Reach the device at `host`: the fixed port if it answers, otherwise the wireless-debugging port
     found by scanning `ports`, from which `tcpip <fixed>` makes the fixed port listen again.
     `skip` names ports to leave alone. With `keep_wireless`, wireless debugging is turned back on
     after `tcpip` when it went off (it was on, so the network is one the device trusts). `env` is
-    the environment every adb command runs with (None inherits); it is ignored when `run` is given."""
+    the environment every adb command runs with (None inherits); it is ignored when `run` is given.
+    `scan_wait` is how many seconds the scan waits for one port (None measures it, see `open_ports`)."""
     if run is None:
         def run(argv, *, timeout=15):
             return default_run(argv, timeout=timeout, env=env)
     fixed_serial = f"{host}:{fixed}"
     if _connect(fixed_serial, run, adb):
         return Reach(fixed_serial, "fixed", f"port {fixed} answered")
-    candidates = [p for p in scan(host, [p for p in ports if p != fixed and p not in skip])]
+    find = scan if scan_wait is None else functools.partial(scan, timeout=scan_wait)
+    candidates = [p for p in find(host, [p for p in ports if p != fixed and p not in skip])]
     for port in candidates:
         serial = f"{host}:{port}"
         if not _connect(serial, run, adb):
@@ -152,11 +187,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skip", type=int, action="append", default=[], help="a port to leave alone")
     p.add_argument("--keep-wireless", action="store_true",
                    help="turn wireless debugging back on after tcpip when it went off")
+    p.add_argument("--scan-wait", type=float, default=None,
+                   help="seconds the scan waits for one port (default: measured from the round trip)")
     p.add_argument("--adb", default="adb", help="the adb binary")
     p.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
     r = reach(a.host, fixed=a.fixed, ports=range(a.lo, a.hi + 1), skip=set(a.skip),
-              keep_wireless=a.keep_wireless, adb=a.adb)
+              keep_wireless=a.keep_wireless, adb=a.adb, scan_wait=a.scan_wait)
     print(json.dumps(asdict(r)) if a.json else (f"{r.serial}: {r.detail}" if r.serial else r.detail))
     return 0 if r.serial else 1
 
