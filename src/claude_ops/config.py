@@ -49,6 +49,36 @@ def digest_json(path: os.PathLike | str, key: str | None = None) -> str | None:
     return fingerprint(json.dumps(data, sort_keys=True, separators=(",", ":")).encode())
 
 
+#: the settings keys Claude Code applies to a running session when the file changes, so a change to
+#: them needs no restart (its settings documentation, "When edits take effect": edits to
+#: `permissions` and `hooks` reach the running session; `model`, `effortLevel` and `modelSettings`
+#: are read once at start). Every other key still counts, because it is not known to be reloaded.
+RELOADED_KEYS = ("hooks", "permissions")
+#: the one key under `permissions` that a running session keeps from its start: removing it does not
+#: lift the block until the session restarts
+KEPT_FROM_START = {"permissions": ("blockReadsOutsideWorkingDirectories",)}
+
+
+def settings_digest(path: os.PathLike | str = SETTINGS) -> str | None:
+    """A fingerprint of a settings file without what a running session reloads by itself
+    (RELOADED_KEYS, apart from KEPT_FROM_START), so it changes only when a change needs a restart.
+    None when the file is missing or unreadable."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict):
+        kept = {k: v for k, v in data.items() if k not in RELOADED_KEYS}
+        for key, names in KEPT_FROM_START.items():
+            part = data.get(key)
+            if isinstance(part, dict):
+                held = {n: part[n] for n in names if n in part}
+                if held:
+                    kept[key] = held
+        data = kept
+    return fingerprint(json.dumps(data, sort_keys=True, separators=(",", ":")).encode())
+
+
 #: what names the account Claude Code is signed in to; the rest of `oauthAccount` (the profile,
 #: rate tiers, the time it was fetched) changes without a new login
 #: (built from parts, because a pair of quoted names on one line reads as a login to secret scanners)
@@ -244,7 +274,7 @@ def snapshot() -> dict[str, str | None]:
     """The installed version and a fingerprint of each thing a new chat loads at start."""
     return {
         "claude_version": installed_version(),
-        "settings_digest": digest_json(SETTINGS),
+        "settings_digest": settings_digest(SETTINGS),
         "mcp_servers_digest": digest_json(CLAUDE_JSON, "mcpServers"),
         "login_digest": login_digest(CLAUDE_JSON),
         "plugins_digest": digest_json(PLUGINS),

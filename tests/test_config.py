@@ -29,6 +29,35 @@ def test_fingerprints(tmp_path):
     assert cc.digest_files([a]) != cc.digest_files([a, b])
 
 
+def test_settings_digest_leaves_out_what_a_running_session_reloads(tmp_path):
+    s = tmp_path / "settings.json"
+    base = {"model": "opus", "env": {"A": "1"}, "statusLine": {"type": "command", "command": "x"},
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": []}]},
+            "permissions": {"allow": ["Bash(ls:*)"], "deny": []}}
+
+    def digest(**change):
+        s.write_text(json.dumps({**base, **change}))
+        return cc.settings_digest(s)
+
+    first = digest()
+    assert first is not None and first == digest()
+    # a session picks these up while it runs, so they need no restart
+    assert digest(hooks={"PreToolUse": [{"matcher": "Bash|mcp__x__.*", "hooks": []}]}) == first
+    assert digest(permissions={"allow": ["Bash(ls:*)", "Read"], "deny": []}) == first
+    assert digest(hooks={}, permissions={}) == first
+    # these are read once at start, or not known to be reloaded, so a change still counts
+    assert digest(model="sonnet") != first
+    assert digest(env={"A": "2"}) != first
+    assert digest(statusLine={"type": "command", "command": "y"}) != first
+    assert digest(effortLevel="high") != first
+    # a removed blockReadsOutsideWorkingDirectories stays in force until the session restarts
+    blocked = digest(permissions={"allow": [], "blockReadsOutsideWorkingDirectories": True})
+    assert blocked != first and digest(permissions={"allow": []}) != blocked
+    assert cc.settings_digest(tmp_path / "missing.json") is None
+    s.write_text("[1, 2]")
+    assert cc.settings_digest(s) == cc.digest_json(s)
+
+
 def test_instruction_files_follow_at_imports(tmp_path):
     md = tmp_path / "CLAUDE.md"
     md.write_text("intro\n@RTK.md\n@tools.md\nnot @an import\n")

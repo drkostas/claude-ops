@@ -284,6 +284,7 @@ config.installed_version()                 # what `claude` starts now, e.g. "2.1
 procs = config.processes()
 config.running_version(pid)                # what one running chat runs (lsof's txt entry)
 config.snapshot()                          # fingerprints of settings, MCP servers, plugins, CLAUDE.md
+config.settings_digest()                   # settings without hooks and permissions, which a running chat reloads
 update.idle(pid, procs, update.last_activity(update.transcript_of(chat_id)), turn_ended_at, now)
 update.may_be_typing(update.seconds_since_input(), update.front_app())
 update.empty_prompt(update.screen_of("iterm", session_id))
