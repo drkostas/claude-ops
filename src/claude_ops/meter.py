@@ -101,6 +101,79 @@ WRITE_RETRY_S = 0.05
 #: up (it logs each such answer). The exporter's retries come within a minute, so a batch seen again inside this
 #: is answered without being saved twice.
 RESENT_WINDOW_S = 600.0
+#: the longest a reading pass means to hold the store's write lock in one commit, well under COLLECT_WAIT_S, so the
+#: collector never waits out its deadline behind one. A transcript read from its start used to be saved in one
+#: commit. In a full re-read of 17,229 transcripts at a load of about 18, the longest such commit held the lock for
+#: 2.7 s (32,305 responses), at 0.05 to 0.11 ms a response, so a transcript is saved in pieces.
+READ_HOLD_S = 1.0
+#: the rows a reading pass writes in its first piece of a transcript (about 0.2 s at the rate above), and the most
+#: it lets a piece grow to (under READ_HOLD_S at that rate). _Pace changes it as it measures each piece.
+PIECE_ROWS = 2000
+PIECE_ROWS_MOST = 8000
+
+
+class _Pace:
+    """How many rows a reading pass writes in one commit. After a piece that held the write lock past half of
+    `hold` the next piece is half as big, and after one under an eighth of it twice as big, between `low` and
+    `high`. So a commit stays under `hold` as the machine gets slower or faster. `clock` stands in for the real
+    one in a test."""
+
+    def __init__(self, hold: float = READ_HOLD_S, rows: int = PIECE_ROWS, low: int = 50, high: int = PIECE_ROWS_MOST,
+                 clock=time.monotonic):
+        self.hold, self.rows, self.low, self.high, self.clock = hold, rows, low, high, clock
+        self.longest = 0.0
+
+    def after(self, held: float) -> None:
+        self.longest = max(self.longest, held)
+        if held > self.hold / 2:
+            self.rows = max(self.low, self.rows // 2)
+        elif held < self.hold / 8:
+            self.rows = min(self.high, self.rows * 2)
+
+
+#: setiopolicy_np's values (macOS sys/resource.h)
+_IOPOL_TYPE_DISK, _IOPOL_SCOPE_PROCESS, _IOPOL_IMPORTANT = 0, 0, 1
+#: the throttleable disk policies (STANDARD, UTILITY, THROTTLE), which _unthrottled raises while the lock is held
+_IOPOL_THROTTLEABLE = (5, 4, 3)
+_LIBC: list = []
+
+
+def _libc():
+    """The C library on macOS, where setiopolicy_np exists, else None."""
+    if sys.platform != "darwin":
+        return None
+    if not _LIBC:
+        import ctypes  # noqa: PLC0415 - a status line render must not import this
+        import ctypes.util  # noqa: PLC0415
+        _LIBC.append(ctypes.CDLL(ctypes.util.find_library("c")))
+    return _LIBC[0]
+
+
+class _unthrottled:
+    """While a reading pass holds the store's write lock, its disk I/O runs at the normal policy, and the policy it
+    had comes back after. A pass run in the background (`taskpolicy -d throttle`) otherwise writes and commits at
+    the lowest disk priority while every other writer waits for its lock. macOS applies the lower of a thread's and
+    its process's policy to each I/O, so raising the thread alone changes nothing, and this sets the process's.
+    Only a throttleable policy is raised. `libc` stands in for the C library in a test, and elsewhere than macOS
+    this does nothing."""
+
+    def __init__(self, libc=None):
+        self.libc = _libc() if libc is None else libc
+        self.old = None
+
+    def __enter__(self):
+        if self.libc is not None:
+            old = self.libc.getiopolicy_np(_IOPOL_TYPE_DISK, _IOPOL_SCOPE_PROCESS)
+            if old in _IOPOL_THROTTLEABLE and \
+                    self.libc.setiopolicy_np(_IOPOL_TYPE_DISK, _IOPOL_SCOPE_PROCESS, _IOPOL_IMPORTANT) == 0:
+                self.old = old
+        return self
+
+    def __exit__(self, *exc):
+        if self.old is not None:
+            self.libc.setiopolicy_np(_IOPOL_TYPE_DISK, _IOPOL_SCOPE_PROCESS, self.old)
+            self.old = None
+        return False
 
 
 def connect(db: "Path | str | None" = None, *, timeout: float = 5) -> sqlite3.Connection:
@@ -461,37 +534,92 @@ def _started_by(path: Path) -> "str | None":
     return str(use) if use else None
 
 
-def read_file(conn: sqlite3.Connection, path: Path, marks: "Marks | None" = None) -> int:
+class _Piece:
+    """What a reading pass has gathered from a transcript since its last commit."""
+
+    def __init__(self):
+        self.found: dict = {}
+        self.reloads, self.cuts, self.prompts, self.kept = [], [], [], []
+
+    def rows(self) -> int:
+        return len(self.found) + len(self.reloads) + len(self.cuts) + len(self.prompts) + len(self.kept)
+
+
+def _save_piece(conn: sqlite3.Connection, path: Path, piece: _Piece, read_to: int, seam: str, size: "int | None",
+                pace: _Pace, agent_row: "tuple | None" = None) -> None:
+    """Save one piece of a transcript with the position it reached, and commit, so the position always matches the
+    rows saved. `size` is the file's size once the whole file is read, and None for a piece before its end, so the
+    next read goes on from `read_to`. The disk policy is normal while the lock is held (_unthrottled), and the hold
+    is measured for `pace`."""
+    found = piece.found
+    with _unthrottled():
+        began = pace.clock()
+        try:
+            if found:
+                conn.executemany(_SAVE, list(found.values()))
+                conn.executemany(_SHOWN, [(r["shown"], r["message_id"]) for r in found.values()])
+                conn.executemany(_AGENT, [(r["agent"], r["message_id"]) for r in found.values() if r["agent"]])
+            conn.executemany("INSERT OR REPLACE INTO reloads(session_id, at, chars) VALUES (?, ?, ?)", piece.reloads)
+            conn.executemany("INSERT OR REPLACE INTO compactions(session_id, at) VALUES (?, ?)", piece.cuts)
+            conn.executemany("INSERT OR IGNORE INTO prompts(session_id, at) VALUES (?, ?)", piece.prompts)
+            conn.executemany("INSERT OR IGNORE INTO marks(session_id, at, place, tag, message_id) "
+                             "VALUES (?, ?, ?, ?, ?)", piece.kept)
+            if agent_row:
+                conn.execute("INSERT OR REPLACE INTO agents(session_id, agent_id, tool_use_id) VALUES (?, ?, ?)",
+                             agent_row)
+            conn.execute("INSERT OR REPLACE INTO positions(path, read_to, seam, size) VALUES (?, ?, ?, ?)",
+                         (str(path), read_to, seam, size))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        pace.after(pace.clock() - began)
+
+
+def read_file(conn: sqlite3.Connection, path: Path, marks: "Marks | None" = None, pace: "_Pace | None" = None) -> int:
     """The responses a transcript gained since the last read, saved, with the prompts and marks of its turns
     (`marks_of`). It reads from the remembered position when the bytes before it still hash the same
     (sessions._seam), and from the start for a file replaced by another one. A line still being written is read
     again next time. The file is read one line at a time, so a large transcript is never held whole, and a tool's
-    result is parsed only when it carries a usage figure. Returns the responses saved."""
+    result is parsed only when it carries a usage figure. Returns the responses saved.
+
+    It is saved and committed in pieces of about `pace.rows` rows, each with the position it reached, so no commit
+    holds the store's write lock for long (_Pace), and a read stopped between two pieces goes on from the last one.
+    A piece ends only where a new response begins, so the lines of one response are always saved together (their
+    `shown` adds up within a piece, and two pieces would keep only the larger part)."""
     from .sessions import _seam  # noqa: PLC0415 - a status line render must not import this
     marks = Marks() if marks is None else marks
+    pace = _Pace() if pace is None else pace
     st = path.stat()
     row = conn.execute("SELECT read_to, seam, size FROM positions WHERE path = ?", (str(path),)).fetchone()
     if row and row[2] == st.st_size:
         return 0
     side = path.parent.name == "subagents"
     agent = path.name[:-len(".jsonl")].removeprefix("agent-") if side else None
-    found: dict = {}
-    reloads, cuts, prompts, kept = [], [], [], []
+    piece, saved, last = _Piece(), 0, None
     with path.open("rb") as fh:
-        start = row[0] if row and row[0] <= st.st_size and _seam(fh, row[0]) == row[1] else 0
+        start = row[0] if row and row[0] is not None and row[0] <= st.st_size and _seam(fh, row[0]) == row[1] else 0
         fh.seek(start)
         read_to = start
         for raw in fh:
             if not raw.endswith(b"\n"):
                 break
-            read_to += len(raw)
             d = _parse(raw) if _wants(raw) else None
+            new = _response(d, side, agent) if d is not None else None
+            if new and last is not None and new["message_id"] != last and piece.rows() >= pace.rows:
+                # this line begins another response, and the piece is full: save it up to here and go on after
+                seam = _seam(fh, read_to)
+                fh.seek(read_to + len(raw))
+                _save_piece(conn, path, piece, read_to, seam, None, pace)
+                saved += len(piece.found)
+                piece = _Piece()
+            read_to += len(raw)
             if d is None:
                 continue
-            new = _response(d, side, agent)
             if new:
-                _keep(found, new)
-            for got, into in ((_reload(d), reloads), (_compaction(d), cuts)):
+                _keep(piece.found, new)
+                last = new["message_id"]
+            for got, into in ((_reload(d), piece.reloads), (_compaction(d), piece.cuts)):
                 if got:
                     into.append(got)
             sid, at = d.get("sessionId"), _when(d.get("timestamp"))
@@ -499,24 +627,13 @@ def read_file(conn: sqlite3.Connection, path: Path, marks: "Marks | None" = None
                 continue
             prompt, named = marks_of(d, marks)
             if prompt:
-                prompts.append((sid, at))
-            kept.extend((sid, at, place, tag, mid) for place, tag, mid in named)
+                piece.prompts.append((sid, at))
+            piece.kept.extend((sid, at, place, tag, mid) for place, tag, mid in named)
         seam = _seam(fh, read_to)
-    if found:
-        conn.executemany(_SAVE, list(found.values()))
-        conn.executemany(_SHOWN, [(r["shown"], r["message_id"]) for r in found.values()])
-        conn.executemany(_AGENT, [(r["agent"], r["message_id"]) for r in found.values() if r["agent"]])
-    conn.executemany("INSERT OR REPLACE INTO reloads(session_id, at, chars) VALUES (?, ?, ?)", reloads)
-    conn.executemany("INSERT OR REPLACE INTO compactions(session_id, at) VALUES (?, ?)", cuts)
-    conn.executemany("INSERT OR IGNORE INTO prompts(session_id, at) VALUES (?, ?)", prompts)
-    conn.executemany("INSERT OR IGNORE INTO marks(session_id, at, place, tag, message_id) VALUES (?, ?, ?, ?, ?)", kept)
     use = _started_by(path) if side else None
-    if use:
-        conn.execute("INSERT OR REPLACE INTO agents(session_id, agent_id, tool_use_id) VALUES (?, ?, ?)",
-                     (path.parent.parent.name, agent, use))
-    conn.execute("INSERT OR REPLACE INTO positions(path, read_to, seam, size) VALUES (?, ?, ?, ?)",
-                 (str(path), read_to, seam, st.st_size))
-    return len(found)
+    _save_piece(conn, path, piece, read_to, seam, st.st_size, pace,
+                (path.parent.parent.name, agent, use) if use else None)
+    return saved + len(piece.found)
 
 
 def _settle(conn: sqlite3.Connection, marks: Marks) -> None:
@@ -525,26 +642,28 @@ def _settle(conn: sqlite3.Connection, marks: Marks) -> None:
     was = conn.execute("SELECT value FROM settings WHERE name = 'marks'").fetchone()
     if was and was[0] == marks.fingerprint:
         return
-    conn.execute("DELETE FROM marks WHERE place IN ('prompt', 'call')")
-    for sid, start, end in marks.skip:
-        conn.execute("DELETE FROM marks WHERE session_id = ? AND at >= ? AND at < ?", (sid, start, end))
-        conn.execute("DELETE FROM prompts WHERE session_id = ? AND at >= ? AND at < ?", (sid, start, end))
-    conn.execute("DELETE FROM positions")
-    conn.execute("INSERT OR REPLACE INTO settings(name, value) VALUES ('marks', ?)", (marks.fingerprint,))
-    conn.commit()
+    with _unthrottled():
+        conn.execute("DELETE FROM marks WHERE place IN ('prompt', 'call')")
+        for sid, start, end in marks.skip:
+            conn.execute("DELETE FROM marks WHERE session_id = ? AND at >= ? AND at < ?", (sid, start, end))
+            conn.execute("DELETE FROM prompts WHERE session_id = ? AND at >= ? AND at < ?", (sid, start, end))
+        conn.execute("DELETE FROM positions")
+        conn.execute("INSERT OR REPLACE INTO settings(name, value) VALUES ('marks', ?)", (marks.fingerprint,))
+        conn.commit()
 
 
 def read_all(*, root: "Path | None" = None, db: "Path | str | None" = None, since: "float | None" = None,
              marks: "Marks | None" = None) -> dict:
     """Read every transcript under `root` that changed, a session's subagents included. With `since`, files
     last written before it are passed over. Each file is committed when it is read, so a read stopped halfway keeps
-    what it finished. `marks` says what the turns name (`Marks.load()` when None). After it
+    what it finished (read_file commits each piece of a file). `marks` says what the turns name (`Marks.load()` when None). After it
     changes, every file is read again, and the ids in a file older than `since` come back with a read that has no
-    `since`. Returns {"files", "responses"}."""
+    `since`. Returns {"files", "responses", "longest_hold_s"}, the last the longest any commit held the write lock."""
     from .paths import PROJECTS  # noqa: PLC0415
     root = Path(root or PROJECTS)
     marks = Marks.load() if marks is None else marks
     files = responses = 0
+    pace = _Pace()
     conn = connect(db)
     try:
         _settle(conn, marks)
@@ -553,17 +672,14 @@ def read_all(*, root: "Path | None" = None, db: "Path | str | None" = None, sinc
                 try:
                     if since is not None and path.stat().st_mtime < since:
                         continue
-                    got = read_file(conn, path, marks)
+                    got = read_file(conn, path, marks, pace)
                 except OSError:
                     continue
                 files += 1
                 responses += got
-                # each file on its own, so a read that is stopped keeps every file it finished
-                conn.commit()
-        conn.commit()
     finally:
         conn.close()
-    return {"files": files, "responses": responses}
+    return {"files": files, "responses": responses, "longest_hold_s": round(pace.longest, 3)}
 
 
 #: the client's own weighting of a model (its code, 2.1.316), a prior and not a contract
