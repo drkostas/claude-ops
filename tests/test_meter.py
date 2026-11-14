@@ -255,6 +255,98 @@ def test_a_lock_met_while_connecting_answers_503(tmp_path, monkeypatch):
     assert got.value.code == 503
 
 
+def _collector(db):
+    made = {}
+
+    from http.server import ThreadingHTTPServer
+
+    def factory(addr, handler):
+        made["server"] = ThreadingHTTPServer((addr[0], 0), handler)
+        return made["server"]
+
+    threading.Thread(target=meter.serve, kwargs={"db": db, "server": factory}, daemon=True).start()
+    while "server" not in made:
+        time.sleep(0.01)
+    return made["server"]
+
+
+def _post(server, body, timeout=5):
+    req = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}/v1/metrics", data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, None
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Retry-After")
+
+
+def _printed(capsys, words, within=5.0):
+    """What the collector printed, once `words` is in it (its handler runs on another thread)."""
+    out, end = "", time.monotonic() + within
+    while time.monotonic() < end:
+        out += capsys.readouterr().err
+        if words in out:
+            break
+        time.sleep(0.02)
+    return out
+
+
+def test_a_caller_that_hangs_up_gets_one_line_and_its_batch_is_not_saved_twice(tmp_path, monkeypatch, capsys):
+    import socket
+    import struct
+
+    db = tmp_path / "m.sqlite3"
+    meter.connect(db).close()
+    entered, go = threading.Event(), threading.Event()
+    save = meter.save_metrics
+
+    def slow(conn, rows):
+        entered.set()
+        assert go.wait(5)
+        save(conn, rows)
+    monkeypatch.setattr(meter, "save_metrics", slow)
+    server = _collector(db)
+    body = json.dumps(metrics(10.0)).encode()
+
+    s = socket.create_connection(server.server_address)
+    s.sendall(b"POST /v1/metrics HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+    assert entered.wait(5)
+    assert _post(server, body) == (503, "1"), "a copy sent while the first is being saved is asked for again"
+    # the exporter gives up as it does at its timeout: the connection ends with a reset
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    s.close()
+    go.set()
+    err = _printed(capsys, "hung up")
+    assert "Traceback" not in err and "BrokenPipe" not in err and "ConnectionReset" not in err, err
+    assert "the caller hung up before the answer to POST /v1/metrics (200 after" in err, err
+    assert "its batch saved), 1 since the collector started" in err, err
+
+    monkeypatch.setattr(meter, "save_metrics", save)
+    assert _post(server, body) == (200, None), "the exporter sends the batch again after its timeout"
+    assert "came again and was not saved twice, 1 since the collector started" in _printed(capsys, "came again")
+    assert _post(server, json.dumps(metrics(5.0)).encode()) == (200, None), "a new batch is saved"
+    server.shutdown()
+    assert rows(db, "SELECT kind, value FROM telemetry") == [("cacheRead", 15.0)]
+
+
+def test_a_cumulative_batch_answered_503_keeps_its_change_when_sent_again(tmp_path, monkeypatch):
+    db = tmp_path / "m.sqlite3"
+    meter.connect(db).close()
+    monkeypatch.setattr(meter, "COLLECT_WAIT_S", 0.2)
+    server = _collector(db)
+    body = json.dumps(metrics(50.0, temporality=2)).encode()
+    holder = sqlite3.connect(db)
+    holder.execute("BEGIN IMMEDIATE")
+    assert _post(server, body) == (503, "0")
+    holder.rollback()
+    holder.close()
+    assert _post(server, body) == (200, None)
+    assert _post(server, json.dumps(metrics(80.0, temporality=2, nanos=int(NOW * 1e9) + 1)).encode()) == (200, None)
+    server.shutdown()
+    assert rows(db, "SELECT sum(value) FROM telemetry") == [(80.0,)], "50, then the change of 30, and nothing lost"
+
+
 def test_the_environment_turns_telemetry_on_toward_this_machine():
     e = meter.env_block(4999)
     assert e["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1" and e["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:4999"
