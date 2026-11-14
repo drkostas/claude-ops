@@ -4,6 +4,7 @@ memory or disk is short.
     claude-ops heavy <chat> <what> -- <command...>     wait for the turn, run under the memory cap
     claude-ops heavy <chat> <what> --max-hold <minutes> -- <command...>   the same, ended after that long
     claude-ops heavy <chat> <what> --notify -- <command...>   the same, and the result goes to <chat>
+    claude-ops heavy <chat> <what> --need-gb <GB> -- <command...>   the same, for a job that needs that much
     claude-ops heavy hold <chat> <what> --pid <pid>   take the slot for a process that already runs
     claude-ops heavy release --pid <pid>              give a held slot back
     claude-ops heavy status                           the machine, who holds the slot, who goes next
@@ -27,6 +28,16 @@ caller is told why, in its own output. A job that needs more sets HEAVY_MAX_GB o
 A process the job starts in a group or session of its own (a build tool's worker, a server started
 with setsid) is still the job's: it is found by its parent pid, counted with the group, and ended
 with it. An ended job gets SIGTERM, and SIGKILL after HEAVY_STOP_GRACE seconds (10).
+
+A JOB MAY SAY WHAT IT NEEDS. The gate's HEAVY_MIN_FREE_GB (6) is room for a job nobody has measured, and a
+small job waited behind it on a machine with plenty of room for that job. A job that knows its size
+declares it with --need-gb <GB> or HEAVY_NEED_GB, held between NEED_FLOOR_GB (0.5) and HEAVY_MAX_GB, and
+the gate then asks that much free memory instead. A job that declares nothing asks HEAVY_MIN_FREE_GB as
+before. A declaration is not taken on trust. Each job is sampled as it runs, and a peak more than
+NEED_SLACK (a quarter) over the need is one line, and it is kept for that job name in HEAVY_DIR/peaks.
+The next run of that name asks the larger of its need and that peak, until a run stays within its need
+again. Declared needs add up against free memory as every job does: a waiter beside a job past its turn
+still counts the room that job may take again.
 
 THE TURN. Each waiter leaves a ticket. The next holder is the oldest ticket of the chat that held the
 slot least recently, so a chat that queues eight jobs takes every other turn instead of all eight
@@ -88,7 +99,9 @@ macOS only: the memory readings come from vm_stat, sysctl and proc_pid_rusage.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -111,6 +124,14 @@ TAKING = DIR / "taking"
 DONE = DIR / "done"
 #: how many finished jobs DONE keeps (about 200 bytes each, so well under its 1 MB)
 DONE_KEEP = 200
+#: the peaks of jobs that took more than they declared, one file per job name, for that name's next run
+PEAKS = DIR / "peaks"
+#: how many job names PEAKS keeps
+PEAKS_KEEP = 200
+#: the least memory a job may declare it needs: a machine with less free than this has no room for anything
+NEED_FLOOR_GB = 0.5
+#: a sampled peak this share over the declared need is said, and the next run of that name waits for it
+NEED_SLACK = 0.25
 
 
 def _session() -> str | None:
@@ -138,7 +159,7 @@ TURN_MIN = _num("HEAVY_TURN_MIN", 60)
 #: how long the gate may hold a waiter before it is told what holds it
 OWN_LIMIT_NOTE_MIN = _num("HEAVY_OWN_LIMIT_NOTE_MIN", 60)
 #: the settings behind each kind of reason the gate gives, to tell a job's own limit from the machine
-LIMIT_VARS = {"memory": ("HEAVY_MIN_FREE_GB",), "pressure": (),
+LIMIT_VARS = {"memory": ("HEAVY_MIN_FREE_GB", "HEAVY_NEED_GB"), "pressure": (),
               "swap": ("HEAVY_MAX_SWAP_GB", "HEAVY_SWAP_DISK_FACTOR"), "disk": ("HEAVY_MIN_DISK_PCT",)}
 #: how many runs in a row of one job that fail the same way are worth saying
 REPEAT_FAILS = int(_num("HEAVY_REPEAT_FAILS", 3))
@@ -182,15 +203,17 @@ def machine() -> tuple[float, float, float, float, float | None]:
             round(disk_gb, 1))
 
 
-def reasons(m: tuple) -> list[tuple[str, str]]:
+def reasons(m: tuple, ask_gb: float | None = None) -> list[tuple[str, str]]:
     """What holds a heavy job on a machine read as `m` (machine()'s tuple), each as (kind, words), the kind
-    being memory, pressure, swap or disk. Empty when it has room."""
+    being memory, pressure, swap or disk. Empty when it has room. `ask_gb` is the free memory this job asks
+    (gate_gb), MIN_FREE_GB when it is not given."""
     free, swap, disk = m[:3]
     level = m[3] if len(m) > 3 else 1.0
     disk_gb = m[4] if len(m) > 4 else None
+    ask = MIN_FREE_GB if ask_gb is None else ask_gb
     why = []
-    if free < MIN_FREE_GB:
-        why.append(("memory", f"only {free} GB of memory free (needs {MIN_FREE_GB:g})"))
+    if free < ask:
+        why.append(("memory", f"only {free} GB of memory free (needs {ask:g})"))
     if level >= 4:
         why.append(("pressure", "macOS rates the memory pressure critical"))
     # Swap counts only beside a short disk. Swap used is history: pages pushed out earlier stay in
@@ -211,19 +234,101 @@ def short(m: tuple) -> str:
     return "; ".join(words for _kind, words in reasons(m))
 
 
-def held_note(why: str, kinds: set[str], minutes: float, most_free: float) -> str:
+def declared_need(given: str | None = None) -> tuple[float | None, tuple[str, str] | None]:
+    """(the memory this job says it needs, where that came from and its words), from `given` (--need-gb) or
+    else HEAVY_NEED_GB, held between NEED_FLOOR_GB and MAX_GB. (None, None) when it declares nothing, and its
+    gate then asks MIN_FREE_GB. A value that is not a number is said and left out, as if none was declared."""
+    name = "--need-gb" if given is not None else "HEAVY_NEED_GB"
+    raw = given if given is not None else os.environ.get("HEAVY_NEED_GB", "")
+    if not str(raw).strip():
+        return None, None
+    try:
+        need = float(raw)
+    except ValueError:
+        need = math.nan
+    if not math.isfinite(need):
+        say(f"{name} {raw!r} is not a number of GB, so this job asks {MIN_FREE_GB:g} GB free like one that "
+            "declares nothing")
+        return None, None
+    held = round(min(max(need, NEED_FLOOR_GB), MAX_GB), 2)
+    if held != need:
+        say(f"{name} {need:g} is held to {held:g} GB, between the floor of {NEED_FLOOR_GB:g} GB and the "
+            f"{MAX_GB:g} GB memory cap")
+    return held, (name, f"{name} {raw}" if name == "--need-gb" else f"{name}={raw}")
+
+
+def _peak_file(what: str) -> Path:
+    return PEAKS / f"{hashlib.sha256(what.encode()).hexdigest()[:20]}.json"
+
+
+def kept_peak(what: str) -> float:
+    """The peak the last run of `what` took over its declared need, kept for its next run, or 0."""
+    try:
+        return float(json.loads(_peak_file(what).read_text()).get("peak_gb", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
+def gate_gb(what: str, need: float | None) -> float:
+    """The free memory the gate asks for a run of `what`: MIN_FREE_GB when it declares no need, else the larger
+    of its need and the peak its last run took over that need (kept_peak), never above MAX_GB."""
+    if need is None:
+        return MIN_FREE_GB
+    return round(min(max(need, kept_peak(what)), MAX_GB), 2)
+
+
+def judge_need(chat: str, what: str, need: float | None, peak: float) -> str | None:
+    """After a run that declared `need`: a peak more than NEED_SLACK over it is kept for the next run of `what`
+    and said, in one line that is returned. A run that stayed within its need drops a peak kept before, and its
+    next run asks the need again. Nothing for a run that declared nothing."""
+    if need is None:
+        return None
+    f = _peak_file(what)
+    if peak > need * (1 + NEED_SLACK):
+        try:
+            PEAKS.mkdir(parents=True, exist_ok=True)
+            for old in sorted(PEAKS.glob("*.json"), key=lambda x: x.stat().st_mtime)[:-(PEAKS_KEEP - 1) or None]:
+                if old != f:
+                    old.unlink(missing_ok=True)
+            tmp = f.with_name(f".{f.name}")
+            tmp.write_text(json.dumps({"chat": chat, "what": what, "need_gb": need, "peak_gb": peak,
+                                       "at": time.strftime("%Y-%m-%d %H:%M"), "session": _session()}))
+            os.replace(tmp, f)
+        except OSError:
+            pass
+        line = (f"{what} took {peak:g} GB, more than a quarter over the {need:g} GB it declares, so its next "
+                f"run waits for {min(peak, MAX_GB):g} GB free. Declare what it takes, or make it use less.")
+        say(line)
+        return line
+    if f.exists():
+        f.unlink(missing_ok=True)
+        say(f"{what} took {peak:g} GB, within the {need:g} GB it declares, so its next run asks {need:g} GB "
+            "again")
+    return None
+
+
+def held_note(why: str, kinds: set[str], minutes: float, most_free: float, ask_gb: float | None = None,
+              declared: tuple[str, str] | None = None) -> str:
     """What a waiter says once its gate has held it for OWN_LIMIT_NOTE_MIN: for how long, what holds it in the
     gate's own words, whether that is a limit set in the job's own environment or the machine, and what would
-    let it start."""
-    own = [v for k in sorted(kinds) for v in LIMIT_VARS.get(k, ()) if v in os.environ]
+    let it start. `ask_gb` is the free memory the job asks (MIN_FREE_GB when not given), and `declared` is
+    where its declared need came from and its words, ("--need-gb", "--need-gb 2") say, when it declared one:
+    its memory limit is then that need and not HEAVY_MIN_FREE_GB."""
+    own: list[tuple[str, str]] = []
+    for k in sorted(kinds):
+        if k == "memory" and declared:
+            own.append(declared)
+            continue
+        own += [(v, f"{v}={os.environ[v]}") for v in LIMIT_VARS.get(k, ())
+                if v in os.environ and v != "HEAVY_NEED_GB"]
     note = (f"the gate has held this job for {_ago(minutes)}: {why}. "
-            + (f"That is this job's own limit ({', '.join(f'{v}={os.environ[v]}' for v in own)})"
+            + (f"That is this job's own limit ({', '.join(words for _name, words in own)})"
                if own else "That is the machine, not a limit this job set"))
     if "memory" in kinds:
         note += (f", and the most memory free in that time was {most_free:g} GB against the "
-                 f"{MIN_FREE_GB:g} GB it asks for")
+                 f"{MIN_FREE_GB if ask_gb is None else ask_gb:g} GB it asks for")
     if own:
-        return note + f". Lower {' or '.join(own)} to what the job needs, or stop the job"
+        return note + f". Lower {' or '.join(name for name, _words in own)} to what the job needs, or stop the job"
     needs = {"memory": "free memory", "pressure": "free memory", "swap": "free disk", "disk": "free disk"}
     room = " and ".join(dict.fromkeys(needs[k] for k in sorted(kinds) if k in needs)) or "room"
     return note + f". It starts when the machine has more {room}, or stop the job"
@@ -382,11 +487,14 @@ def turn_order(ws: list[dict]) -> list[dict]:
     return [by_chat[c][i] for i in range(rounds) for c in chats if i < len(by_chat[c])]
 
 
-def _ticket(chat: str, what: str, holder_pid: int) -> Path:
+def _ticket(chat: str, what: str, holder_pid: int, need_gb: float | None = None) -> Path:
+    """A waiter's ticket. `need_gb` is the free memory a job that declared its need asks, None for one that
+    declared nothing."""
     QUEUE.mkdir(parents=True, exist_ok=True)
     t = QUEUE / f"{time.time_ns():020d}.{os.getpid()}.json"
     t.write_text(json.dumps({"chat": chat, "what": what, "waiter": os.getpid(),
-                             "pid": holder_pid, "since": time.strftime("%H:%M"), "session": _session()}))
+                             "pid": holder_pid, "since": time.strftime("%H:%M"), "session": _session(),
+                             "need_gb": need_gb}))
     return t
 
 
@@ -420,10 +528,19 @@ def wait_key(held: list[tuple[str, str]], why: str) -> tuple:
     return ("turn", why)
 
 
-def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
+def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
+              declared: tuple[str, str] | None = None) -> bool:
     """Wait for this caller's turn, then take the slot for `holder_pid`. False when `holder_pid`
-    ended while it waited (a CI worker that was cancelled)."""
-    ticket = _ticket(chat, what, holder_pid)
+    ended while it waited (a CI worker that was cancelled). `need` is the memory the job declares
+    (declared_need), and `declared` where that came from: the gate then asks gate_gb instead of
+    MIN_FREE_GB."""
+    ask = gate_gb(what, need)
+    if need is not None and ask > need:
+        say(f"{what} took {kept_peak(what):g} GB on its last run, over the {need:g} GB it declares, so it "
+            f"waits for {ask:g} GB free")
+        if declared:
+            declared = (declared[0], f"{declared[1]}, raised to {ask:g} GB by its last run's peak")
+    ticket = _ticket(chat, what, holder_pid, ask if need is not None else None)
     hook("asked", chat, what, holder_pid)
     took = False
     said: tuple | None = None
@@ -439,12 +556,12 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
                 return False
             clear_stale()
             m = machine()
-            held = reasons(m)
+            held = reasons(m, ask)
             # beside jobs past their turn, the room they may take again is not free
             back, words = taking_back(holder())
-            if not held and back and m[0] - back < MIN_FREE_GB:
+            if not held and back and m[0] - back < ask:
                 held = [("memory", f"only {round(m[0] - back, 1):g} GB of memory free once {words} "
-                                   f"(needs {MIN_FREE_GB:g})")]
+                                   f"(needs {ask:g})")]
             why = "; ".join(words for _kind, words in held)
             if why:
                 held_since = held_since or time.time()
@@ -452,7 +569,7 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
                 kinds |= {kind for kind, _words in held}
                 mins = (time.time() - held_since) / 60
                 if mins >= OWN_LIMIT_NOTE_MIN and not noted:
-                    say(held_note(why, kinds, mins, most_free))
+                    say(held_note(why, kinds, mins, most_free, ask, declared))
                     noted = True
             else:
                 held_since, most_free, noted, kinds = None, 0.0, False, set()
@@ -479,7 +596,7 @@ def wait_turn(chat: str, what: str, holder_pid: int) -> bool:
                     continue
                 (SLOT / "who.json").write_text(json.dumps(
                     {"chat": chat, "what": what, "pid": holder_pid, "since": time.strftime("%H:%M"),
-                     "at": time.time(), "session": _session()}))
+                     "at": time.time(), "session": _session(), "need_gb": need}))
                 LAST.mkdir(parents=True, exist_ok=True)
                 (LAST / chat).touch()
                 took = True
@@ -607,14 +724,15 @@ def peak_of_children() -> float:
     return round(rss / (1e9 if sys.platform == "darwin" else 1e6), 2)
 
 
-def remember(chat: str, what: str, rc: int, peak: float, minutes: float, ended: str | None) -> Path:
-    """Keep what a finished job took, in DONE/<pid>.json."""
+def remember(chat: str, what: str, rc: int, peak: float, minutes: float, ended: str | None,
+             need: float | None = None) -> Path:
+    """Keep what a finished job took, in DONE/<pid>.json, with the need it declared (None for none)."""
     DONE.mkdir(parents=True, exist_ok=True)
     for old in sorted(DONE.glob("*.json"), key=lambda x: x.stat().st_mtime)[:-DONE_KEEP]:
         old.unlink(missing_ok=True)
     took = {"chat": chat, "what": what, "rc": rc, "peak_gb": peak, "minutes": round(minutes, 1),
             "ended": ended, "at": time.strftime("%Y-%m-%d %H:%M"), "end": round(time.time(), 2),
-            "session": _session()}
+            "session": _session(), "need_gb": need}
     took["how"] = failed_how(took)
     (DONE / f"{os.getpid()}.json").write_text(json.dumps(took))
     return DONE / f"{os.getpid()}.json"
@@ -732,7 +850,9 @@ def notify(chat: str, text: str) -> bool:
 
 
 def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
-        notify_chat: bool = False) -> int:
+        notify_chat: bool = False, need_gb: str | None = None) -> int:
+    """Run `cmd` as a heavy job: wait for the turn and for room, run it under the memory cap, and say what it
+    took. `need_gb` is --need-gb's value; without it HEAVY_NEED_GB is read (declared_need)."""
     # A heavy job inside a heavy job runs at once. A job that calls the queue again (a script that
     # wraps its own steps) would wait for the slot its own parent holds, and nothing could give it
     # back. It runs in the outer job's process group (no new session), so the outer job's memory
@@ -746,8 +866,10 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         except OSError as e:
             say(f"could not run {cmd[0]}: {e}")
             return 127
-    wait_turn(chat, what, os.getpid())
-    say(f"running {what} for {chat} (memory cap {MAX_GB:g} GB)")
+    need, declared = declared_need(need_gb)
+    wait_turn(chat, what, os.getpid(), need, declared)
+    say(f"running {what} for {chat} (memory cap {MAX_GB:g} GB"
+        + (f", declared need {need:g} GB)" if need is not None else ")"))
     # the job is the caller's own command: it runs in the caller's environment, by design, plus
     # HEAVY_HELD, so a call it makes to the queue knows it already holds the slot
     last = [""]
@@ -841,7 +963,8 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
             "(stream, one part at a time), or run it with HEAVY_MAX_GB set to what it needs.")
     if why is None:
         say(f"{what} is done: exit {rc}, peak memory {peak:g} GB, {minutes:.1f} min")
-    remember(chat, what, rc, peak, minutes, why)
+    remember(chat, what, rc, peak, minutes, why, need)
+    judge_need(chat, what, need, peak)
     again = next((s for s in streaks(done_jobs()) if (s["chat"], s["what"]) == (chat, what)), None)
     if again is not None and not worth_saying(again["count"]):
         again = None
@@ -865,8 +988,9 @@ def status() -> int:
     if h:
         late = (f", past its turn of {TURN_MIN:g} min: the next waiter starts beside it"
                 if past_turn(h) else "")
+        need = f", declared need {float(h['need_gb']):g} GB" if h.get("need_gb") is not None else ""
         print(f"slot: {h['chat']}: {h['what']} (pid {h['pid']}, since {h['since']}, held "
-              f"{_ago(held_min(h))}{late})")
+              f"{_ago(held_min(h))}{need}{late})")
     else:
         print("slot: free")
     for j in past_jobs():
@@ -881,7 +1005,8 @@ def status() -> int:
             if w.get("short") and gate.get("at"):
                 held += (f", for {_ago((time.time() - float(gate['at'])) / 60)}, the most memory free in "
                          f"that time {float(gate.get('most_free_gb', 0)):g} GB")
-            print(f"  {i}. {w['chat']}: {w['what']} (pid {w['pid']}, waiting since {w['since']}{held})")
+            asks = f", asks {float(w['need_gb']):g} GB free" if w.get("need_gb") is not None else ""
+            print(f"  {i}. {w['chat']}: {w['what']} (pid {w['pid']}, waiting since {w['since']}{asks}{held})")
     for s in failing():
         print(f"failing the same way: {s['chat']}: {s['what']} ({s['how']}, {s['count']} times in a row, "
               f"the last at {time.strftime('%H:%M', time.localtime(s['last']))})")
@@ -891,7 +1016,7 @@ def status() -> int:
     return 0
 
 
-USAGE = ("usage: claude-ops heavy <chat> <what> [--max-hold <minutes>] [--notify] -- <command...> |"
+USAGE = ("usage: claude-ops heavy <chat> <what> [--max-hold <minutes>] [--notify] [--need-gb <GB>] -- <command...> |"
          " claude-ops heavy hold <chat> <what> --pid <pid> |"
          " claude-ops heavy release --pid <pid> | claude-ops heavy status")
 
@@ -952,16 +1077,18 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["status"]:
         return status()
     if argv[:1] == ["hold"] and len(argv) == 5 and argv[3] == "--pid":
-        return 0 if wait_turn(argv[1], argv[2], int(argv[4])) else 1
+        return 0 if wait_turn(argv[1], argv[2], int(argv[4]), *declared_need()) else 1
     if argv[:1] == ["release"] and len(argv) == 3 and argv[1] == "--pid":
         release(int(argv[2]))
         return 0
     if len(argv) >= 4 and "--" in argv[2:]:
         cut = argv.index("--", 2)
-        opts, cmd, minutes, tell = argv[2:cut], argv[cut + 1:], None, False
+        opts, cmd, minutes, tell, need = argv[2:cut], argv[cut + 1:], None, False, None
         while opts and cmd:
             if opts[0] == "--notify":
                 tell, opts = True, opts[1:]
+            elif opts[0] == "--need-gb" and len(opts) >= 2:
+                need, opts = opts[1], opts[2:]
             elif opts[0] == "--max-hold" and len(opts) >= 2:
                 try:
                     minutes = float(opts[1])
@@ -973,7 +1100,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 break
         if not opts and cmd:
-            return run(argv[0], argv[1], cmd, max_hold=minutes, notify_chat=tell)
+            return run(argv[0], argv[1], cmd, max_hold=minutes, notify_chat=tell, need_gb=need)
     print(USAGE, file=sys.stderr)
     return 2
 

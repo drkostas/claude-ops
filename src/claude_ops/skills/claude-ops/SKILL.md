@@ -525,7 +525,9 @@ render or mesh job, a local model, a crawl, a scan of a large tree) through
 `claude-ops heavy <chat> "<what>" -- <command...>`. It waits for room and for its chat's turn, ends a
 job whose process group passes `HEAVY_MAX_GB` (8 by default), and says the job's peak memory when it
 ends, so the next run can set the cap it needs. Set `HEAVY_MAX_GB` on the same line for a job that
-needs more. Give a job that should end by itself `--max-hold <minutes>`. With `--notify` and a
+needs more. A job that knows its size declares it with `--need-gb <GB>` (or `HEAVY_NEED_GB`), and the
+gate asks that much free memory instead of `HEAVY_MIN_FREE_GB` (6). A run that peaks more than a quarter
+over its need says so, and the next run of that name waits for that peak. Give a job that should end by itself `--max-hold <minutes>`. With `--notify` and a
 `HEAVY_NOTIFY` command, the result reaches the chat instead of a polling loop. `claude-ops heavy
 status` says who holds the slot and who waits, and why. A job that fails the same way three times in a row (`HEAVY_REPEAT_FAILS`)
 says so with `AGAIN:`, and `status` lists it under "failing the same way": fix the cause (often the
