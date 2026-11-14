@@ -7,7 +7,9 @@ memory or disk is short.
     claude-ops heavy <chat> <what> --need-gb <GB> -- <command...>   the same, for a job that needs that much
     claude-ops heavy hold <chat> <what> --pid <pid>   take the slot for a process that already runs
     claude-ops heavy release --pid <pid>              give a held slot back
+    claude-ops heavy hold <chat> <what> --pid <pid> --max-wait <s>   the same, but give up after that long
     claude-ops heavy status                           the machine, who holds the slot, who goes next
+    claude-ops heavy status --json                    the same as data, with each waiter's reason kinds
 
 WHY. Several chats on one machine each start builds, emulators, renders, crawls and test suites. Run
 together they fill memory and swap, and swap files fill the disk, until everything on the machine
@@ -87,6 +89,19 @@ looks like one ordinary failure. So a job that ends the same way HEAVY_REPEAT_FA
 how many times and since when, and with `--notify` it reaches the chat too, at the third failure and
 again at the 6th, 12th, 24th and so on. `status` lists every job failing that way in the last
 HEAVY_REPEAT_HOURS (24), and `failing()` gives the same to a reader of HEAVY_DIR.
+
+A HOLD MAY GIVE UP. `hold` waits as long as it takes. With `--max-wait <seconds>` a hold still waiting after
+that long stops, takes its ticket with it, tells HEAVY_HOOK `withdrawn`, says in one line what held it, and
+exits 3 when the machine's gate held it (memory, pressure, swap or disk) or 4 when the gate was open and the
+slot or the turn belonged to other jobs. 0 is the slot taken, 1 the holder's process ended while it waited,
+and 2 a usage error. A caller that cannot wait for ever (a CI runner whose job has a time limit, say) can then
+choose by the code, and run without the slot when the machine, not another job, is what holds it.
+
+STATUS AS DATA. `status --json` prints what `status` prints as one JSON object. `machine` is the reading the
+gate used (free_gb, swap_gb, disk_free_pct, disk_free_gb, pressure), `short` the kinds of reason and words
+that hold a job now, `slot` the holder or null, `past_turn` the jobs still running past their turn, `waiting`
+each waiter in the order it goes next, and `failing` the jobs failing the same way. A waiter's `gate` is null
+when only the turn holds it, else its reason `kinds`, the gate's `words`, `held_s` and `most_free_gb`.
 
 A call made inside a heavy job runs at once, inside the outer job's slot and memory cap: the job is
 given HEAVY_HELD, and a caller whose ancestor holds the slot (a step of a CI job) counts too. A CI
@@ -533,19 +548,21 @@ def _ticket(chat: str, what: str, holder_pid: int, need_gb: float | None = None)
     return t
 
 
-def _mark(ticket: Path, why: str, held: dict | None = None) -> None:
+def _mark(ticket: Path, why: str, held: dict | None = None, kinds: list[str] | None = None) -> None:
     """Write into this waiter's ticket what holds it back by its own gate ("" for nothing), so the
     others' turn order can pass over it, and since when its gate has held it and the most memory
     free in that time ({"at", "most_free_gb"}), for status. Written whole and renamed, so no reader
-    sees half a file, and only when something changed."""
+    sees half a file, and only when something changed. `kinds` are the kinds of reason (memory, pressure,
+    swap, disk) behind `why`, for `status --json`."""
     try:
         w = json.loads(ticket.read_text())
     except (OSError, ValueError):
         return
     held = held or {}
-    if w.get("short", "") == why and w.get("held") == held:
+    kinds = kinds or []
+    if w.get("short", "") == why and w.get("held") == held and w.get("kinds", []) == kinds:
         return
-    w["short"], w["held"] = why, held
+    w["short"], w["held"], w["kinds"] = why, held, kinds
     tmp = ticket.with_name(ticket.name + ".tmp")
     tmp.write_text(json.dumps(w))
     tmp.replace(ticket)
@@ -563,12 +580,29 @@ def wait_key(held: list[tuple[str, str]], why: str) -> tuple:
     return ("turn", why)
 
 
+#: `hold --max-wait` gave up on the machine (the gate: memory, pressure, swap or disk), and on a holder or the turn
+EXIT_GAVE_UP_GATE = 3
+EXIT_GAVE_UP_HOLDER = 4
+
+
+class GaveUp(Exception):
+    """wait_turn(max_wait=...) ran out of time. `gate` is True when the last look found the machine's gate
+    holding the job (then `kinds` are the kinds of reason: memory, pressure, swap, disk), False when the gate
+    was open and the slot or the turn was held by another job."""
+
+    def __init__(self, gate: bool, kinds: list[str], waited: float, why: str):
+        super().__init__(why)
+        self.gate, self.kinds, self.waited, self.why = gate, kinds, waited, why
+
+
 def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
-              declared: tuple[str, str] | None = None) -> bool:
+              declared: tuple[str, str] | None = None, max_wait: float | None = None) -> bool:
     """Wait for this caller's turn, then take the slot for `holder_pid`. False when `holder_pid`
     ended while it waited (a CI worker that was cancelled). `need` is the memory the job declares
     (declared_need), and `declared` where that came from: the gate then asks gate_gb instead of
-    MIN_FREE_GB."""
+    MIN_FREE_GB. With `max_wait` (seconds) a caller that is still waiting after that long stops: its ticket
+    goes, HEAVY_HOOK is told `withdrawn`, and GaveUp says whether the gate or a holder was in the way."""
+    began = time.time()
     ask = gate_gb(what, need)
     if need is not None and ask > need:
         say(f"{what} took {kept_peak(what):g} GB on its last run, over the {need:g} GB it declares, so it "
@@ -612,7 +646,8 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
             # each caller's own environment (one big job asks for HEAVY_MIN_FREE_GB=16), so a job at
             # the head of the queue that waits for room only it needs would stop every job behind
             # it. The turn goes to the first waiter that could start now.
-            _mark(ticket, why, {"at": held_since, "most_free_gb": most_free} if held_since else None)
+            _mark(ticket, why, {"at": held_since, "most_free_gb": most_free} if held_since else None,
+                  sorted({kind for kind, _words in held}))
             order = turn_order([w for w in waiters() if not w.get("short")])
             h = holder()
             if not why and (not SLOT.exists() or past_turn(h)) and order and order[0]["ticket"] == ticket.name:
@@ -643,11 +678,13 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
                 ahead = names.index(ticket.name) if ticket.name in names else 0
                 why = (f"the slot is held by {h['chat']}: {h['what']}" if h else
                        f"{ahead} job(s) go first" if ahead else "the slot is being taken")
+            if max_wait is not None and time.time() - began >= max_wait:
+                raise GaveUp(bool(held), sorted({kind for kind, _words in held}), time.time() - began, why)
             key = wait_key(held, why)
             if key != said:
                 say(f"waiting, {why}")
                 said = key
-            time.sleep(POLL)
+            time.sleep(POLL if max_wait is None else max(0.0, min(POLL, began + max_wait - time.time())))
     finally:
         ticket.unlink(missing_ok=True)
         if not took:
@@ -1124,7 +1161,50 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
     return rc
 
 
-def status() -> int:
+def status_data() -> dict:
+    """What `status` prints, as data, so a caller chooses without reading text. `machine` is the reading the
+    gate used (free_gb, swap_gb, disk_free_pct, disk_free_gb, pressure as normal, raised or critical),
+    `short` the kinds and words that hold a job with no declared need now, `slot` the holder or None,
+    `past_turn` the jobs that gave the slot up and still run, and `waiting` each waiter in the order it goes
+    next. A waiter's `gate` is None when nothing but the turn holds it, else its reason `kinds` (memory,
+    pressure, swap, disk), the gate's `words`, how many `held_s` seconds it has held and the `most_free_gb`
+    seen in that time. `failing` lists the jobs that fail the same way."""
+    m = machine()
+    free, swap, disk, level, disk_gb = m
+    clear_stale()
+    now = time.time()
+    h = holder()
+    out = {
+        "machine": {"free_gb": free, "swap_gb": swap, "disk_free_pct": disk, "disk_free_gb": disk_gb,
+                    "pressure": {1.0: "normal", 2.0: "raised", 4.0: "critical"}.get(level, f"level {level:g}")},
+        "short": {"kinds": sorted({kind for kind, _words in reasons(m)}), "words": short(m)},
+        "slot": None, "past_turn": [], "waiting": [], "failing": [],
+    }
+    if h:
+        out["slot"] = {"chat": h["chat"], "what": h["what"], "pid": h["pid"], "since": h["since"],
+                       "held_min": round(held_min(h), 1), "need_gb": h.get("need_gb"), "past_turn": past_turn(h)}
+    for j in past_jobs():
+        out["past_turn"].append({"chat": j["chat"], "what": j["what"], "pid": j["pid"], "since": j["since"],
+                                 "held_min": round(held_min(j), 1)})
+    for i, w in enumerate(turn_order(waiters()), 1):
+        gate = None
+        if w.get("short"):
+            at = (w.get("held") or {}).get("at")
+            gate = {"kinds": list(w.get("kinds") or []), "words": w["short"],
+                    "held_s": round(now - float(at)) if at else None,
+                    "most_free_gb": (w.get("held") or {}).get("most_free_gb")}
+        out["waiting"].append({"position": i, "chat": w["chat"], "what": w["what"], "pid": w["pid"],
+                               "since": w["since"], "need_gb": w.get("need_gb"), "gate": gate})
+    for f in failing():
+        out["failing"].append({"chat": f["chat"], "what": f["what"], "how": f["how"], "count": f["count"],
+                               "last": f["last"]})
+    return out
+
+
+def status(as_json: bool = False) -> int:
+    if as_json:
+        print(json.dumps(status_data(), indent=2))
+        return 0
     m = machine()
     free, swap, disk, level, disk_gb = m
     rated = {1.0: "normal", 2.0: "raised", 4.0: "critical"}.get(level, f"level {level:g}")
@@ -1164,8 +1244,8 @@ def status() -> int:
 
 
 USAGE = ("usage: claude-ops heavy <chat> <what> [--max-hold <minutes>] [--notify] [--need-gb <GB>] -- <command...> |"
-         " claude-ops heavy hold <chat> <what> --pid <pid> |"
-         " claude-ops heavy release --pid <pid> | claude-ops heavy status")
+         " claude-ops heavy hold <chat> <what> --pid <pid> [--max-wait <seconds>] |"
+         " claude-ops heavy release --pid <pid> | claude-ops heavy status [--json]")
 
 
 _hook_said = [False]
@@ -1221,10 +1301,23 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     for s in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(s, _quit)
-    if argv[:1] == ["status"]:
-        return status()
-    if argv[:1] == ["hold"] and len(argv) == 5 and argv[3] == "--pid":
-        return 0 if wait_turn(argv[1], argv[2], int(argv[4]), *declared_need()) else 1
+    if argv[:1] == ["status"] and argv[1:] in ([], ["--json"]):
+        return status(as_json=bool(argv[1:]))
+    if argv[:1] == ["hold"] and len(argv) in (5, 7) and argv[3] == "--pid" and (len(argv) == 5 or argv[5] == "--max-wait"):
+        try:
+            pid = int(argv[4])
+            wait = float(argv[6]) if len(argv) == 7 else None
+        except ValueError:
+            wait = -1.0
+        if wait is not None and wait < 0:
+            print(USAGE, file=sys.stderr)
+            return 2
+        try:
+            return 0 if wait_turn(argv[1], argv[2], pid, *declared_need(), max_wait=wait) else 1
+        except GaveUp as g:
+            who = (f"the machine's gate ({', '.join(g.kinds)})" if g.gate else "another job holding the slot or the turn")
+            say(f"{argv[2]} gave up after {g.waited:.0f} s, held by {who}: {g.why}")
+            return EXIT_GAVE_UP_GATE if g.gate else EXIT_GAVE_UP_HOLDER
     if argv[:1] == ["release"] and len(argv) == 3 and argv[1] == "--pid":
         release(int(argv[2]))
         return 0

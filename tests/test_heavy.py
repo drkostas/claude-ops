@@ -1179,3 +1179,114 @@ def test_heavy_log_holds_every_line_a_job_says_and_never_stops_the_job(tmp_path)
                         capture_output=True, text=True,
                         env={**env, "HEAVY_LOG": str(tmp_path / "no-such-folder" / "x.log")}).returncode
     assert rc == 0, "a log that cannot be written never stops the job"
+
+
+def _hold(state, what, pid, *extra, **env):
+    return subprocess.run([sys.executable, "-m", "claude_ops.heavy", "hold", "t-chat", what, "--pid", str(pid), *extra],
+                          capture_output=True, text=True, timeout=60,
+                          env={**_heavy_env(state, HEAVY_POLL="0.2"), **env})
+
+
+def test_hold_max_wait_gives_up_on_the_gate_and_withdraws_its_ask(tmp_path):
+    """A job the machine's gate holds stops waiting after --max-wait seconds, exits 3 (the gate, not a holder),
+    names the kind of reason, removes its ticket and tells HEAVY_HOOK `withdrawn`."""
+    state, told = tmp_path / "heavy", tmp_path / "told"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f'#!/bin/bash\necho "$@" >> {told}\n')
+    hook.chmod(0o755)
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        t0 = time.time()
+        r = _hold(state, "short of memory", sleeper.pid, "--max-wait", "1", HEAVY_FAKE_MACHINE="3 2 50",
+                  HEAVY_HOOK=str(hook))
+        assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+        assert time.time() - t0 < 20
+        assert "gave up after" in r.stderr and "gate (memory)" in r.stderr, r.stderr
+        assert not list((state / "queue").glob("*.json")), "its ticket goes with it"
+        events = [ln.split()[0] for ln in told.read_text().splitlines()]
+        assert events == ["asked", "withdrawn"], events
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_hold_max_wait_gives_up_on_a_holder_with_another_code(tmp_path):
+    """With room on the machine and the slot held by another job, the same wait ends with exit 4."""
+    state = tmp_path / "heavy"
+    first, second = subprocess.Popen(["sleep", "60"]), subprocess.Popen(["sleep", "60"])
+    try:
+        assert _hold(state, "first", first.pid).returncode == 0
+        r = _hold(state, "second", second.pid, "--max-wait", "1")
+        assert r.returncode == 4, (r.returncode, r.stdout, r.stderr)
+        assert "holding the slot" in r.stderr and "gate (" not in r.stderr, r.stderr
+        assert not list((state / "queue").glob("*.json"))
+        assert json.loads((state / "slot" / "who.json").read_text())["pid"] == first.pid, "the holder is untouched"
+    finally:
+        for p in (first, second):
+            p.kill()
+            p.wait()
+
+
+def test_hold_max_wait_takes_the_slot_when_there_is_room_and_bad_values_are_usage(tmp_path):
+    state = tmp_path / "heavy"
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        r = _hold(state, "free", sleeper.pid, "--max-wait", "30")
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert json.loads((state / "slot" / "who.json").read_text())["pid"] == sleeper.pid
+        for bad in ("-1", "soon"):
+            assert _hold(state, "x", sleeper.pid, "--max-wait", bad).returncode == 2
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_status_json_gives_the_machine_the_slot_and_each_waiters_reason_kind(tmp_path):
+    """`status --json` is `status` as data. A waiter the gate holds has its reason kinds, the gate's words and the
+    most memory it saw free, a waiter held only by the turn has gate null, and the machine is the reading used."""
+    state = tmp_path / "heavy"
+    holder, waiter = subprocess.Popen(["sleep", "60"]), subprocess.Popen(["sleep", "60"])
+    try:
+        assert _hold(state, "holds", holder.pid, HEAVY_FAKE_MACHINE="20 2 50").returncode == 0
+        gated = subprocess.Popen(
+            [sys.executable, "-m", "claude_ops.heavy", "hold", "t-chat", "needs room", "--pid", str(waiter.pid)],
+            env={**_heavy_env(state, HEAVY_POLL="0.2"), "HEAVY_FAKE_MACHINE": "3 2 50"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            # the waiter is a new python process, so poll for its ticket (a loaded machine starts it slowly)
+            deadline, last = time.time() + 30, ""
+            while True:
+                r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "status", "--json"],
+                                   capture_output=True, text=True, timeout=30,
+                                   env={**_heavy_env(state), "HEAVY_FAKE_MACHINE": "3 2 50"})
+                last = r.stdout + r.stderr
+                assert r.returncode == 0, last
+                data = json.loads(r.stdout)
+                if any(w["gate"] for w in data["waiting"]):
+                    break
+                assert time.time() < deadline, f"no gated waiter within 30 s, last output: {last}"
+                time.sleep(0.2)
+            assert data["machine"] == {"free_gb": 3.0, "swap_gb": 2.0, "disk_free_pct": 50.0, "disk_free_gb": None,
+                                       "pressure": "normal"}, data["machine"]
+            assert data["short"]["kinds"] == ["memory"], data["short"]
+            assert data["slot"]["what"] == "holds" and data["slot"]["pid"] == holder.pid
+            assert data["past_turn"] == [] and data["failing"] == []
+            (w,) = data["waiting"]
+            assert w["position"] == 1 and w["what"] == "needs room" and w["pid"] == waiter.pid
+            assert w["gate"]["kinds"] == ["memory"] and "only 3.0 GB of memory free" in w["gate"]["words"], w
+            assert w["gate"]["most_free_gb"] == 3.0 and w["gate"]["held_s"] >= 0
+        finally:
+            gated.kill()
+            gated.wait()
+        # nothing waits and nothing holds, the reading is roomy
+        for p in (holder, waiter):
+            p.kill()
+            p.wait()
+        r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "status", "--json"], capture_output=True,
+                           text=True, timeout=30, env=_heavy_env(state))
+        data = json.loads(r.stdout)
+        assert data["slot"] is None and data["waiting"] == [] and data["short"] == {"kinds": [], "words": ""}
+    finally:
+        for p in (holder, waiter):
+            p.kill()
+            p.wait()
