@@ -43,6 +43,10 @@ def bash(command, cwd="/"):
     ("on 9 Mar 13:30 it ran", ["13:30"]),
     ("2026-03-09T13:30 then", ["13:30"]),
     ("it stopped at 13:20. Then at 13:31 it ran", ["13:20", "13:31"]),
+    # a forward word far back names who or what, not a deadline
+    ("the run (pid 34662) was ended by its pid at 13:25", ["13:25"]),
+    ("the build was stopped by the user, who read the log at 13:25", ["13:25"]),
+    ("If it is still red at 13:28, it stops.", ["13:28"]),
 ])
 def test_a_time_a_few_minutes_ahead_is_found(text, found):
     assert hits(text) == found
@@ -53,7 +57,10 @@ def test_a_time_a_few_minutes_ahead_is_found(text, found):
     "At 13:10 the list had it.",                        # behind the clock
     "The next try is after 13:49 or at a newer commit.",
     "between 13:20 and 13:30 it waits",
-    "It waits until 13:25. If it is still red at 13:28, it stops.",
+    "It waits until 13:25.",
+    "it waits at the earliest 13:25",
+    "read it by 13:25",
+    "from 13:20 to 13:30 it waits",
     "it is due 13:25",
     "A check is set for 13:30.",
     "at 13:22Z, 13:22 UTC, 13:22 EET, 13:22 -03 and 13:22+02:00",

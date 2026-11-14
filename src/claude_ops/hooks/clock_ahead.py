@@ -75,8 +75,11 @@ DEFAULT_FORWARD = ("after", "until", "till", "by", "from", "due", "next", "at th
                    "set for", "scheduled", "planned", "expected", "estimate", "likely", "roughly", "around",
                    "wakes")
 MIN_MINUTES, MAX_MINUTES = 1.0, 15.0
-#: how far back from a time the same sentence is searched for a forward word or a date
+#: how far back from a time the same sentence is searched for a date, in characters
 LOOKBACK = 80
+#: how many words right before a time are searched for a forward word (a longer phrase widens it, so a phrase
+#: such as "at the earliest" is counted whole)
+FORWARD_WORDS_BACK = 3
 
 TIME = re.compile(r"(?:(?<![\w:.\-/])|(?<=\dT))([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?(?![\w:])")
 #: a zone after a time, past any fractional seconds (`13:22:00.000Z`) and an opening bracket (`13:22 (+02)`)
@@ -104,7 +107,9 @@ class Config:
         self.messages = bool(d.get("messages"))
         self.files = [os.path.abspath(os.path.expanduser(str(f))) for f in d.get("files") or []]
         self.zones = [str(z) for z in (d.get("zones") or DEFAULT_ZONES)]
-        self.forward = [str(w).lower() for w in (d.get("forward_words") or DEFAULT_FORWARD)]
+        # "at" alone before a time says when something happened as often as when it will, so it is never forward
+        self.forward = [w for w in (str(w).lower() for w in (d.get("forward_words") or DEFAULT_FORWARD))
+                        if w.strip() != "at"]
         self.allow = []
         for a in d.get("allow") or []:
             try:
@@ -115,6 +120,7 @@ class Config:
         self.max_minutes = float(d.get("max_minutes", MAX_MINUTES))
         words = "|".join(re.escape(w).replace(r"\ ", r"\s+") for w in self.forward)
         self.forward_re = re.compile(rf"\b(?:{words})\b", re.I) if words else None
+        self.forward_back = max([FORWARD_WORDS_BACK] + [len(w.split()) for w in self.forward])
         zones = "|".join(re.escape(z) for z in self.zones)
         self.zone_re = re.compile(rf"\s?\(?(?:{zones})\b") if zones else None
 
@@ -186,7 +192,8 @@ def ahead(text: str, now: dt.datetime, cfg: Config) -> list[tuple[str, float]]:
         before = clean[start:m.start()]
         ends = list(_SENTENCE_END.finditer(before))
         sentence = before[ends[-1].end():] if ends else before
-        if cfg.forward_re and cfg.forward_re.search(sentence):
+        near = " ".join(sentence.split()[-cfg.forward_back:])
+        if cfg.forward_re and cfg.forward_re.search(near):
             continue
         if _NOT.search(before):
             continue
