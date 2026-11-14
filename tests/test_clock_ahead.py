@@ -46,7 +46,8 @@ def bash(command, cwd="/"):
     # a forward word far back names who or what, not a deadline
     ("the run (pid 34662) was ended by its pid at 13:25", ["13:25"]),
     ("the build was stopped by the user, who read the log at 13:25", ["13:25"]),
-    ("If it is still red at 13:28, it stops.", ["13:28"]),
+    # a sentence-wide word after the time marks nothing before it, so "by" far back still decides
+    ("the run was ended by its pid at 13:25, and tomorrow it runs again", ["13:25"]),
 ])
 def test_a_time_a_few_minutes_ahead_is_found(text, found):
     assert hits(text) == found
@@ -58,6 +59,9 @@ def test_a_time_a_few_minutes_ahead_is_found(text, found):
     "The next try is after 13:49 or at a newer commit.",
     "between 13:20 and 13:30 it waits",
     "It waits until 13:25.",
+    "If it is still red at 13:28, it stops.",
+    "tomorrow the batch runs at 13:25",
+    "the run was ended by its pid, and if it is still red at 13:25 it stops",
     "it waits at the earliest 13:25",
     "read it by 13:25",
     "from 13:20 to 13:30 it waits",
@@ -101,6 +105,8 @@ def test_forward_words_and_zones_come_from_the_configuration():
     assert hits("a check at 13:25", forward_words=["a check at"]) == []
     assert hits("read it until 13:25", forward_words=["after"]) == ["13:25"]
     assert hits("13:25 EET", zones=["UTC"]) == ["13:25"]
+    assert hits("if it is still red at 13:25", sentence_words=[]) == ["13:25"]
+    assert hits("a plan, soon at 13:25", sentence_words=["soon"]) == []
 
 
 def test_the_texts_of_a_tool_call():

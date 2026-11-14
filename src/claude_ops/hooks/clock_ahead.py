@@ -80,6 +80,10 @@ LOOKBACK = 80
 #: how many words right before a time are searched for a forward word (a longer phrase widens it, so a phrase
 #: such as "at the earliest" is counted whole)
 FORWARD_WORDS_BACK = 3
+#: words that mark the whole sentence as a condition, a future or another day, wherever they sit before the
+#: time. Every other forward word (by, from, after) names who or what as often as when, so it counts only
+#: among the last FORWARD_WORDS_BACK words
+SENTENCE_WIDE = ("if", "will", "tomorrow", "tonight")
 
 TIME = re.compile(r"(?:(?<![\w:.\-/])|(?<=\dT))([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?(?![\w:])")
 #: a zone after a time, past any fractional seconds (`13:22:00.000Z`) and an opening bracket (`13:22 (+02)`)
@@ -120,6 +124,9 @@ class Config:
         self.max_minutes = float(d.get("max_minutes", MAX_MINUTES))
         words = "|".join(re.escape(w).replace(r"\ ", r"\s+") for w in self.forward)
         self.forward_re = re.compile(rf"\b(?:{words})\b", re.I) if words else None
+        wide = [str(w).lower() for w in (d["sentence_words"] if "sentence_words" in d else SENTENCE_WIDE)]
+        wide_words = "|".join(re.escape(w).replace(r"\ ", r"\s+") for w in wide if w.strip() and w.strip() != "at")
+        self.wide_re = re.compile(rf"\b(?:{wide_words})\b", re.I) if wide_words else None
         self.forward_back = max([FORWARD_WORDS_BACK] + [len(w.split()) for w in self.forward])
         zones = "|".join(re.escape(z) for z in self.zones)
         self.zone_re = re.compile(rf"\s?\(?(?:{zones})\b") if zones else None
@@ -194,6 +201,8 @@ def ahead(text: str, now: dt.datetime, cfg: Config) -> list[tuple[str, float]]:
         sentence = before[ends[-1].end():] if ends else before
         near = " ".join(sentence.split()[-cfg.forward_back:])
         if cfg.forward_re and cfg.forward_re.search(near):
+            continue
+        if cfg.wide_re and cfg.wide_re.search(sentence):
             continue
         if _NOT.search(before):
             continue
