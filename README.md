@@ -339,6 +339,8 @@ runs `tcpip`, so the fixed port listens again. It needs a key the device already
 claude-ops heavy my-chat "android build" -- ./gradlew assembleDebug   # waits its turn, runs under a cap
 claude-ops heavy my-chat "render" --max-hold 30 --notify -- ./render.sh
 claude-ops heavy status                                              # the machine, the slot, the queue
+claude-ops heavy status --json                                       # the same as data, with each waiter's reason kinds
+claude-ops heavy hold ci "tests" --pid $$ --max-wait 300             # a CI step's slot; exit 3 gate, 4 another job
 ```
 
 Chats on one machine share one slot for builds, emulators, renders, crawls and big scans. A job
