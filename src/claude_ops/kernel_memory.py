@@ -119,14 +119,32 @@ def parse_lsmp(text: str) -> list[Holder]:
     return sorted(holders, key=lambda h: (-h.queued, h.pid))
 
 
+#: how long a command that ran past its timeout has to end after SIGTERM before it gets SIGKILL
+TERM_GRACE_S = 2
+
+
 def _run(cmd: Sequence[str], timeout: float, env: Mapping[str, str] | None) -> str | None:
-    """A command's standard output, or None when it fails, cannot start or runs past the timeout."""
+    """A command's standard output, or None when it fails, cannot start or runs past the timeout.
+
+    A command past its timeout gets SIGTERM first, and SIGKILL only if it is still running
+    TERM_GRACE_S later. sudo passes SIGTERM on to the program it runs, but it cannot pass on a
+    SIGKILL, so killing sudo outright would leave the tool running as root after the reader gave up."""
     try:
-        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout,
-                           env=dict(env) if env is not None else None)
-    except (OSError, subprocess.TimeoutExpired):
+        proc = subprocess.Popen(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=dict(env) if env is not None else None)
+    except OSError:
         return None
-    return r.stdout if r.returncode == 0 else None
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=TERM_GRACE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+        return None
+    return out if proc.returncode == 0 else None
 
 
 Runner = Callable[[Sequence[str], float, "Mapping[str, str] | None"], "str | None"]

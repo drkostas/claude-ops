@@ -1,6 +1,7 @@
 """kernel_memory: wired memory from vm_stat, kernel zones from zprint and queued Mach messages per process
 from lsmp, each read through a runner that may fail or time out. All text invented in the tools' shapes."""
 import sys
+import time
 
 from claude_ops import kernel_memory as km
 
@@ -127,3 +128,26 @@ def test_the_default_runner_gives_none_on_failure_and_on_timeout():
     out = km._run([sys.executable, "-c", "import os; print(os.environ.get('KM_PROBE'))"], 10,
                   {"KM_PROBE": "seen", "PATH": "/usr/bin:/bin"})
     assert out == "seen\n"
+
+
+def test_a_command_past_its_timeout_gets_sigterm_first(tmp_path):
+    # sudo passes SIGTERM on to the program it runs and cannot pass on SIGKILL, so TERM must come first
+    mark = tmp_path / "termed"
+    script = ("import pathlib, signal, sys, time\n"
+              "def bye(*_):\n"
+              f"    pathlib.Path({str(mark)!r}).write_text('term')\n"
+              "    sys.exit(0)\n"
+              "signal.signal(signal.SIGTERM, bye)\n"
+              "time.sleep(30)\n")
+    began = time.monotonic()
+    assert km._run([sys.executable, "-c", script], 2, None) is None
+    assert mark.read_text() == "term"
+    assert time.monotonic() - began < 15
+
+
+def test_a_command_that_ignores_sigterm_is_killed(monkeypatch):
+    monkeypatch.setattr(km, "TERM_GRACE_S", 0.3)
+    script = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)\n"
+    began = time.monotonic()
+    assert km._run([sys.executable, "-c", script], 1, None) is None
+    assert time.monotonic() - began < 15
