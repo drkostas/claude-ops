@@ -49,6 +49,8 @@ def test_a_job_that_queues_itself_is_refused_before_it_waits(tmp_path):
     near.write_text(f"#!/bin/bash\n# my-queue_me.sh and queue_me.sh.bak are other programs\ntouch {ran}\n")
     plain = tmp_path / "plain.sh"
     plain.write_text(f"#!/bin/bash\ntouch {ran}\n")
+    commented = tmp_path / "commented.sh"
+    commented.write_text(f"#!/bin/bash\n# this wraps queue_me.sh, some day\n  # and other_runner too\ntouch {ran}\n")
 
     def heavy(*cmd, **extra):
         r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "job", "--", *cmd],
@@ -64,6 +66,9 @@ def test_a_job_that_queues_itself_is_refused_before_it_waits(tmp_path):
     assert rc == 2 and "it runs other_runner" in out, f"and inside an inline script: {out}"
     rc, out = heavy("bash", str(near))
     assert rc == 0 and ran.exists(), f"a name inside a longer one is another program: {out}"
+    ran.unlink()
+    rc, out = heavy("bash", str(commented))
+    assert rc == 0 and ran.exists(), f"a script that names one only in a comment runs: {out}"
     ran.unlink()
     rc, out = heavy("bash", str(plain))
     assert rc == 0 and ran.exists(), f"a script that names none of them runs: {out}"

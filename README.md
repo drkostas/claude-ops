@@ -352,7 +352,7 @@ saying how the job ended and what it took. A job that fails the same way three t
 (over the cap, at its `--max-hold`, or with one exit code) says so, and `status` lists it, so a
 caller that retries a failing job is noticed. `HEAVY_HOOK` names a command told when a job is
 asked, admitted, released or withdrawn, for a machine whose other work is queued somewhere else.
-With `HEAVY_HOOK_LOG` set, every call that failed is a line in that file. With `HEAVY_SELF_QUEUED` set to program names (a test runner, a deploy script), a job whose command runs one, as a word, in an inline script or in the text of a script it names, is refused with exit 2, since a program that waits in a queue of its own would hold the slot while it waits there. `claude-ops detach` runs it in the background instead.
+With `HEAVY_HOOK_LOG` set, every call that failed is a line in that file. With `HEAVY_SELF_QUEUED` set to program names (a test runner, a deploy script), a job whose command runs one, as a word, in an inline script or in the text of a script it names (its comment lines left out), is refused with exit 2, since a program that waits in a queue of its own would hold the slot while it waits there. `claude-ops detach` runs it in the background instead.
 Every caller must share `HEAVY_DIR`. macOS only.
 
 ## Start chats inside tmux

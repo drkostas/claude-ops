@@ -37,7 +37,7 @@ A JOB THAT QUEUES ITSELF IS REFUSED. A test runner or a deploy script that waits
 holds the slot for as long as it waits there, and every heavy job behind it waits too. HEAVY_SELF_QUEUED
 names such programs (space or comma separated). A job whose command names one, as a word of the command,
 inside an inline script given as one word (bash -c '...'), or in the text of a file the command names
-(a script it runs, read one level down), is refused before it waits: it says which program, and that
+(a script it runs, read one level down, its comment lines left out), is refused before it waits: it says which program, and that
 claude-ops detach runs it in the background instead, and heavy exits 2. A job inside another heavy job
 takes no slot, so it is never refused. Without HEAVY_SELF_QUEUED nothing is refused.
 
@@ -935,8 +935,9 @@ def self_queued() -> list[str]:
 def queues_itself(cmd: list[str], names: list[str] | None = None) -> str | None:
     """The first of `names` (HEAVY_SELF_QUEUED) that `cmd` runs, or None. A name counts as a word of the
     command (its last path part), inside one word that holds an inline script, and in the text of each word
-    that names a file (the first SELF_QUEUED_READ bytes, one level down, and not a binary). A name only
-    counts whole: queue.sh is not in my-queue.sh or queue.sh.bak."""
+    that names a file (the first SELF_QUEUED_READ bytes, one level down, and not a binary), leaving out its
+    comment lines (the first non-space character is #). A name only counts whole: queue.sh is not in
+    my-queue.sh or queue.sh.bak."""
     names = self_queued() if names is None else names
     if not names:
         return None
@@ -956,7 +957,9 @@ def queues_itself(cmd: list[str], names: list[str] | None = None) -> str | None:
             continue
         if b"\0" in head[:1024]:
             continue                        # a program, not a script
-        found = pat.search(head.decode("utf-8", "replace"))
+        # a comment that names a runner runs nothing: a line whose first non-space character is # is left out
+        code = "\n".join(ln for ln in head.decode("utf-8", "replace").splitlines() if not ln.lstrip().startswith("#"))
+        found = pat.search(code)
         if found:
             return found.group(1)
     return None
