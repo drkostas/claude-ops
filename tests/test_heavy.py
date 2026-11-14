@@ -296,7 +296,7 @@ def test_a_job_that_declares_its_need_starts_where_an_undeclared_one_waits(tmp_p
     try:
         for _ in range(100):
             st = heavy("status", HEAVY_FAKE_MACHINE="0.8 0 50").stdout
-            if "asks 1 GB free" in st:
+            if "asks 1 GB free" in st and "(needs 1)" in st:     # the ticket first, then its gate's words
                 break
             time.sleep(0.1)
         assert "t-chat: small part" in st and "asks 1 GB free" in st and "(needs 1)" in st, st
