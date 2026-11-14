@@ -27,7 +27,11 @@ MEM, which counts compressed pages) is added up; past HEAVY_MAX_GB (8) the group
 caller is told why, in its own output. A job that needs more sets HEAVY_MAX_GB on the same line.
 A process the job starts in a group or session of its own (a build tool's worker, a server started
 with setsid) is still the job's: it is found by its parent pid, counted with the group, and ended
-with it. An ended job gets SIGTERM, and SIGKILL after HEAVY_STOP_GRACE seconds (10).
+with it. An ended job gets SIGTERM, and SIGKILL after HEAVY_STOP_GRACE seconds (10). Such a process
+is remembered from each sample, so it still counts after its parent in the group has ended. When the
+job's own process exits, whatever it left running (in its group or outside it) is named in one line
+and ended the same way, before the slot is free. HEAVY_KEEP_STRAYS=1 keeps all of it (a job that means
+to leave a server running), and a comma-separated list of program names keeps those (adb,watchman).
 
 A JOB MAY SAY WHAT IT NEEDS. The gate's HEAVY_MIN_FREE_GB (6) is room for a job nobody has measured, and a
 small job waited behind it on a machine with plenty of room for that job. A job that knows its size
@@ -155,6 +159,7 @@ MAX_GB = _num("HEAVY_MAX_GB", 8)
 POLL = _num("HEAVY_POLL", 5)
 CHECK = _num("HEAVY_CHECK", 10)
 STOP_GRACE = _num("HEAVY_STOP_GRACE", 10)
+KEEP_STRAYS = os.environ.get("HEAVY_KEEP_STRAYS", "").strip()
 TURN_MIN = _num("HEAVY_TURN_MIN", 60)
 #: how long the gate may hold a waiter before it is told what holds it
 OWN_LIMIT_NOTE_MIN = _num("HEAVY_OWN_LIMIT_NOTE_MIN", 60)
@@ -638,14 +643,16 @@ def release(pid: int) -> bool:
     return False
 
 
-def job_tree(pgid: int) -> tuple[list[int], dict[int, int]]:
+def job_tree(pgid: int, table: dict | None = None) -> tuple[list[int], dict[int, int]]:
     """A job's processes: the members of its process group `pgid`, and every descendant of them in a
     group of its own, as pid -> that group. A child that makes a group or a session of its own (a build
     tool's worker process, a server started with setsid) leaves the job's group but is still the job's,
-    found by its parent pid. Both are empty when the process table cannot be read."""
+    found by its parent pid. Both are empty when the process table cannot be read. `table` is one
+    already read (killguard.process_table), so a caller that reads more than this reads it once."""
     if pgid <= 1:
         return [], {}
-    table = killguard.process_table() or {}
+    if table is None:
+        table = killguard.process_table() or {}
     kids: dict[int, list[int]] = {}
     for pid, (ppid, _group, _cmd) in table.items():
         kids.setdefault(ppid, []).append(pid)
@@ -661,12 +668,54 @@ def job_tree(pgid: int) -> tuple[list[int], dict[int, int]]:
     return members, outside
 
 
-def group_gb(pgid: int) -> float:
+def still_running(strays: dict[int, int], table: dict | None = None) -> list[int]:
+    """The pids of `strays` (pid -> the group each was seen in) that still run in that group. A pid that
+    ended and came back as another process is in another group, and is not one of them."""
+    if table is None:
+        table = killguard.process_table() or {}
+    return sorted(pid for pid, group in strays.items() if pid in table and table[pid][1] == group)
+
+
+def group_gb(pgid: int, seen: dict[int, int] | None = None) -> float:
     """The memory of a job in GB: every process in its process group and every descendant of them in a
     group of its own (job_tree), as top's MEM (compressed included), read for each with proc_pid_rusage
-    (footprint.py), far cheaper than asking `top`."""
-    members, outside = job_tree(pgid)
-    return round(total_gb(members + list(outside)), 1)
+    (footprint.py), far cheaper than asking `top`. With `seen` (pid -> group, kept by the caller from one
+    sample to the next), each process found outside the group is added to it, and every one seen before
+    that still runs in its group counts too: a worker whose parent in the job's group has ended is the
+    init process's child, and a walk from the group no longer finds it."""
+    table = killguard.process_table() or {}
+    members, outside = job_tree(pgid, table)
+    if seen is None:
+        return round(total_gb(members + list(outside)), 1)
+    seen.update(outside)
+    return round(total_gb(sorted(set(members) | set(still_running(seen, table)))), 1)
+
+
+def program(pid: int, table: dict) -> str:
+    """The name of the program a process runs (its command's first word, without the path), or ''."""
+    cmd = table.get(pid, (0, 0, ""))[2].split()
+    return Path(cmd[0]).name if cmd else ""
+
+
+def kept(pids: list[int], table: dict, keep: str = "") -> list[int]:
+    """Which of a job's leftover processes HEAVY_KEEP_STRAYS keeps: all of them for 1, the ones whose
+    program is named for a comma-separated list of names (adb,watchman), none when it is unset."""
+    if keep == "1":
+        return list(pids)
+    names = {n.strip() for n in keep.split(",") if n.strip()}
+    return [pid for pid in pids if program(pid, table) in names]
+
+
+def named(pids: list[int], table: dict | None = None) -> str:
+    """Each pid with the start of its command line, the program's path cut to its name, for one line."""
+    if table is None:
+        table = killguard.process_table() or {}
+    said = []
+    for pid in pids:
+        cmd = table.get(pid, (0, 0, ""))[2].split()
+        words = " ".join([Path(cmd[0]).name, *cmd[1:]]) if cmd else "?"
+        said.append(f"{pid} {words[:60]}")
+    return ", ".join(said)
 
 
 def _send(pid: int, sig: int) -> None:
@@ -680,8 +729,7 @@ def signal_strays(strays: dict[int, int], sig: int) -> list[int]:
     """Send `sig` to each of a job's processes outside its group (pid -> the group it was seen in) that
     still runs in that group, and return those pids. A pid that ended and came back as another process
     is in another group, and is left alone. Signal 0 only asks which still run."""
-    table = killguard.process_table() or {}
-    live = sorted(pid for pid, group in strays.items() if pid in table and table[pid][1] == group)
+    live = still_running(strays)
     if live:
         try:
             killguard.kill(live, sig, max_targets=len(live), send=_send)
@@ -891,8 +939,8 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         job = subprocess.Popen(cmd, env={**os.environ, "HEAVY_HELD": str(os.getpid())},
                                start_new_session=True)
 
-    # the job's processes in groups of their own, kept from each stop: once their parent in the job's
-    # group has ended they are the init process's children, and no walk from the group finds them
+    # the job's processes in groups of their own, kept from each sample and each stop: once their parent
+    # in the job's group has ended they are the init process's children, and no walk from the group finds them
     strays: dict[int, int] = {}
 
     def stop(sig=signal.SIGTERM):
@@ -919,6 +967,31 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         if left:
             say(f"ended {len(left)} of {what}'s processes outside its group that outlived SIGTERM: {left}")
 
+    def end_leftovers():
+        """after the job's own process exits: what it left running (its group's other members, and its
+        processes outside the group) still holds memory once the slot is free, so it is named and ended
+        like a job over the cap, SIGTERM and then SIGKILL, except what HEAVY_KEEP_STRAYS keeps"""
+        table = killguard.process_table() or {}
+        members, outside = job_tree(job.pid, table)
+        strays.update(outside)
+        group_of = {**{pid: job.pid for pid in members}, **strays}
+        left = sorted(set(members) | set(still_running(strays, table)))
+        keep = kept(left, table, KEEP_STRAYS)
+        if keep:
+            say(f"{what} left {len(keep)} process(es) running, kept as HEAVY_KEEP_STRAYS={KEEP_STRAYS} asks: "
+                f"{named(keep, table)}")
+        ending = {pid: group_of[pid] for pid in left if pid not in keep}
+        if not ending:
+            return
+        say(f"{what} left {len(ending)} process(es) running when it ended, so they are ended too "
+            f"(HEAVY_KEEP_STRAYS=1, or a list of program names, keeps them): {named(sorted(ending), table)}")
+        signal_strays(ending, signal.SIGTERM)
+        end = time.time() + STOP_GRACE
+        while time.time() < end and signal_strays(ending, 0):
+            time.sleep(0.2)
+        if signal_strays(ending, signal.SIGKILL):
+            say(f"and SIGKILL for what outlived SIGTERM by {STOP_GRACE:g} s")
+
     def forward(signum, _frame):
         stop()
         release(os.getpid())
@@ -931,6 +1004,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         while True:
             try:
                 rc = job.wait(timeout=CHECK)
+                end_leftovers()
                 break
             except subprocess.TimeoutExpired:
                 pass
@@ -939,7 +1013,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 end_job()
                 rc = 124
                 break
-            used = group_gb(job.pid)
+            used = group_gb(job.pid, strays)
             peak = max(peak, used)
             taking(os.getpid(), used, peak)
             if used > MAX_GB:
