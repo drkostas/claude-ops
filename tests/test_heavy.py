@@ -197,6 +197,154 @@ def test_a_running_job_writes_its_sample_and_takes_it_away(tmp_path):
     assert r.returncode == 0 and not (state / "taking" / f"{dead.pid}.json").exists()
 
 
+def _fresh(monkeypatch, tmp_path, **extra):
+    """claude_ops.heavy imported again with its own state folder and these settings, and nothing else of
+    HEAVY_* from the caller's environment."""
+    for k in [k for k in os.environ if k.startswith("HEAVY_")]:
+        monkeypatch.delenv(k)
+    for k, v in {"HEAVY_DIR": str(tmp_path / "heavy"), "HEAVY_POLL": "0.2", **extra}.items():
+        monkeypatch.setenv(k, v)
+    sys.modules.pop("claude_ops.heavy", None)
+    return importlib.import_module("claude_ops.heavy")
+
+
+def test_a_declared_need_is_held_between_its_floor_and_the_cap_and_the_gate_asks_it(monkeypatch, tmp_path):
+    """A job that knows its size says so, and the gate asks that much free memory instead of
+    HEAVY_MIN_FREE_GB. A need below the floor or over the cap is held to them, and one that is not a number
+    is said and left out."""
+    h = _fresh(monkeypatch, tmp_path, HEAVY_MIN_FREE_GB="6", HEAVY_MAX_GB="8")
+    said = []
+    monkeypatch.setattr(h, "say", said.append)
+    assert h.declared_need() == (None, None) and h.gate_gb("sheet render", None) == 6
+    assert h.declared_need("1.5") == (1.5, ("--need-gb", "--need-gb 1.5"))
+    monkeypatch.setenv("HEAVY_NEED_GB", "2")
+    assert h.declared_need() == (2.0, ("HEAVY_NEED_GB", "HEAVY_NEED_GB=2"))
+    assert h.declared_need("1") == (1.0, ("--need-gb", "--need-gb 1")), "--need-gb is read before HEAVY_NEED_GB"
+    assert not said
+    assert h.declared_need("0.1")[0] == 0.5 and "held to 0.5 GB" in said[-1]
+    assert h.declared_need("20")[0] == 8 and "8 GB memory cap" in said[-1]
+    for bad in ("lots", "nan", "inf"):
+        assert h.declared_need(bad) == (None, None) and "is not a number of GB" in said[-1], bad
+    tight = (4.4, 0, 50, 1, 500)
+    assert h.reasons(tight) == [("memory", "only 4.4 GB of memory free (needs 6)")]
+    assert h.reasons(tight, h.gate_gb("sheet render", 1.5)) == [], "a job that needs 1.5 GB has room in 4.4"
+    assert h.reasons(tight, 5) == [("memory", "only 4.4 GB of memory free (needs 5)")]
+    note = h.held_note("only 0.4 GB of memory free (needs 1)", {"memory"}, 61, 0.9, 1.0,
+                       ("--need-gb", "--need-gb 1"))
+    assert ("That is this job's own limit (--need-gb 1)" in note and "against the 1 GB it asks for" in note
+            and "Lower --need-gb to what the job needs" in note), note
+    monkeypatch.setenv("HEAVY_MIN_FREE_GB", "16")
+    note = h.held_note("only 9 GB of memory free (needs 16)", {"memory"}, 61, 9, 16, None)
+    assert "That is this job's own limit (HEAVY_MIN_FREE_GB=16)" in note and "HEAVY_NEED_GB" not in note, note
+
+
+def test_a_peak_over_the_declared_need_is_said_and_the_next_run_of_that_name_waits_for_it(monkeypatch, tmp_path):
+    """A declaration is not trusted blindly. A run that peaks more than a quarter over its need says so in one
+    line, and the next run of that job name asks the larger of its need and that peak, never more than the
+    cap. A run that stays within its need again drops the kept peak."""
+    h = _fresh(monkeypatch, tmp_path, HEAVY_MIN_FREE_GB="6", HEAVY_MAX_GB="8")
+    said = []
+    monkeypatch.setattr(h, "say", said.append)
+    assert h.judge_need("c", "bench parts", None, 3.0) is None and not h.PEAKS.exists(), "no need, no judgement"
+    assert h.judge_need("c", "bench parts", 1.0, 1.25) is None and h.gate_gb("bench parts", 1.0) == 1.0, \
+        "a quarter over is still within"
+    line = h.judge_need("c", "bench parts", 1.0, 1.4)
+    assert line == ("bench parts took 1.4 GB, more than a quarter over the 1 GB it declares, so its next run waits "
+                    "for 1.4 GB free. Declare what it takes, or make it use less.") and said[-1] == line, line
+    assert h.kept_peak("bench parts") == 1.4 and h.gate_gb("bench parts", 1.0) == 1.4
+    assert h.gate_gb("bench parts", 2.0) == 2.0, "a need larger than the kept peak is asked as it is"
+    assert h.gate_gb("bench sheets", 1.0) == 1.0, "a peak is kept per job name"
+    assert h.judge_need("c", "bench parts", 1.0, 0.9) is None and h.kept_peak("bench parts") == 0
+    assert "within the 1 GB it declares, so its next run asks 1 GB again" in said[-1]
+    h.judge_need("c", "bench parts", 1.0, 20.0)
+    assert h.gate_gb("bench parts", 1.0) == 8, "never more than the memory cap"
+
+
+def test_a_job_that_declares_its_need_starts_where_an_undeclared_one_waits(tmp_path):
+    """With 4.4 GB free an undeclared job waits for 6, and the same job declaring 1 GB runs at once, by
+    --need-gb or by HEAVY_NEED_GB. What it declared is kept with what it took, and a waiter's ask shows in
+    status."""
+    state = tmp_path / "heavy"
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+           "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "4.4 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC}
+
+    def heavy(*args, **extra):
+        return subprocess.run([sys.executable, "-m", "claude_ops.heavy", *args], capture_output=True,
+                              text=True, timeout=60, env={**env, **extra})
+
+    undeclared = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "small part", "--",
+                                   "echo", "ran"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                  env=env)
+    try:
+        time.sleep(1.5)
+        assert undeclared.poll() is None, "an undeclared job waits for 6 GB with 4.4 free"
+    finally:
+        undeclared.terminate()
+        out = undeclared.communicate(timeout=30)[0]
+    assert "only 4.4 GB of memory free (needs 6)" in out, out
+    r = heavy("t-chat", "small part", "--need-gb", "1", "--", "echo", "ran-declared")
+    assert r.returncode == 0 and "ran-declared" in r.stdout and "declared need 1 GB" in r.stderr, r.stdout + r.stderr
+    r = heavy("t-chat", "small part", "--", "echo", "ran-by-env", HEAVY_NEED_GB="1")
+    assert r.returncode == 0 and "ran-by-env" in r.stdout, r.stdout + r.stderr
+    done = [json.loads(f.read_text()) for f in (state / "done").glob("*.json")]
+    assert sorted(d["need_gb"] for d in done) == [1.0, 1.0], done
+    r = heavy("t-chat", "odd need", "--need-gb", "-", "--", "echo", "x", HEAVY_FAKE_MACHINE="20 0 50")
+    assert r.returncode == 0 and "is not a number of GB" in r.stderr, "a need that is no number runs as undeclared"
+    waiter = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "small part", "--need-gb", "1",
+                               "--", "echo", "ran"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              env={**env, "HEAVY_FAKE_MACHINE": "0.8 0 50"})
+    try:
+        for _ in range(100):
+            st = heavy("status", HEAVY_FAKE_MACHINE="0.8 0 50").stdout
+            if "asks 1 GB free" in st:
+                break
+            time.sleep(0.1)
+        assert "t-chat: small part" in st and "asks 1 GB free" in st and "(needs 1)" in st, st
+    finally:
+        waiter.terminate()
+        waiter.communicate(timeout=30)
+
+
+def test_a_run_over_its_need_makes_the_next_run_wait_for_its_peak(monkeypatch, tmp_path):
+    """The whole path in one process: a run that declares 1 GB and peaks at 1.4 GB says so and keeps the
+    peak, the next run of that name waits for 1.4 GB, and a run within its need asks the need again. The
+    sampled memory stands in for a real job's, so the figures are the test's own."""
+    import signal
+    h = _fresh(monkeypatch, tmp_path, HEAVY_FAKE_MACHINE="20 0 50", HEAVY_CHECK="0.1")
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    said = []
+    monkeypatch.setattr(h, "say", said.append)
+    peak = [1.4]
+    monkeypatch.setattr(h, "group_gb", lambda _pgid: peak[0])
+    monkeypatch.setattr(h, "peak_of_children", lambda: peak[0])
+    try:
+        assert h.run("t-chat", "invented sheet job", ["sleep", "0.4"], need_gb="1") == 0
+        assert any("invented sheet job took 1.4 GB, more than a quarter over the 1 GB it declares" in x
+                   for x in said), said
+        assert h.gate_gb("invented sheet job", 1.0) == 1.4
+        monkeypatch.setenv("HEAVY_FAKE_MACHINE", "1.2 0 50")
+        held = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "invented sheet job",
+                                 "--need-gb", "1", "--", "echo", "ran"], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                env={**os.environ, "PYTHONPATH": SRC})
+        try:
+            time.sleep(1.5)
+            assert held.poll() is None, "with 1.2 GB free the next run waits for the 1.4 GB its last run took"
+        finally:
+            held.terminate()
+            out = held.communicate(timeout=30)[0]
+        assert ("took 1.4 GB on its last run, over the 1 GB it declares, so it waits for 1.4 GB free" in out
+                and "(needs 1.4)" in out), out
+        monkeypatch.setenv("HEAVY_FAKE_MACHINE", "20 0 50")
+        peak[0] = 0.9
+        assert h.run("t-chat", "invented sheet job", ["true"], need_gb="1") == 0
+        assert h.kept_peak("invented sheet job") == 0 and h.gate_gb("invented sheet job", 1.0) == 1.0
+    finally:
+        for s, f in handlers.items():
+            signal.signal(s, f)
+        sys.modules.pop("claude_ops.heavy", None)
+
+
 def test_heavy_queue(monkeypatch):
     failures = []
     for k in [k for k in os.environ if k.startswith("HEAVY_")]:
