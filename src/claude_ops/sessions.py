@@ -276,6 +276,86 @@ def deep_search(text: str, root: Path = ROOT, *, env: Mapping[str, str] | None =
     return hits
 
 
+#: how far a transcript's records may be out of time order when it is read backwards: subagents and
+#: parallel tool calls append slightly out of order, so reading stops only this far before the window
+CALLS_SLACK_S = 300.0
+
+
+def _records_back(path: Path, chunk: int = 1 << 16):
+    """Each JSON record of a transcript, newest first, read backwards in chunks of `chunk` bytes, so a
+    long transcript is never read whole. A line that is not JSON is skipped."""
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return
+    with fh:
+        fh.seek(0, os.SEEK_END)
+        pos, tail = fh.tell(), b""
+        while pos > 0:
+            step = min(chunk, pos)
+            pos -= step
+            fh.seek(pos)
+            block = fh.read(step) + tail
+            lines = block.split(b"\n")
+            tail = lines[0] if pos > 0 else b""
+            for raw in reversed(lines if pos == 0 else lines[1:]):
+                rec = _record(raw)
+                if rec is not None:
+                    yield rec
+
+
+def _when(rec: dict) -> float | None:
+    """A record's timestamp as seconds since the epoch, or None."""
+    ts = rec.get("timestamp")
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def calls_near(at: float, words=(), root: Path = ROOT, *, before: float = 10.0, after: float = 1.0,
+               chunk: int = 1 << 16) -> list[dict]:
+    """The tool calls made from `before` seconds before `at` to `after` seconds after it, in every
+    transcript under `root` (subagents' included), whose input holds every one of `words` in any case.
+    Newest first, each {"session", "folder", "time", "tool", "input"}.
+
+    A macOS consent prompt names only the process responsible for asking, often the terminal or the
+    multiplexer every session runs in, and the program that asked has usually exited. Its request time
+    is exact, though, so the session that raised it is the one whose tool call ran just before. Only
+    transcripts changed since the window began are read, and each one backwards from its end until its
+    records are older than the window (with CALLS_SLACK_S for records out of order)."""
+    lo, hi = at - before, at + after
+    want = [w.lower() for w in words if w]
+    found = []
+    paths = list(root.glob("*/*.jsonl")) + list(root.glob("*/*/subagents/*.jsonl"))
+    for path in paths:
+        try:
+            if path.stat().st_mtime < lo:
+                continue
+        except OSError:
+            continue
+        session = path.parent.parent.name if path.parent.name == "subagents" else path.stem
+        for rec in _records_back(path, chunk):
+            t = _when(rec)
+            if t is None:
+                continue
+            if t < lo - CALLS_SLACK_S:
+                break
+            if not lo <= t <= hi or rec.get("type") != "assistant":
+                continue
+            content = (rec.get("message") or {}).get("content")
+            for item in content if isinstance(content, list) else []:
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
+                text = json.dumps(item.get("input"), ensure_ascii=False).lower()
+                if all(w in text for w in want):
+                    found.append({"session": session, "folder": rec.get("cwd"), "time": t,
+                                  "tool": item.get("name"), "input": item.get("input")})
+    return sorted(found, key=lambda c: c["time"], reverse=True)
+
+
 def resume_command(e: dict) -> str:
     cwd = (e.get("cwd") or "~").replace(str(Path.home()), "~")
     return f"cd {cwd} && claude --resume {e['id']}"
