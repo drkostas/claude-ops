@@ -1,5 +1,7 @@
 """kernel_memory: wired memory from vm_stat, kernel zones from zprint and queued Mach messages per process
 from lsmp, each read through a runner that may fail or time out. All text invented in the tools' shapes."""
+import os
+import signal
 import sys
 import time
 
@@ -151,3 +153,22 @@ def test_a_command_that_ignores_sigterm_is_killed(monkeypatch):
     began = time.monotonic()
     assert km._run([sys.executable, "-c", script], 1, None) is None
     assert time.monotonic() - began < 15
+
+
+def test_a_child_that_outlives_the_command_does_not_hold_the_reader(monkeypatch, tmp_path):
+    # the command ends at SIGTERM, its child ignores SIGTERM and keeps the output pipe open, as a root tool
+    # that ignored the SIGTERM sudo passed on would after sudo itself is killed
+    monkeypatch.setattr(km, "TERM_GRACE_S", 0.3)
+    pidfile = tmp_path / "child.pid"
+    child = ("import os, pathlib, signal, time\n"
+             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+             f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+             "time.sleep(60)\n")
+    parent = f"import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', {child!r}])\ntime.sleep(60)\n"
+    began = time.monotonic()
+    try:
+        assert km._run([sys.executable, "-c", parent], 2, None) is None
+        assert time.monotonic() - began < 15
+    finally:
+        if pidfile.exists():
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)

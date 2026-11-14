@@ -128,7 +128,9 @@ def _run(cmd: Sequence[str], timeout: float, env: Mapping[str, str] | None) -> s
 
     A command past its timeout gets SIGTERM first, and SIGKILL only if it is still running
     TERM_GRACE_S later. sudo passes SIGTERM on to the program it runs, but it cannot pass on a
-    SIGKILL, so killing sudo outright would leave the tool running as root after the reader gave up."""
+    SIGKILL, so killing sudo outright would leave the tool running as root after the reader gave up.
+    The wait after SIGKILL has the same limit, because a child that ignored SIGTERM can outlive the
+    command and hold its output open."""
     try:
         proc = subprocess.Popen(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                 env=dict(env) if env is not None else None)
@@ -142,7 +144,15 @@ def _run(cmd: Sequence[str], timeout: float, env: Mapping[str, str] | None) -> s
             proc.communicate(timeout=TERM_GRACE_S)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
+            try:
+                proc.communicate(timeout=TERM_GRACE_S)
+            except subprocess.TimeoutExpired:
+                # a child of the command that ignored SIGTERM outlives it and still holds the pipes, so the
+                # reader stops waiting for their end here, not for as long as that child runs
+                for pipe in (proc.stdout, proc.stderr):
+                    if pipe is not None:
+                        pipe.close()
+                proc.wait()
         return None
     return out if proc.returncode == 0 else None
 
