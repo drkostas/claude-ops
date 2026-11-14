@@ -746,3 +746,107 @@ def test_heavy_hook(monkeypatch):
 
     assert not failures, "\n".join(failures)
 
+
+
+# --- a job's children in a group or session of their own ----------------------------------------------
+# A build tool can start its worker in a session of its own, so the worker leaves the job's process group.
+# The stand-in here is a python child that calls setsid under a bash job that waits for it.
+_OWN_SESSION = ("import os, signal, sys, time\n"
+                "if sys.argv[2] == 'deaf':\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "os.setsid()\n"
+                "b = bytearray(int(float(sys.argv[3]) * 1024 ** 3)); b[::4096] = b'x' * len(b[::4096])\n"
+                "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)")
+
+
+def _job_with_own_session_child(pidfile, deaf="hears", gb="0"):
+    """bash -c that starts the setsid child and waits for it, as argv for a job"""
+    return ["bash", "-c", '"$4" -c "$0" "$1" "$2" "$3" & wait', _OWN_SESSION, str(pidfile), deaf, gb,
+            sys.executable]
+
+
+def _pid_in(pidfile, timeout=20.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pidfile.exists() and pidfile.read_text().strip():
+            return int(pidfile.read_text())
+        time.sleep(0.05)
+    raise AssertionError(f"the child never wrote {pidfile}")
+
+
+def _gone(pid, timeout=10.0):
+    """the process has ended (a zombie waiting for the init process to reap it counts as ended)"""
+    end = time.time() + timeout
+    while time.time() < end:
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        if not stat or stat.startswith("Z"):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _kill(pid):
+    try:
+        os.kill(pid, 9)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _heavy_env(state, **extra):
+    return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+            "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_CHECK": "0.2", "PYTHONPATH": SRC, **extra}
+
+
+def test_a_child_in_a_session_of_its_own_is_still_the_jobs(tmp_path):
+    """job_tree finds a child that left the job's process group by its parent pid, with the group it is in."""
+    import claude_ops.heavy as h
+    pidfile = tmp_path / "child.pid"
+    job = subprocess.Popen(_job_with_own_session_child(pidfile), start_new_session=True)
+    stray = None
+    try:
+        stray = _pid_in(pidfile)
+        members, outside = h.job_tree(job.pid)
+        assert job.pid in members and stray not in members, (members, outside)
+        assert outside.get(stray) == stray, f"a session leader leads a group of its own: {outside}"
+        assert h.job_tree(1) == ([], {}), "the init process's group is never a job"
+    finally:
+        os.killpg(job.pid, 9)
+        job.wait()
+        if stray:
+            _kill(stray)
+
+
+def test_a_job_ended_at_its_max_hold_takes_its_children_in_their_own_session_with_it(tmp_path):
+    """The job's group gets SIGTERM, and so does its child in a session of its own. A child that ignores
+    SIGTERM gets SIGKILL after HEAVY_STOP_GRACE, and heavy says so."""
+    pidfile = tmp_path / "child.pid"
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "worker build", "--max-hold", "0.03",
+                        "--", *_job_with_own_session_child(pidfile, deaf="deaf")],
+                       capture_output=True, text=True, timeout=90,
+                       env=_heavy_env(tmp_path / "heavy", HEAVY_STOP_GRACE="1"))
+    stray = _pid_in(pidfile, timeout=1)
+    try:
+        assert r.returncode == 124 and "ENDED worker build" in r.stderr, r.stdout + r.stderr
+        assert _gone(stray), f"the child in its own session outlived the job: {stray}"
+        assert f"ended 1 of worker build's processes outside its group that outlived SIGTERM: [{stray}]" in r.stderr, \
+            r.stderr
+    finally:
+        _kill(stray)
+
+
+def test_the_memory_cap_counts_and_ends_a_child_in_a_session_of_its_own(tmp_path):
+    """A job whose own group holds almost nothing, with a child in a session of its own holding 0.4 GB, passes a
+    0.2 GB cap and is ended, child and all. Before job_tree the cap saw only the group's few MB."""
+    if sys.platform != "darwin":        # the cap reads proc_pid_rusage
+        return
+    pidfile = tmp_path / "child.pid"
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "worker build", "--",
+                        *_job_with_own_session_child(pidfile, gb="0.4")],
+                       capture_output=True, text=True, timeout=90,
+                       env=_heavy_env(tmp_path / "heavy", HEAVY_MAX_GB="0.2", HEAVY_STOP_GRACE="2"))
+    stray = _pid_in(pidfile, timeout=1)
+    try:
+        assert r.returncode == 137 and "ENDED worker build" in r.stderr and "over the 0.2 GB cap" in r.stderr, \
+            r.stdout + r.stderr
+        assert _gone(stray), f"the child in its own session outlived the cap: {stray}"
+    finally:
+        _kill(stray)
