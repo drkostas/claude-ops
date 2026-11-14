@@ -257,3 +257,42 @@ def test_live_folders_max_age_runs_the_process_list_once(monkeypatch):
     assert runs == ["pgrep", "lsof"]
     sessions.live_folders()
     assert runs == ["pgrep", "lsof", "pgrep", "lsof"]
+
+
+def _call(t, command, cwd="/work/a", tool="Bash"):
+    return {"type": "assistant", "cwd": cwd, "timestamp": datetime.utcfromtimestamp(t).isoformat() + "Z",
+            "message": {"content": [{"type": "tool_use", "name": tool, "input": {"command": command}}]}}
+
+
+def _write(path, records, mtime=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records) + "not json\n")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+
+
+def test_calls_near_finds_the_call_seconds_before_a_request(tmp_path):
+    at = 1_800_000_000.0
+    pad = [{"type": "user", "timestamp": datetime.utcfromtimestamp(at - 30).isoformat() + "Z",
+            "message": {"content": "x" * 200}}] * 20
+    _write(tmp_path / "-work-a" / "s1.jsonl",
+           [_call(at - 60, "osascript -e 'tell application \"Finder\" to get bounds'"), *pad,
+            _call(at - 2, "osascript -e 'tell application \"Finder\" to get bounds of window of desktop'"),
+            _call(at - 1, "ls", tool="Read"), _call(at + 5, "osascript Finder late")], mtime=at + 5)
+    _write(tmp_path / "-work-a" / "s1" / "subagents" / "agent-x.jsonl",
+           [_call(at - 4, "OSASCRIPT finder from a helper", cwd="/work/a/helper")], mtime=at - 4)
+    _write(tmp_path / "-work-b" / "s2.jsonl", [_call(at - 3, "osascript Finder")], mtime=at - 3600)
+    got = sessions.calls_near(at, ["osascript", "Finder"], tmp_path, chunk=64)
+    # newest first; the call a minute before, the one after the window and a call without the words are left out
+    assert [(c["session"], c["time"], c["tool"], c["folder"]) for c in got] == [
+        ("s1", at - 2, "Bash", "/work/a"), ("s1", at - 4, "Bash", "/work/a/helper")]
+    assert "get bounds of window of desktop" in got[0]["input"]["command"]
+    # a transcript not changed since the window began is never read
+    assert all(c["session"] != "s2" for c in got)
+
+
+def test_calls_near_reads_backwards_across_chunks(tmp_path):
+    p = tmp_path / "-w" / "s.jsonl"
+    _write(p, [{"n": i} for i in range(50)])
+    assert [r["n"] for r in sessions._records_back(p, chunk=7)] == list(range(49, -1, -1))
+    assert sessions.calls_near(1_800_000_000.0, ["x"], tmp_path / "missing") == []
