@@ -230,29 +230,61 @@ def test_the_collector_gives_up_before_the_exporter_does():
     assert meter.COLLECT_WAIT_S < exporter_s, "a batch saved after the exporter gave up is sent again and counted twice"
 
 
-def test_a_lock_met_while_connecting_answers_503(tmp_path, monkeypatch):
+def test_a_store_locked_at_start_is_set_up_once_it_is_free_and_then_saves(tmp_path, monkeypatch, capsys):
     db = tmp_path / "m.sqlite3"
-    made = {}
+    real, tries = meter.connect, []
 
-    from http.server import ThreadingHTTPServer
+    def locked_twice(*a, **kw):
+        tries.append(1)
+        if len(tries) <= 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*a, **kw)
+    monkeypatch.setattr(meter, "connect", locked_twice)
+    monkeypatch.setattr(meter, "_pause", lambda s: None)
+    server = _collector(db)
+    assert len(tries) == 3, "the schema is set up before the port opens, trying again while the store is locked"
+    assert capsys.readouterr().err.count("the store is locked by another writer") == 1, "said once, not each try"
+    assert _post(server, json.dumps(metrics(1.0)).encode()) == (200, None)
+    assert len(tries) == 3, "a request does not set the store up again"
+    server.shutdown()
+    assert rows(db, "SELECT kind, value FROM telemetry") == [("cacheRead", 1.0)]
 
-    def factory(addr, handler):
-        made["server"] = ThreadingHTTPServer((addr[0], 0), handler)
-        return made["server"]
 
-    def locked(*a, **kw):
-        raise sqlite3.OperationalError("database is locked")
-    monkeypatch.setattr(meter, "connect", locked)
-    threading.Thread(target=meter.serve, kwargs={"db": db, "server": factory}, daemon=True).start()
-    while "server" not in made:
-        time.sleep(0.01)
-    req = urllib.request.Request(f"http://127.0.0.1:{made['server'].server_address[1]}/v1/metrics",
-                                 data=json.dumps(metrics(1.0)).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    with pytest.raises(urllib.error.HTTPError) as got:
-        urllib.request.urlopen(req, timeout=5)
-    made["server"].shutdown()
-    assert got.value.code == 503
+def test_the_503_comes_inside_the_deadline_even_when_every_pause_runs_long(tmp_path, monkeypatch):
+    db = tmp_path / "m.sqlite3"
+    meter.connect(db).close()
+    monkeypatch.setattr(meter, "COLLECT_WAIT_S", 0.5)
+    # a loaded machine: each pause takes three times what it asked for, as SQLite's own busy wait did
+    monkeypatch.setattr(meter, "_pause", lambda s: time.sleep(3 * s))
+    server = _collector(db)
+    holder = sqlite3.connect(db)
+    holder.execute("BEGIN IMMEDIATE")
+    began = time.monotonic()
+    got = _post(server, json.dumps(metrics(1.0)).encode())
+    took = time.monotonic() - began
+    holder.rollback()
+    holder.close()
+    assert got == (503, "0")
+    assert took < 0.5 + 3 * meter.WRITE_RETRY_S + 0.5, f"answered after {took:.2f} s, past the 0.5 s deadline"
+    assert _post(server, json.dumps(metrics(2.0)).encode()) == (200, None), "and saves once the store is free"
+    server.shutdown()
+    assert rows(db, "SELECT kind, value FROM telemetry") == [("cacheRead", 2.0)]
+
+
+def test_open_writer_holds_the_lock_or_gives_up_at_its_deadline(tmp_path):
+    db = tmp_path / "m.sqlite3"
+    meter.connect(db).close()
+    conn = meter.open_writer(db, deadline=time.monotonic() + 1)
+    assert conn is not None and conn.in_transaction, "a free store gives a connection inside BEGIN IMMEDIATE"
+    began = time.monotonic()
+    assert meter.open_writer(db, deadline=time.monotonic() + 0.2) is None, "a second writer waits, then gives up"
+    assert time.monotonic() - began < 0.2 + 0.5
+    conn.execute("ROLLBACK")
+    conn.close()
+    late = meter.open_writer(db, deadline=time.monotonic() - 1)
+    assert late is not None, "a free store is taken even with the deadline passed"
+    late.execute("ROLLBACK")
+    late.close()
 
 
 def _collector(db):
