@@ -98,7 +98,8 @@ def test_a_waiter_beside_a_job_past_its_turn_counts_the_room_that_job_may_take_a
         sample = state / "taking" / f"{holder.pid}.json"
         sample.write_text(json.dumps({"now_gb": 2.0, "peak_gb": 9.0, "at": time.time()}))
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
-               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC}
+               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC,
+               "HEAVY_LOG": str(tmp_path / "heavy.log")}
         waiter = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "second", "--", "echo", "ran"],
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         time.sleep(2)
@@ -108,6 +109,10 @@ def test_a_waiter_beside_a_job_past_its_turn_counts_the_room_that_job_may_take_a
         assert ("waiting, only 3 GB of memory free once s-chat: big build, past its turn, takes back the 7 GB "
                 "under its peak of 9 GB (needs 6)") in out, out
         assert waiter.returncode == 0 and "ran" in out and "past its turn" in out, out
+        # ⭐ the same line is in HEAVY_LOG, with the waiter's pid, so a reader of one file sees every job's take-back
+        logged = (tmp_path / "heavy.log").read_text().splitlines()
+        assert any(f"pid={waiter.pid} waiting, only 3 GB of memory free once s-chat: big build, past its turn, "
+                   "takes back the 7 GB" in ln for ln in logged), logged
         # without a sample (a job from before samples were written) it starts beside it as before
         sample.unlink()
         (state / "slot").mkdir(exist_ok=True)
@@ -1093,3 +1098,34 @@ def test_what_a_job_leaves_running_is_named_and_ended_unless_it_asks_to_keep_it(
         _kill(sleeper)
     finally:
         _kill(worker)
+
+
+def test_heavy_log_holds_every_line_a_job_says_and_never_stops_the_job(tmp_path):
+    """Each job's waits and decisions went only to its own stderr, so the machine's could be read only job by
+    job. With HEAVY_LOG set every line a job says is also one line in that file, with the date, the time and
+    the pid, and a log that cannot be written leaves the job alone."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+           "HEAVY_DIR": str(tmp_path / "heavy"), "HEAVY_FAKE_MACHINE": "50 0 50", "PYTHONPATH": SRC}
+    log = tmp_path / "heavy.log"
+    held = tmp_path / "heavy" / "slot"
+    held.mkdir(parents=True)
+    holder = subprocess.Popen(["sleep", "60"])
+    try:
+        (held / "who.json").write_text(json.dumps(
+            {"chat": "a-chat", "what": "first", "pid": holder.pid, "since": "03:21", "at": time.time()}))
+        waiter = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "b-chat", "second", "--", "true"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                  env={**env, "HEAVY_LOG": str(log), "HEAVY_POLL": "0.2"})
+        time.sleep(2)
+        holder.terminate()
+        holder.wait(timeout=10)
+        out = waiter.communicate(timeout=30)[0]
+    finally:
+        holder.kill()
+    lines = log.read_text().splitlines() if log.exists() else []
+    assert any(f"pid={waiter.pid} waiting, the slot is held by a-chat: first" in ln for ln in lines), (lines, out)
+    assert all(ln[:4].isdigit() and "T" in ln.split()[0] for ln in lines), f"each line starts with its date and time: {lines}"
+    rc = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "b-chat", "third", "--", "true"],
+                        capture_output=True, text=True,
+                        env={**env, "HEAVY_LOG": str(tmp_path / "no-such-folder" / "x.log")}).returncode
+    assert rc == 0, "a log that cannot be written never stops the job"

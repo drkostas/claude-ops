@@ -98,6 +98,10 @@ A hook that timed out was ended before it could write anything, and a job's own 
 nowhere, so with HEAVY_HOOK_LOG set every failure is also one line in that file: the time, the event,
 the chat, the job, the pid and why.
 
+ONE LOG FOR THE MACHINE. Each job says its waits and decisions on its own stderr, which ends in that
+job's log. With HEAVY_LOG set, every such line is also appended to that one file with the date, the
+time and the pid, so a reader (or a check that waits for a line) finds every job's in one place.
+
 The state lives in HEAVY_DIR (/tmp/claude-ops-heavy). Every caller on the machine must use the same.
 macOS only: the memory readings come from vm_stat, sysctl and proc_pid_rusage.
 """
@@ -178,6 +182,22 @@ TOOLS_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin"}
 
 def say(msg: str) -> None:
     print(f"{time.strftime('%H:%M')} heavy: {msg}", file=sys.stderr, flush=True)
+    log_line(msg)
+
+
+def log_line(msg: str) -> None:
+    """One line in HEAVY_LOG, when it is set, for every line a job says: the date and time, the pid that
+    said it and the words. Each job's own output goes to its own log or nowhere, so without it the
+    machine's waits and decisions could only be read job by job. A log that cannot be written is left
+    alone, since the log only tells."""
+    path = os.environ.get("HEAVY_LOG")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} pid={os.getpid()} {msg}\n")
+    except OSError:
+        pass
 
 
 def _out(*cmd: str) -> str:
