@@ -37,7 +37,9 @@ HOOKS = {
                    {"matcher": "Bash|mcp__github__.*",
                     "hooks": [{"type": "command", "command": "claude-ops hook guarded-labels"}]},
                    {"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
-                    "hooks": [{"type": "command", "command": "claude-ops hook kept-out"}]}],
+                    "hooks": [{"type": "command", "command": "claude-ops hook kept-out"}]},
+                   {"matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
+                    "hooks": [{"type": "command", "command": "claude-ops hook clock-ahead"}]}],
 }
 
 
@@ -166,6 +168,9 @@ def cmd_hook(a) -> int:
     if a.name == "kept-out":
         from .hooks import kept_out
         return kept_out.main([])
+    if a.name == "clock-ahead":
+        from .hooks import clock_ahead
+        return clock_ahead.main([])
     if a.name == "mail-guard":
         from .hooks import mail_guard
         return mail_guard.main([])
@@ -480,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
                                     "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "mail-guard", "wide-kill",
+                                    "clock-ahead",
                                     "rtk-rewrite", "chain"))
     s.set_defaults(func=cmd_hook)
 
