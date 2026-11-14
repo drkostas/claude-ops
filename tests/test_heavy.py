@@ -1253,11 +1253,19 @@ def test_status_json_gives_the_machine_the_slot_and_each_waiters_reason_kind(tmp
             env={**_heavy_env(state, HEAVY_POLL="0.2"), "HEAVY_FAKE_MACHINE": "3 2 50"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            time.sleep(1.5)
-            r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "status", "--json"], capture_output=True,
-                               text=True, timeout=30, env={**_heavy_env(state), "HEAVY_FAKE_MACHINE": "3 2 50"})
-            assert r.returncode == 0, r.stderr
-            data = json.loads(r.stdout)
+            # the waiter is a new python process, so poll for its ticket (a loaded machine starts it slowly)
+            deadline, last = time.time() + 30, ""
+            while True:
+                r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "status", "--json"],
+                                   capture_output=True, text=True, timeout=30,
+                                   env={**_heavy_env(state), "HEAVY_FAKE_MACHINE": "3 2 50"})
+                last = r.stdout + r.stderr
+                assert r.returncode == 0, last
+                data = json.loads(r.stdout)
+                if any(w["gate"] for w in data["waiting"]):
+                    break
+                assert time.time() < deadline, f"no gated waiter within 30 s, last output: {last}"
+                time.sleep(0.2)
             assert data["machine"] == {"free_gb": 3.0, "swap_gb": 2.0, "disk_free_pct": 50.0, "disk_free_gb": None,
                                        "pressure": "normal"}, data["machine"]
             assert data["short"]["kinds"] == ["memory"], data["short"]
