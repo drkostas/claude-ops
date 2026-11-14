@@ -34,6 +34,51 @@ def test_a_slot_given_back_while_it_is_looked_at_is_no_error(monkeypatch, tmp_pa
     assert not slot.exists()
 
 
+def test_a_job_that_queues_itself_is_refused_before_it_waits(tmp_path):
+    """A job that ran a test runner which waits in a queue of its own held the slot while it waited there, past
+    its turn, and every heavy job behind it waited too. With HEAVY_SELF_QUEUED, a command that names such a
+    program, as a word, in an inline script or in a script it runs, is refused before it waits."""
+    state = tmp_path / "heavy"
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+           "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "50 0 50", "PYTHONPATH": SRC,
+           "HEAVY_SELF_QUEUED": "queue_me.sh, other_runner"}
+    ran = tmp_path / "ran"
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_text(f"#!/bin/bash\n# runs the changed suites\nbash ./queue_me.sh --changed\ntouch {ran}\n")
+    near = tmp_path / "near.sh"
+    near.write_text(f"#!/bin/bash\n# my-queue_me.sh and queue_me.sh.bak are other programs\ntouch {ran}\n")
+    plain = tmp_path / "plain.sh"
+    plain.write_text(f"#!/bin/bash\ntouch {ran}\n")
+
+    def heavy(*cmd, **extra):
+        r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "job", "--", *cmd],
+                           capture_output=True, text=True, timeout=60, env={**env, **extra})
+        return r.returncode, r.stdout + r.stderr
+
+    rc, out = heavy("bash", str(wrapper))
+    assert rc == 2 and "REFUSED job: it runs queue_me.sh" in out and "run it with claude-ops detach" in out, out
+    assert not ran.exists() and not (state / "slot").exists(), f"nothing ran and no slot was taken: {out}"
+    rc, out = heavy(str(tmp_path / "other_runner"), "--all")
+    assert rc == 2 and "it runs other_runner" in out, f"the program itself, by its path: {out}"
+    rc, out = heavy("bash", "-c", "cd /tmp && other_runner --all")
+    assert rc == 2 and "it runs other_runner" in out, f"and inside an inline script: {out}"
+    rc, out = heavy("bash", str(near))
+    assert rc == 0 and ran.exists(), f"a name inside a longer one is another program: {out}"
+    ran.unlink()
+    rc, out = heavy("bash", str(plain))
+    assert rc == 0 and ran.exists(), f"a script that names none of them runs: {out}"
+    ran.unlink()
+    rc, out = heavy("bash", str(wrapper), HEAVY_SELF_QUEUED="")
+    assert rc == 0 and ran.exists(), f"without HEAVY_SELF_QUEUED nothing is refused: {out}"
+    ran.unlink()
+    # a job inside another heavy job takes no slot, so it may run one
+    (state / "slot").mkdir(parents=True, exist_ok=True)
+    (state / "slot" / "who.json").write_text(json.dumps(
+        {"chat": "o-chat", "what": "outer", "pid": os.getpid(), "since": "03:21", "at": time.time()}))
+    rc, out = heavy("bash", str(wrapper), HEAVY_HELD=str(os.getpid()))
+    assert rc == 0 and ran.exists() and "REFUSED" not in out, f"inside a holder it runs: {out}"
+
+
 def test_a_held_job_says_a_new_waiting_line_only_when_the_kinds_of_reason_change(monkeypatch, tmp_path):
     """The gate's words carry figures that move on almost every poll, and a job the gate held for
     hours printed a waiting line each time one moved. A held job now says a line when a kind of reason

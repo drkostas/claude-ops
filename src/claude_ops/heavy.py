@@ -33,6 +33,14 @@ job's own process exits, whatever it left running (in its group or outside it) i
 and ended the same way, before the slot is free. HEAVY_KEEP_STRAYS=1 keeps all of it (a job that means
 to leave a server running), and a comma-separated list of program names keeps those (adb,watchman).
 
+A JOB THAT QUEUES ITSELF IS REFUSED. A test runner or a deploy script that waits in a queue of its own
+holds the slot for as long as it waits there, and every heavy job behind it waits too. HEAVY_SELF_QUEUED
+names such programs (space or comma separated). A job whose command names one, as a word of the command,
+inside an inline script given as one word (bash -c '...'), or in the text of a file the command names
+(a script it runs, read one level down), is refused before it waits: it says which program, and that
+claude-ops detach runs it in the background instead, and heavy exits 2. A job inside another heavy job
+takes no slot, so it is never refused. Without HEAVY_SELF_QUEUED nothing is refused.
+
 A JOB MAY SAY WHAT IT NEEDS. The gate's HEAVY_MIN_FREE_GB (6) is room for a job nobody has measured, and a
 small job waited behind it on a machine with plenty of room for that job. A job that knows its size
 declares it with --need-gb <GB> or HEAVY_NEED_GB, held between NEED_FLOOR_GB (0.5) and HEAVY_MAX_GB, and
@@ -164,6 +172,8 @@ POLL = _num("HEAVY_POLL", 5)
 CHECK = _num("HEAVY_CHECK", 10)
 STOP_GRACE = _num("HEAVY_STOP_GRACE", 10)
 KEEP_STRAYS = os.environ.get("HEAVY_KEEP_STRAYS", "").strip()
+#: how much of a script heavy reads for the names of HEAVY_SELF_QUEUED (queues_itself)
+SELF_QUEUED_READ = 262144
 TURN_MIN = _num("HEAVY_TURN_MIN", 60)
 #: how long the gate may hold a waiter before it is told what holds it
 OWN_LIMIT_NOTE_MIN = _num("HEAVY_OWN_LIMIT_NOTE_MIN", 60)
@@ -917,6 +927,41 @@ def notify(chat: str, text: str) -> bool:
     return r.returncode == 0
 
 
+def self_queued() -> list[str]:
+    """The program names in HEAVY_SELF_QUEUED, space or comma separated."""
+    return [n for n in re.split(r"[\s,]+", os.environ.get("HEAVY_SELF_QUEUED", "")) if n]
+
+
+def queues_itself(cmd: list[str], names: list[str] | None = None) -> str | None:
+    """The first of `names` (HEAVY_SELF_QUEUED) that `cmd` runs, or None. A name counts as a word of the
+    command (its last path part), inside one word that holds an inline script, and in the text of each word
+    that names a file (the first SELF_QUEUED_READ bytes, one level down, and not a binary). A name only
+    counts whole: queue.sh is not in my-queue.sh or queue.sh.bak."""
+    names = self_queued() if names is None else names
+    if not names:
+        return None
+    pat = re.compile(r"(?<![\w.-])(" + "|".join(re.escape(n) for n in names) + r")(?![\w.-])")
+    for word in cmd:
+        if os.path.basename(word) in names:
+            return os.path.basename(word)
+        found = pat.search(word)
+        if found:
+            return found.group(1)
+        try:
+            if not os.path.isfile(word):
+                continue
+            with open(word, "rb") as f:
+                head = f.read(SELF_QUEUED_READ)
+        except OSError:
+            continue
+        if b"\0" in head[:1024]:
+            continue                        # a program, not a script
+        found = pat.search(head.decode("utf-8", "replace"))
+        if found:
+            return found.group(1)
+    return None
+
+
 def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         notify_chat: bool = False, need_gb: str | None = None) -> int:
     """Run `cmd` as a heavy job: wait for the turn and for room, run it under the memory cap, and say what it
@@ -934,6 +979,11 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         except OSError as e:
             say(f"could not run {cmd[0]}: {e}")
             return 127
+    blocked = queues_itself(cmd)
+    if blocked:
+        say(f"REFUSED {what}: it runs {blocked}, which waits in a queue of its own, so it would hold the slot "
+            f"while it waits there. This queues itself, so run it with claude-ops detach instead (HEAVY_SELF_QUEUED)")
+        return 2
     need, declared = declared_need(need_gb)
     wait_turn(chat, what, os.getpid(), need, declared)
     say(f"running {what} for {chat} (memory cap {MAX_GB:g} GB"
