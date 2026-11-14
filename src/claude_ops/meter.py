@@ -29,6 +29,7 @@ from __future__ import annotations
 import bisect
 import datetime as dt
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -88,6 +89,11 @@ EXPORTER_TIMEOUT_S = 10.0
 #: ⛔ It stays under the exporter's timeout. A handler still waiting after the exporter gave up would save a
 #: batch the exporter then sends again, and save_metrics adds on conflict, so it would count twice.
 COLLECT_WAIT_S = 8.0
+#: how long the collector keeps the hash of each batch it saved. An OTLP exporter sends a request again after its
+#: own timeout, and on a busy machine the collector can save a batch and answer only after the exporter has hung
+#: up (it logs each such answer). The exporter's retries come within a minute, so a batch seen again inside this
+#: is answered without being saved twice.
+RESENT_WINDOW_S = 600.0
 
 
 def connect(db: "Path | str | None" = None, *, timeout: float = 5) -> sqlite3.Connection:
@@ -637,50 +643,113 @@ def turn_on(*, path: "Path | str | None" = None, port: int = PORT, run=None, env
 def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" = None, server=None) -> None:
     """The one OTLP collector. It binds this machine only, takes http/json metrics, and answers anything else
     with a refusal the exporter logs."""
+    import threading  # noqa: PLC0415
+
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: PLC0415
     seen: dict = {}
+    #: the hash of each batch saved, and when; None while a request is saving it
+    batches: dict = {}
+    counts = {"hung_up": 0, "again": 0}
+    lock = threading.Lock()
+
+    def say(line: str) -> None:
+        print(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} meter serve: {line}", file=sys.stderr, flush=True)
 
     class Handler(BaseHTTPRequestHandler):
+        saved = False
+
         def log_message(self, *a):
             return
 
         def _answer(self, code: int, body: bytes = b"{}", headers: "dict | None" = None) -> None:
-            self.send_response(code)
-            for k, v in (headers or {}).items():
-                self.send_header(k, v)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # the caller gave up waiting. Whatever this request saved stays saved, and a batch sent again
+                # is found in `batches`, so one line says it happened, with no traceback
+                self.close_connection = True
+                with lock:
+                    counts["hung_up"] += 1
+                    n = counts["hung_up"]
+                took = time.monotonic() - getattr(self, "began", time.monotonic())
+                say(f"the caller hung up before the answer to POST {self.path} ({code} after {took:.1f} s"
+                    f"{', its batch saved' if self.saved else ''}), {n} since the collector started")
 
         def do_POST(self):
+            self.began = time.monotonic()
             raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             if "json" not in (self.headers.get("Content-Type") or ""):
                 return self._answer(415, b'{"error": "this collector takes http/json"}')
             if self.headers.get("Content-Encoding") == "gzip":
                 raw = gzip.decompress(raw)
             if self.path.rstrip("/") == "/v1/metrics":
-                try:
-                    rows = metric_rows(json.loads(raw), seen)
-                except ValueError:
-                    return self._answer(400, b'{"error": "not json"}')
+                key = hashlib.sha256(raw).hexdigest()
+                now = time.monotonic()
+                with lock:
+                    for k, at in list(batches.items()):
+                        if at is not None and now - at > RESENT_WINDOW_S:
+                            del batches[k]
+                    state = batches.get(key, "new")
+                    if state == "new":
+                        batches[key] = None
+                if state is None:
+                    # the first copy is still being saved, so ask for this one again once that copy has ended
+                    return self._answer(503, b'{"error": "this batch is being saved, send it again"}',
+                                        {"Retry-After": "1"})
+                if state != "new":
+                    with lock:
+                        counts["again"] += 1
+                        n = counts["again"]
+                    say(f"a batch saved {now - state:.0f} s ago came again and was not saved twice, "
+                        f"{n} since the collector started")
+                    return self._answer(200)
+                # the answer goes out only after the claim on the batch is settled, so a copy sent the moment the
+                # caller reads a 503 is saved, not told the first copy is still being saved
+                answer: tuple = (200,)
                 conn = None
                 try:
-                    # inside the try, so a lock met while connect sets the store up answers 503 too
-                    conn = connect(db, timeout=COLLECT_WAIT_S)
-                    save_metrics(conn, rows)
-                    conn.commit()
+                    # a cumulative series' last value moves on only once its change is saved, so a batch
+                    # answered 503 and sent again still carries its change
+                    with lock:
+                        before = dict(seen)
+                    trial = dict(before)
+                    try:
+                        rows = metric_rows(json.loads(raw), trial)
+                    except ValueError:
+                        rows = None
+                        answer = (400, b'{"error": "not json"}')
+                    if rows is not None:
+                        # inside the try, so a lock met while connect sets the store up answers 503 too
+                        conn = connect(db, timeout=COLLECT_WAIT_S)
+                        save_metrics(conn, rows)
+                        conn.commit()
+                        self.saved = True
+                        with lock:
+                            # only the series this batch moved, so two batches saved at once keep each other's
+                            seen.update({k: v for k, v in trial.items() if k not in before or before[k] != v})
                 except sqlite3.OperationalError as e:
                     if "locked" not in str(e) and "busy" not in str(e):
                         raise
                     # nothing was saved, so the exporter may send the same minutes again
                     if conn is not None:
                         conn.rollback()
-                    return self._answer(503, b'{"error": "the store is busy, send it again"}',
-                                        {"Retry-After": str(int(COLLECT_WAIT_S))})
+                    answer = (503, b'{"error": "the store is busy, send it again"}',
+                              {"Retry-After": str(int(COLLECT_WAIT_S))})
                 finally:
                     if conn is not None:
                         conn.close()
+                    with lock:
+                        if self.saved:
+                            batches[key] = time.monotonic()
+                        else:
+                            batches.pop(key, None)
+                return self._answer(*answer)
             return self._answer(200)
 
     (server or ThreadingHTTPServer)((host, port), Handler).serve_forever()
