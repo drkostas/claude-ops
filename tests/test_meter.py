@@ -7,6 +7,7 @@ import os
 import pathlib
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -1104,13 +1105,205 @@ def test_a_read_that_is_stopped_keeps_each_file_it_finished(tmp_path, monkeypatc
         (root / "p" / f"s-{n}.jsonl").write_bytes(said(f"m{n}", n, sid=f"s-{n}"))
     real, seen = meter.read_file, []
 
-    def stop_at_the_third(conn, path, marks=None):
+    def stop_at_the_third(conn, path, marks=None, pace=None):
         if len(seen) == 2:
             raise KeyboardInterrupt
         seen.append(path)
-        return real(conn, path, marks)
+        return real(conn, path, marks, pace)
 
     monkeypatch.setattr(meter, "read_file", stop_at_the_third)
     with pytest.raises(KeyboardInterrupt):
         meter.read_all(root=root, db=db, marks=MARKS)
     assert rows(db, "SELECT count(*) FROM responses") == [(2,)] and rows(db, "SELECT count(*) FROM positions") == [(2,)]
+
+
+def _transcript(n, twice=()):
+    """`n` responses, one line each, and the ones in `twice` written on two lines, as a response written in parts."""
+    out = b""
+    for i in range(n):
+        out += line(f"m{i}", i + 1)
+        if i in twice:
+            out += line(f"m{i}", i + 5)
+    return out
+
+
+def _still(rows):
+    """A pace whose pieces keep one size."""
+    return meter._Pace(rows=rows, low=rows, high=rows)
+
+
+def _saved(conn):
+    return conn.execute("SELECT message_id, at, input, output, cache_read, cache_write, shown FROM responses "
+                        "ORDER BY message_id").fetchall()
+
+
+def _whole(tmp_path, f):
+    """The rows one commit saves from `f`, to compare pieces with."""
+    conn = meter.connect(tmp_path / "whole.sqlite3")
+    try:
+        meter.read_file(conn, f, pace=_still(10**6))
+        return _saved(conn)
+    finally:
+        conn.close()
+
+
+def test_a_large_transcript_is_saved_in_pieces_each_with_its_position(tmp_path, monkeypatch):
+    f = tmp_path / "a.jsonl"
+    f.write_bytes(_transcript(23, twice={4, 9}))
+    real, pieces = meter._save_piece, []
+
+    def spy(conn, path, piece, read_to, seam, size, pace, agent_row=None):
+        pieces.append((read_to, size, sorted(piece.found)))
+        return real(conn, path, piece, read_to, seam, size, pace, agent_row)
+
+    monkeypatch.setattr(meter, "_save_piece", spy)
+    conn = meter.connect(tmp_path / "m.sqlite3")
+    assert meter.read_file(conn, f, pace=_still(5)) == 23
+    assert [len(ids) for _at, _size, ids in pieces] == [5, 5, 5, 5, 3]
+    assert [size for _at, size, _ids in pieces] == [None] * 4 + [f.stat().st_size], \
+        "a piece before the end saves no size, so the next read goes on from it"
+    data = f.read_bytes()
+    for read_to, _size, ids in pieces:
+        assert data[:read_to].endswith(b"\n") and sorted(meter.responses_in(data[:read_to].splitlines(True))) == \
+            sorted(sum((p[2] for p in pieces if p[0] <= read_to), [])), "each position ends the lines its rows came from"
+    assert "m4" in pieces[0][2] and "m9" in pieces[1][2], "the two lines of one response stay in one piece"
+    assert _saved(conn) == _whole(tmp_path, f), "the pieces save what one commit saves, shown included"
+    assert meter.read_file(conn, f, pace=_still(5)) == 0
+    conn.close()
+
+
+def test_a_read_stopped_between_two_pieces_goes_on_from_the_last(tmp_path, monkeypatch):
+    f, db = tmp_path / "a.jsonl", tmp_path / "m.sqlite3"
+    f.write_bytes(_transcript(23, twice={4, 9}))
+    real, calls = meter._save_piece, []
+
+    def crash_at_the_third(*a, **k):
+        calls.append(1)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+        return real(*a, **k)
+
+    monkeypatch.setattr(meter, "_save_piece", crash_at_the_third)
+    conn = meter.connect(db)
+    with pytest.raises(KeyboardInterrupt):
+        meter.read_file(conn, f, pace=_still(5))
+    conn.close()
+    monkeypatch.setattr(meter, "_save_piece", real)
+    conn = meter.connect(db)
+    read_to, size = conn.execute("SELECT read_to, size FROM positions").fetchone()
+    before = meter.responses_in(f.read_bytes()[:read_to].splitlines(True))
+    assert size is None and len(before) == 10
+    assert [r[0] for r in _saved(conn)] == sorted(before), "the position matches the rows saved"
+    assert meter.read_file(conn, f, pace=_still(5)) == 13, "the next read goes on after the last piece"
+    assert _saved(conn) == _whole(tmp_path, f)
+    conn.close()
+
+
+def test_the_pace_halves_after_a_long_hold_and_grows_after_short_ones():
+    p = meter._Pace(hold=1.0, rows=2000, low=50, high=8000)
+    p.after(0.6)
+    assert p.rows == 1000
+    p.after(0.3)
+    assert p.rows == 1000, "a hold between an eighth and a half of the limit keeps the size"
+    p.after(0.1)
+    assert p.rows == 2000
+    for _ in range(10):
+        p.after(0.01)
+    assert p.rows == 8000
+    for _ in range(20):
+        p.after(5.0)
+    assert p.rows == 50 and p.longest == 5.0
+
+
+def test_a_slow_piece_makes_the_next_ones_smaller(tmp_path, monkeypatch):
+    f = tmp_path / "a.jsonl"
+    f.write_bytes(_transcript(30))
+    ticks = iter(range(1000))
+    pace = meter._Pace(hold=1.0, rows=8, low=1, high=8, clock=lambda: next(ticks) * 0.9)
+    real, sizes = meter._save_piece, []
+
+    def spy(conn, path, piece, *a, **k):
+        sizes.append(len(piece.found))
+        return real(conn, path, piece, *a, **k)
+
+    monkeypatch.setattr(meter, "_save_piece", spy)
+    conn = meter.connect(tmp_path / "m.sqlite3")
+    assert meter.read_file(conn, f, pace=pace) == 30
+    assert sizes[:5] == [8, 4, 2, 1, 1] and pace.longest == pytest.approx(0.9), \
+        "each piece held 0.9 s against a limit of 1 s, so the next is half its size"
+    conn.close()
+
+
+class _Libc:
+    """Stands in for the C library's disk policy calls."""
+
+    def __init__(self, policy, refuse=False):
+        self.policy, self.refuse, self.calls = policy, refuse, []
+
+    def getiopolicy_np(self, iotype, scope):
+        return self.policy
+
+    def setiopolicy_np(self, iotype, scope, policy):
+        self.calls.append((iotype, scope, policy))
+        if self.refuse:
+            return -1
+        self.policy = policy
+        return 0
+
+
+def test_a_throttled_process_writes_at_the_normal_policy_and_gets_its_own_back():
+    lib = _Libc(3)
+    with meter._unthrottled(lib):
+        assert lib.policy == 1
+    assert lib.policy == 3 and lib.calls == [(0, 0, 1), (0, 0, 3)], "the process scope, raised and then put back"
+    with pytest.raises(RuntimeError), meter._unthrottled(lib):
+        raise RuntimeError
+    assert lib.policy == 3, "and put back when the writes fail"
+    lib = _Libc(0)
+    with meter._unthrottled(lib):
+        pass
+    assert lib.calls == [], "a process that is not throttled is left alone"
+    lib = _Libc(4, refuse=True)
+    with meter._unthrottled(lib):
+        pass
+    assert lib.calls == [(0, 0, 1)], "a raise the system refuses is not undone"
+
+
+def test_every_write_of_a_read_runs_at_the_normal_policy(tmp_path, monkeypatch):
+    lib = _Libc(3)
+    monkeypatch.setattr(meter, "_libc", lambda: lib)
+    root, db = tmp_path / "projects", tmp_path / "m.sqlite3"
+    (root / "p").mkdir(parents=True)
+    (root / "p" / "s-1.jsonl").write_bytes(_transcript(12))
+    conn = meter.connect(db)
+    conn.execute("INSERT OR REPLACE INTO settings(name, value) VALUES ('marks', 'before')")
+    conn.commit()
+    conn.close()
+    seen = []
+    real_connect = meter.connect
+
+    def traced(*a, **k):
+        c = real_connect(*a, **k)
+        c.set_trace_callback(lambda sql: seen.append((sql.split()[0].upper(), lib.policy)))
+        return c
+
+    monkeypatch.setattr(meter, "connect", traced)
+    got = meter.read_all(root=root, db=db, marks=MARKS)
+    assert got["files"] == 1 and got["responses"] == 12 and "longest_hold_s" in got
+    writes = [(sql, policy) for sql, policy in seen if sql in ("INSERT", "DELETE", "UPDATE", "COMMIT")]
+    assert writes and all(policy == 1 for _sql, policy in writes), writes
+    assert lib.policy == 3, "the throttled policy is back once the read is done"
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not os.path.exists("/usr/sbin/taskpolicy"), reason="macOS only")
+def test_under_taskpolicy_throttle_the_process_policy_is_raised_and_put_back():
+    code = ("from claude_ops import meter\n"
+            "lib = meter._libc()\n"
+            "before = lib.getiopolicy_np(0, 0)\n"
+            "with meter._unthrottled():\n"
+            "    inside = lib.getiopolicy_np(0, 0)\n"
+            "print(before, inside, lib.getiopolicy_np(0, 0))\n")
+    got = subprocess.run(["/usr/sbin/taskpolicy", "-d", "throttle", sys.executable, "-c", code],
+                         capture_output=True, text=True, timeout=60)
+    before, inside, after = (int(x) for x in got.stdout.split())
+    assert before == 3 and inside not in (3, 4, 5) and after == 3, got.stdout + got.stderr
