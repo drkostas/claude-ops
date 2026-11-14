@@ -24,6 +24,9 @@ THE CAP. A gate at the start is not enough, since a job that starts within limit
 runs in its own process group, and every HEAVY_CHECK seconds (10) the memory of the whole group (top's
 MEM, which counts compressed pages) is added up; past HEAVY_MAX_GB (8) the group is ended and the
 caller is told why, in its own output. A job that needs more sets HEAVY_MAX_GB on the same line.
+A process the job starts in a group or session of its own (a build tool's worker, a server started
+with setsid) is still the job's: it is found by its parent pid, counted with the group, and ended
+with it. An ended job gets SIGTERM, and SIGKILL after HEAVY_STOP_GRACE seconds (10).
 
 THE TURN. Each waiter leaves a ticket. The next holder is the oldest ticket of the chat that held the
 slot least recently, so a chat that queues eight jobs takes every other turn instead of all eight
@@ -95,6 +98,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import killguard
 from .footprint import total_gb
 
 DIR = Path(os.environ.get("HEAVY_DIR", "/tmp/claude-ops-heavy"))
@@ -129,6 +133,7 @@ MIN_DISK_PCT = _num("HEAVY_MIN_DISK_PCT", 10)
 MAX_GB = _num("HEAVY_MAX_GB", 8)
 POLL = _num("HEAVY_POLL", 5)
 CHECK = _num("HEAVY_CHECK", 10)
+STOP_GRACE = _num("HEAVY_STOP_GRACE", 10)
 TURN_MIN = _num("HEAVY_TURN_MIN", 60)
 #: how long the gate may hold a waiter before it is told what holds it
 OWN_LIMIT_NOTE_MIN = _num("HEAVY_OWN_LIMIT_NOTE_MIN", 60)
@@ -516,15 +521,57 @@ def release(pid: int) -> bool:
     return False
 
 
+def job_tree(pgid: int) -> tuple[list[int], dict[int, int]]:
+    """A job's processes: the members of its process group `pgid`, and every descendant of them in a
+    group of its own, as pid -> that group. A child that makes a group or a session of its own (a build
+    tool's worker process, a server started with setsid) leaves the job's group but is still the job's,
+    found by its parent pid. Both are empty when the process table cannot be read."""
+    if pgid <= 1:
+        return [], {}
+    table = killguard.process_table() or {}
+    kids: dict[int, list[int]] = {}
+    for pid, (ppid, _group, _cmd) in table.items():
+        kids.setdefault(ppid, []).append(pid)
+    members = sorted(pid for pid, (_ppid, group, _cmd) in table.items() if group == pgid)
+    outside: dict[int, int] = {}
+    todo = list(members)
+    while todo:
+        for child in kids.get(todo.pop(), ()):
+            group = table[child][1]
+            if group != pgid and child not in outside and child > 1:
+                outside[child] = group
+                todo.append(child)
+    return members, outside
+
+
 def group_gb(pgid: int) -> float:
-    """The memory of every process in a process group, in GB: top's MEM (compressed included), read
-    for each member with proc_pid_rusage (footprint.py), far cheaper than asking `top`."""
-    members = []
-    for line in _out("/bin/ps", "-A", "-o", "pid=,pgid=").splitlines():
-        p = line.split()
-        if len(p) == 2 and p[1] == str(pgid) and p[0].isdigit():
-            members.append(int(p[0]))
-    return round(total_gb(members), 1)
+    """The memory of a job in GB: every process in its process group and every descendant of them in a
+    group of its own (job_tree), as top's MEM (compressed included), read for each with proc_pid_rusage
+    (footprint.py), far cheaper than asking `top`."""
+    members, outside = job_tree(pgid)
+    return round(total_gb(members + list(outside)), 1)
+
+
+def _send(pid: int, sig: int) -> None:
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def signal_strays(strays: dict[int, int], sig: int) -> list[int]:
+    """Send `sig` to each of a job's processes outside its group (pid -> the group it was seen in) that
+    still runs in that group, and return those pids. A pid that ended and came back as another process
+    is in another group, and is left alone. Signal 0 only asks which still run."""
+    table = killguard.process_table() or {}
+    live = sorted(pid for pid, group in strays.items() if pid in table and table[pid][1] == group)
+    if live:
+        try:
+            killguard.kill(live, sig, max_targets=len(live), send=_send)
+        except killguard.Refused as e:
+            say(f"did not signal {live}: {e}")
+            return []
+    return live
 
 
 def _parent(pid: int) -> int | None:
@@ -722,11 +769,33 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         job = subprocess.Popen(cmd, env={**os.environ, "HEAVY_HELD": str(os.getpid())},
                                start_new_session=True)
 
+    # the job's processes in groups of their own, kept from each stop: once their parent in the job's
+    # group has ended they are the init process's children, and no walk from the group finds them
+    strays: dict[int, int] = {}
+
     def stop(sig=signal.SIGTERM):
+        strays.update(job_tree(job.pid)[1])
         try:
             os.killpg(job.pid, sig)
         except (ProcessLookupError, PermissionError):
             pass
+        signal_strays(strays, sig)
+
+    def end_job():
+        """the cap's and --max-hold's end: SIGTERM, and SIGKILL after STOP_GRACE seconds for the job's
+        group and for its processes outside it alike"""
+        stop()
+        try:
+            job.wait(timeout=STOP_GRACE)
+        except subprocess.TimeoutExpired:
+            stop(signal.SIGKILL)
+            job.wait()
+        end = time.time() + STOP_GRACE
+        while time.time() < end and signal_strays(strays, 0):
+            time.sleep(0.2)
+        left = signal_strays(strays, signal.SIGKILL)
+        if left:
+            say(f"ended {len(left)} of {what}'s processes outside its group that outlived SIGTERM: {left}")
 
     def forward(signum, _frame):
         stop()
@@ -745,12 +814,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 pass
             if max_hold is not None and time.time() - began > max_hold * 60:
                 ended = True
-                stop()
-                try:
-                    job.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    stop(signal.SIGKILL)
-                    job.wait()
+                end_job()
                 rc = 124
                 break
             used = group_gb(job.pid)
@@ -758,12 +822,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
             taking(os.getpid(), used, peak)
             if used > MAX_GB:
                 over = used
-                stop()
-                try:
-                    job.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    stop(signal.SIGKILL)
-                    job.wait()
+                end_job()
                 rc = 137
                 break
     finally:
