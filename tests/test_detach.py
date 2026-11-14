@@ -70,6 +70,49 @@ def test_it_outlives_a_kill_of_the_starters_group(tmp_path):
             pass
 
 
+def test_the_job_lives_on_after_its_parent_is_ended_and_writes_its_end_line(tmp_path):
+    log = tmp_path / "job.log"
+    starter = tmp_path / "starter.py"
+    starter.write_text(
+        "import sys\n"
+        "from claude_ops import detach\n"
+        f"print(detach.detach([sys.executable, '-c', 'import time; time.sleep(1.5); print(\\'finished\\')'], {str(log)!r}),"
+        " flush=True)\n"
+        "import time; time.sleep(30)\n")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    parent = subprocess.Popen([sys.executable, str(starter)], stdout=subprocess.PIPE, text=True,
+                              env=env, start_new_session=True)
+    child = int(parent.stdout.readline())
+    os.killpg(parent.pid, signal.SIGTERM)
+    assert parent.wait(timeout=10) == -signal.SIGTERM
+    assert _alive(child)
+    assert _wait_for(log, detach.END)
+    text = log.read_text()
+    assert "finished" in text
+    end = [ln for ln in text.splitlines() if ln.startswith(detach.END)]
+    assert len(end) == 1 and end[0].startswith(f"{detach.END} exit 0 at ") and f"(pid {child})" in end[0]
+
+
+def test_a_job_ended_by_a_signal_says_which(tmp_path):
+    log = tmp_path / "job.log"
+    pid = detach.detach([sys.executable, "-c", "import time; print('up', flush=True); time.sleep(30)"],
+                        str(log))
+    assert _wait_for(log, "up")
+    os.killpg(pid, signal.SIGTERM)
+    assert _wait_for(log, detach.END)
+    end = [ln for ln in log.read_text().splitlines() if ln.startswith(detach.END)]
+    assert len(end) == 1 and end[0].startswith(f"{detach.END} signal SIGTERM (15) at ")
+
+
+def test_a_failing_job_gives_its_exit_code_on_a_line_of_its_own(tmp_path):
+    log = tmp_path / "job.log"
+    detach.detach([sys.executable, "-c", "import sys; sys.stdout.write('no newline'); sys.exit(3)"],
+                  str(log))
+    assert _wait_for(log, detach.END)
+    lines = log.read_text().splitlines()
+    assert lines[0] == "no newline" and lines[1].startswith(f"{detach.END} exit 3 at ")
+
+
 def test_cwd_and_env(tmp_path):
     log = tmp_path / "job.log"
     detach.detach([sys.executable, "-c", "import os; print(os.getcwd(), os.environ.get('X'))"],

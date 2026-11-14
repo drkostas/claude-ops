@@ -233,12 +233,18 @@ claude-ops pr-changes --repo owner/name --text "fix spawn_helpers"     # which o
 
 ```bash
 claude-ops detach --log /tmp/release.log -- ./release.sh v1.2   # prints the pid
+until grep -q '^detach end:' /tmp/release.log; do sleep 5; done   # wait for it to end
 kill -TERM -<pid>                                               # stop it and everything it started
 ```
 
 A command a chat starts in the background shares the chat's process group, so it ends when the chat
-does. `detach` starts it as the leader of a new session (macOS has no `setsid` command), with no
-input and its output appended to the log, and prints its pid, which is also its group id.
+does, and `nohup cmd &` does not change that (it only ignores the hangup signal). `detach` starts it
+in a new session (macOS has no `setsid` command), with no input and its output appended to the log,
+and prints the session's pid, which is also its group id. When the command ends, one line is added
+to the log, such as `detach end: exit 0 at 2026-11-14T13:30:01+0200 (pid 4242)` or
+`detach end: signal SIGTERM (15) at ...`, so a waiter that cannot know the pid (a chat that was
+restarted, say) waits for that line instead. A signal sent to the session is passed on to the
+command, and the line is still written. Only a SIGKILL of the session's leader leaves no line.
 
 ## Telling a chat before acting on it
 
