@@ -88,7 +88,14 @@ EXPORTER_TIMEOUT_S = 10.0
 #: and a wait of 5 s ended in "database is locked" and a traceback, with that minute's figures lost.
 #: ⛔ It stays under the exporter's timeout. A handler still waiting after the exporter gave up would save a
 #: batch the exporter then sends again, and save_metrics adds on conflict, so it would count twice.
+#: ⛔ AND IT IS WALL-CLOCK TIME FROM THE REQUEST'S START, NOT SQLITE'S BUSY TIMEOUT. SQLite's busy handler adds up
+#: the sleeps it asked for, and on a loaded machine each sleep runs long (1 ms took 7 ms and 25 ms took 160 ms at a
+#: load of 21), so a busy timeout of 8 s gave up after about 21 s, and a request answered 503 after 20.6 s, long
+#: after the exporter had gone. open_writer asks for the write lock with no busy wait and tries again in short
+#: pauses, reading the clock each time.
 COLLECT_WAIT_S = 8.0
+#: the pause between two tries for the write lock
+WRITE_RETRY_S = 0.05
 #: how long the collector keeps the hash of each batch it saved. An OTLP exporter sends a request again after its
 #: own timeout, and on a busy machine the collector can save a batch and answer only after the exporter has hung
 #: up (it logs each such answer). The exporter's retries come within a minute, so a batch seen again inside this
@@ -117,6 +124,31 @@ def connect(db: "Path | str | None" = None, *, timeout: float = 5) -> sqlite3.Co
         conn.commit()
     return conn
 
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def open_writer(db: "Path | str | None" = None, *, deadline: float) -> "sqlite3.Connection | None":
+    """A connection that holds the store's write lock (BEGIN IMMEDIATE), or None once `deadline` (a
+    time.monotonic() value) has passed while another writer held it. The store must be set up already
+    (connect does that). SQLite's own busy wait is not used, since it counts the sleeps it asked for and not the
+    time that passed, so the wait stays inside the deadline on a loaded machine too. Commit or roll back."""
+    path = Path(db or DB)
+    while True:
+        conn = sqlite3.connect(path, timeout=0, isolation_level=None)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return conn
+        except sqlite3.OperationalError as e:
+            conn.close()
+            if "locked" not in str(e) and "busy" not in str(e):
+                raise
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        _pause(min(WRITE_RETRY_S, left))
 
 # ------------------------------------------------------------------------------ the status line
 def _number(v) -> "float | None":
@@ -655,6 +687,21 @@ def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" 
     def say(line: str) -> None:
         print(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} meter serve: {line}", file=sys.stderr, flush=True)
 
+    # the schema is set up once, before the port opens, so a request only asks for the write lock. While another
+    # writer holds the store this waits, saying so once, and an exporter that finds the port closed tries again.
+    waited = False
+    while True:
+        try:
+            connect(db, timeout=COLLECT_WAIT_S).close()
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) and "busy" not in str(e):
+                raise
+            if not waited:
+                say("the store is locked by another writer, so the collector opens its port once it is free")
+                waited = True
+            _pause(WRITE_RETRY_S)
+
     class Handler(BaseHTTPRequestHandler):
         saved = False
 
@@ -725,22 +772,22 @@ def serve(*, host: str = "127.0.0.1", port: int = PORT, db: "Path | str | None" 
                         rows = None
                         answer = (400, b'{"error": "not json"}')
                     if rows is not None:
-                        # inside the try, so a lock met while connect sets the store up answers 503 too
-                        conn = connect(db, timeout=COLLECT_WAIT_S)
-                        save_metrics(conn, rows)
-                        conn.commit()
-                        self.saved = True
-                        with lock:
-                            # only the series this batch moved, so two batches saved at once keep each other's
-                            seen.update({k: v for k, v in trial.items() if k not in before or before[k] != v})
-                except sqlite3.OperationalError as e:
-                    if "locked" not in str(e) and "busy" not in str(e):
-                        raise
-                    # nothing was saved, so the exporter may send the same minutes again
-                    if conn is not None:
-                        conn.rollback()
-                    answer = (503, b'{"error": "the store is busy, send it again"}',
-                              {"Retry-After": str(int(COLLECT_WAIT_S))})
+                        conn = open_writer(db, deadline=self.began + COLLECT_WAIT_S)
+                        if conn is None:
+                            # nothing was saved, so the exporter may send the same minutes again
+                            answer = (503, b'{"error": "the store is busy, send it again"}',
+                                      {"Retry-After": str(int(COLLECT_WAIT_S))})
+                        else:
+                            try:
+                                save_metrics(conn, rows)
+                                conn.execute("COMMIT")
+                            except BaseException:
+                                conn.execute("ROLLBACK")
+                                raise
+                            self.saved = True
+                            with lock:
+                                # only the series this batch moved, so two batches saved at once keep each other's
+                                seen.update({k: v for k, v in trial.items() if k not in before or before[k] != v})
                 finally:
                     if conn is not None:
                         conn.close()
