@@ -153,3 +153,40 @@ def test_a_failure_to_record_never_stops_the_command(monkeypatch, tmp_path):
     log = tmp_path / "job.log"
     detach.detach([sys.executable, "-c", "print('ran')"], str(log))
     assert _wait_for(log, "ran")
+
+
+def test_ps_shows_a_short_command_line(tmp_path):
+    log = tmp_path / "job.log"
+    pid = detach.detach([sys.executable, "-c", "import time; print('up', flush=True); time.sleep(30)"],
+                        str(log))
+    try:
+        assert _wait_for(log, "up")
+        line = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                              text=True).stdout.strip()
+        assert line.endswith(f"-I {detach.SUPERVISOR} {log} {sys.executable} -c "
+                             "import time; print('up', flush=True); time.sleep(30)")
+        assert "\n" not in line and "import os" not in line
+        assert os.getpgid(pid) == pid
+    finally:
+        os.killpg(pid, signal.SIGTERM)
+    assert _wait_for(log, f"{detach.END} signal SIGTERM (15)")
+
+
+def test_the_supervisor_imports_nothing_from_the_jobs_folder(tmp_path):
+    # a module in the job's folder named like one the supervisor imports would run there first
+    (tmp_path / "signal.py").write_text("open('shadowed', 'w').write('x')\nraise SystemExit(9)\n")
+    log = tmp_path / "job.log"
+    detach.detach([sys.executable, "-c", "print('ran')"], str(log), cwd=str(tmp_path),
+                  env={"PATH": os.environ["PATH"], "PYTHONPATH": str(tmp_path)})
+    assert _wait_for(log, detach.END)
+    assert not (tmp_path / "shadowed").exists()
+    assert f"{detach.END} exit 0 at " in log.read_text()
+
+
+def test_the_supervisor_file_is_in_the_package_and_imports_only_the_standard_library():
+    assert os.path.isfile(detach.SUPERVISOR)
+    import ast
+    tree = ast.parse(open(detach.SUPERVISOR).read())
+    names = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    names |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+    assert names <= {"os", "signal", "subprocess", "sys", "time"}

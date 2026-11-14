@@ -6,10 +6,10 @@ release) stops half done. macOS has no `setsid` command, and `nohup cmd &` only 
 signal: the command still shares the chat's group, so a kill of that group ends it too. A job started
 with `nohup ... & disown` from a chat was ended by SIGTERM (exit 143) when the chat was restarted.
 
-`detach` starts a small supervisor as the leader of a new session, with stdin from /dev/null, and
-returns at once with its pid, which is also the session's and the group's id. The supervisor runs
-the command in that session with its stdout and stderr appended to a log file, waits for it, and then
-appends one end line to the same log:
+`detach` starts a small supervisor (detach_supervisor.py, run by its path) as the leader of a new
+session, with stdin from /dev/null, and returns at once with its pid, which is also the session's
+and the group's id. The supervisor runs the command in that session with its stdout and stderr
+appended to a log file, waits for it, and then appends one end line to the same log:
 
     detach end: exit 0 at 2026-11-14T13:30:01+0200 (pid 4242)
     detach end: signal SIGTERM (15) at 2026-11-14T13:31:12+0200 (pid 4242)
@@ -38,37 +38,9 @@ from . import killguard
 #: what every end line starts with, at the start of a line of the log
 END = "detach end:"
 
-#: the supervisor, run with `python -I -c`: it imports only the standard library, so it works with
-#: whatever environment the command is given. argv is [log, command...].
-SUPERVISOR = r'''
-import os, signal, subprocess, sys, time
-log, argv = sys.argv[1], sys.argv[2:]
-child = None
-def forward(sig, frame):
-    if child is not None and child.poll() is None:
-        try:
-            child.send_signal(sig)
-        except ProcessLookupError:
-            pass
-for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-    signal.signal(s, forward)
-with open(log, "ab", buffering=0) as out:
-    try:
-        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=out)
-        rc = child.wait()
-        what = "exit %d" % rc if rc >= 0 else "signal %s (%d)" % (signal.Signals(-rc).name, -rc)
-    except OSError as e:
-        out.write(("detach: could not start %s: %s\n" % (argv[0], e)).encode())
-        what = "exit 127"
-    try:
-        with open(log, "rb") as f:
-            f.seek(-1, os.SEEK_END)
-            lead = b"" if f.read(1) == b"\n" else b"\n"
-    except OSError:
-        lead = b""
-    when = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    out.write(lead + ("detach end: %s at %s (pid %d)\n" % (what, when, os.getpid())).encode())
-'''
+#: the supervisor, run by its path with `python -I`: a short line in ps, and nothing on its import
+#: path but the standard library (detach_supervisor.py says why)
+SUPERVISOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detach_supervisor.py")
 
 
 def _program(argv0: str, cwd: str | None, env: Mapping[str, str] | None) -> str | None:
@@ -96,7 +68,7 @@ def detach(argv: Sequence[str], log: str, *, cwd: str | None = None,
     os.makedirs(os.path.dirname(log), exist_ok=True)
     with open(log, "ab"):
         pass
-    proc = subprocess.Popen([sys.executable, "-I", "-c", SUPERVISOR, log, *argv],
+    proc = subprocess.Popen([sys.executable, "-I", SUPERVISOR, log, *argv],
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, cwd=cwd,
                             env=None if env is None else dict(env),
