@@ -315,7 +315,7 @@ def test_a_run_over_its_need_makes_the_next_run_wait_for_its_peak(monkeypatch, t
     said = []
     monkeypatch.setattr(h, "say", said.append)
     peak = [1.4]
-    monkeypatch.setattr(h, "group_gb", lambda _pgid: peak[0])
+    monkeypatch.setattr(h, "group_gb", lambda _pgid, _seen=None: peak[0])
     monkeypatch.setattr(h, "peak_of_children", lambda: peak[0])
     try:
         assert h.run("t-chat", "invented sheet job", ["sleep", "0.4"], need_gb="1") == 0
@@ -898,17 +898,23 @@ def test_heavy_hook(monkeypatch):
 
 # --- a job's children in a group or session of their own ----------------------------------------------
 # A build tool can start its worker in a session of its own, so the worker leaves the job's process group.
-# The stand-in here is a python child that calls setsid under a bash job that waits for it.
+# The stand-in here is a python child that calls setsid under a bash job that waits for it. It gives up
+# the caller's output pipes at once, so a child that outlives the job cannot hold the test's run until its
+# own sleep ends (which reads as ended).
 _OWN_SESSION = ("import os, signal, sys, time\n"
                 "if sys.argv[2] == 'deaf':\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                 "os.setsid()\n"
+                "n = os.open(os.devnull, os.O_WRONLY); os.dup2(n, 1); os.dup2(n, 2)\n"
+                "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(float(sys.argv[4]))\n"
                 "b = bytearray(int(float(sys.argv[3]) * 1024 ** 3)); b[::4096] = b'x' * len(b[::4096])\n"
-                "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)")
+                "time.sleep(60)")
 
 
-def _job_with_own_session_child(pidfile, deaf="hears", gb="0"):
-    """bash -c that starts the setsid child and waits for it, as argv for a job"""
-    return ["bash", "-c", '"$4" -c "$0" "$1" "$2" "$3" & wait', _OWN_SESSION, str(pidfile), deaf, gb,
+def _job_with_own_session_child(pidfile, deaf="hears", gb="0", wait_s="0", shape="{child} & wait"):
+    """bash -c that starts the setsid child (which waits `wait_s` before it takes `gb`) in the shape given,
+    as argv for a job. The default shape waits for the child."""
+    child = '"$5" -c "$0" "$1" "$2" "$3" "$4"'
+    return ["bash", "-c", shape.format(child=child), _OWN_SESSION, str(pidfile), deaf, gb, wait_s,
             sys.executable]
 
 
@@ -998,3 +1004,92 @@ def test_the_memory_cap_counts_and_ends_a_child_in_a_session_of_its_own(tmp_path
         assert _gone(stray), f"the child in its own session outlived the cap: {stray}"
     finally:
         _kill(stray)
+
+
+def test_a_child_whose_parent_in_the_group_ended_is_still_ended_with_the_job(tmp_path):
+    """A child in a session of its own, seen in a sample while its parent in the job's group lived, is ended
+    at --max-hold after that parent has gone. By then it is the init process's child, and no walk from the
+    group finds it."""
+    pidfile = tmp_path / "child.pid"
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "worker build", "--max-hold", "0.05",
+                        "--", *_job_with_own_session_child(pidfile, shape="( {child} & sleep 1 ); sleep 60")],
+                       capture_output=True, text=True, timeout=90,
+                       env=_heavy_env(tmp_path / "heavy", HEAVY_STOP_GRACE="1"))
+    stray = _pid_in(pidfile, timeout=1)
+    try:
+        assert r.returncode == 124 and "ENDED worker build" in r.stderr, r.stdout + r.stderr
+        assert _gone(stray), f"the child whose parent had ended outlived the job: {stray}"
+    finally:
+        _kill(stray)
+
+
+def test_the_cap_counts_a_child_that_grew_after_its_parent_in_the_group_ended(tmp_path):
+    """The child is seen small while its parent lives, its parent ends, and then it takes 0.4 GB. The cap
+    of 0.2 GB still counts it and ends the job, child and all."""
+    if sys.platform != "darwin":        # the cap reads proc_pid_rusage
+        return
+    pidfile = tmp_path / "child.pid"
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "worker build", "--max-hold", "1", "--",
+                        *_job_with_own_session_child(pidfile, gb="0.4", wait_s="2",
+                                                     shape="( {child} & sleep 1 ); sleep 60")],
+                       capture_output=True, text=True, timeout=120,
+                       env=_heavy_env(tmp_path / "heavy", HEAVY_MAX_GB="0.2", HEAVY_STOP_GRACE="2"))
+    stray = _pid_in(pidfile, timeout=1)
+    try:
+        assert r.returncode == 137 and "over the 0.2 GB cap" in r.stderr, r.stdout + r.stderr
+        assert _gone(stray), f"the child outlived the cap: {stray}"
+    finally:
+        _kill(stray)
+
+
+def test_what_a_job_leaves_running_is_named_and_ended_unless_it_asks_to_keep_it(tmp_path):
+    """A job that exits on its own and leaves a child in a session of its own and a background process in
+    its group has both named in one line and ended before the slot is free. One that ignores SIGTERM gets
+    SIGKILL after HEAVY_STOP_GRACE. With HEAVY_KEEP_STRAYS=1 they are named and kept."""
+    shape = "{child} & sleep 30 & sleep 1"
+    pidfile = tmp_path / "child.pid"
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "daemon build", "--",
+                        *_job_with_own_session_child(pidfile, deaf="deaf", shape=shape)],
+                       capture_output=True, text=True, timeout=90,
+                       env=_heavy_env(tmp_path / "heavy", HEAVY_STOP_GRACE="1"))
+    stray = _pid_in(pidfile, timeout=1)
+    try:
+        assert r.returncode == 0, r.stdout + r.stderr
+        line = next((x for x in r.stderr.splitlines() if "left 2 process(es) running when it ended" in x), "")
+        assert f"{stray} python" in line.lower() and " sleep 30" in line and "HEAVY_KEEP_STRAYS=1" in line, \
+            r.stderr
+        assert "and SIGKILL for what outlived SIGTERM by 1 s" in r.stderr, r.stderr
+        assert _gone(stray), f"the child left running outlived the job: {stray}"
+    finally:
+        _kill(stray)
+
+    # a process kept running must not hold the caller's output pipes, or the caller waits for it to end
+    kept = tmp_path / "kept.pid"
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "server start", "--",
+                        *_job_with_own_session_child(kept, shape="{child} >/dev/null 2>&1 & sleep 1")],
+                       capture_output=True, text=True, timeout=90,
+                       env=_heavy_env(tmp_path / "heavy", HEAVY_KEEP_STRAYS="1"))
+    server = _pid_in(kept, timeout=1)
+    try:
+        assert r.returncode == 0 and "left 1 process(es) running, kept as HEAVY_KEEP_STRAYS=1 asks" in r.stderr, \
+            r.stderr
+        assert not _gone(server, timeout=0.5), "a job that asks to keep its server keeps it"
+    finally:
+        _kill(server)
+
+    named_kept = tmp_path / "named.pid"
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "device session", "--",
+                        *_job_with_own_session_child(named_kept, shape="{child} & sleep 30 >/dev/null 2>&1 & sleep 1")],
+                       capture_output=True, text=True, timeout=90,
+                       env=_heavy_env(tmp_path / "heavy", HEAVY_KEEP_STRAYS="sleep", HEAVY_STOP_GRACE="1"))
+    worker = _pid_in(named_kept, timeout=1)
+    try:
+        keep_line = next((x for x in r.stderr.splitlines() if "kept as HEAVY_KEEP_STRAYS=sleep asks" in x), "")
+        end_line = next((x for x in r.stderr.splitlines() if "left 1 process(es) running when it ended" in x), "")
+        assert r.returncode == 0 and " sleep 30" in keep_line and f"{worker} " in end_line, r.stderr
+        assert _gone(worker), "the program not on the list is ended"
+        sleeper = int(keep_line.split("asks: ", 1)[1].split()[0])
+        assert not _gone(sleeper, timeout=0.5), "and the one named on the list is kept"
+        _kill(sleeper)
+    finally:
+        _kill(worker)
