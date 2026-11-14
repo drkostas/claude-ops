@@ -161,7 +161,7 @@ def test_ps_shows_a_short_command_line(tmp_path):
                         str(log))
     try:
         assert _wait_for(log, "up")
-        line = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+        line = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True,
                               text=True).stdout.strip()
         assert line.endswith(f"-I {detach.SUPERVISOR} {log} {sys.executable} -c "
                              "import time; print('up', flush=True); time.sleep(30)")
