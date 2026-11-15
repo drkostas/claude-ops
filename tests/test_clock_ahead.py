@@ -183,6 +183,19 @@ def test_what_a_bash_line_writes_into_a_watched_file(tmp_path):
     assert ca.check(bash(f"cd {notes} && printf 'read at 13:22' > state.md", tmp_path), c, now=NOW) is not None
     assert ca.check(bash(f"echo 'read at 13:22' >> {tmp_path}/other.md", tmp_path), c, now=NOW) is None
     assert ca.check(bash(f"echo 'after 13:22 it runs' >> {notes}/state.md", tmp_path), c, now=NOW) is None
+    # an edit in place writes its replacement
+    (notes / "state.md").write_text("update 13:10\n")
+    assert ca.check(bash(f"sed -i '' 's/update 13:10/update 13:22/' {notes}/state.md", tmp_path), c, now=NOW)
+    assert ca.check(bash(f"cd {notes} && sed -i.bak -e 's/x/y/' -e 's/13:10/13:22/' state.md", tmp_path), c,
+                    now=NOW)
+    assert ca.check(bash(f"perl -0pi -e 's/update 13:10/update 13:22/' {notes}/state.md", tmp_path), c, now=NOW)
+    assert ca.check(bash(f"perl -i -pe 's{{13:10}}{{13:22}}g' {notes}/*.md", tmp_path), c, now=NOW)
+    assert ca.check(bash(f"sed -i '' 's/13:10/after 13:22/' {notes}/state.md", tmp_path), c, now=NOW) is None
+    assert ca.check(bash(f"sed -i '' 's/13:22/13:10/' {notes}/state.md", tmp_path), c, now=NOW) is None
+    assert ca.check(bash(f"sed -i '' 's/13:10/13:22/' {tmp_path}/other.md", tmp_path), c, now=NOW) is None
+    assert ca.check(bash(f"sed 's/13:10/13:22/' {notes}/state.md", tmp_path), c, now=NOW) is None
+    assert ca.check(bash(f"perl -pi -e 's/13:10/sprintf(\"13:%02d\", 22)/e' {notes}/state.md", tmp_path), c,
+                    now=NOW) is None
 
 
 def _ahead_now(minutes):

@@ -120,6 +120,8 @@ def test_text_a_bash_command_writes_into_a_script_is_refused_but_its_own_line_is
     assert ss.check(bash("cat > job.sh <<'EOF'\nrun_job\necho \"$(date) rc $?\"\nEOF", tmp_path))
     assert ss.check(bash("cat > job <<'EOF'\n#!/bin/bash\necho \"`date` $?\"\nEOF", tmp_path))
     assert ss.check(bash("echo 'echo \"$(date) $?\"' >> job.sh", tmp_path))
+    assert ss.check(bash("sed -i '' 's/rc=$rc/echo \"$(date) rc $?\"/' job.sh", tmp_path))
+    assert ss.check(bash("sed -i '' 's/echo \"$(date) rc $?\"/rc=$rc/' job.sh", tmp_path)) is None
     assert ss.check(bash("cat > notes.txt <<'EOF'\necho \"$(date) rc $?\"\nEOF", tmp_path)) is None
     assert ss.check(bash('run_job; echo "$(date) rc $?"', tmp_path)) is None
 

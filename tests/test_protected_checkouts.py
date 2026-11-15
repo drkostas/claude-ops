@@ -36,6 +36,9 @@ def bash(command, cwd):
     'git -C ~/worktrees/app-live stash',
     "cat > ~/worktrees/app-live/x.py <<'EOF'\nprint(1)\nEOF",
     'echo hi >> ~/worktrees/lib-next/notes.txt',
+    "sed -i '' 's/a/b/' ~/worktrees/app-live/x.py",
+    "cd ~/worktrees/app-live && sed -i '/old/d' notes.txt",
+    "perl -pi -e 's/a/b/' ~/worktrees/lib-next/x.py",
 ])
 def test_a_change_to_a_protected_checkout_is_refused(home, command):
     assert bash(command, home), command
@@ -52,6 +55,8 @@ def test_a_change_to_a_protected_checkout_is_refused(home, command):
     'cd ~/worktrees/app-topic && git checkout -b feat/x',
     # a here-document's body is data: a test file that names these commands is not one
     "cat > ~/worktrees/app-topic/t.py <<'EOF'\ngit -C ~/worktrees/app-live checkout x\nEOF",
+    # sed without -i only prints, and reading a file there is fine
+    "sed 's/a/b/' ~/worktrees/app-live/x.py > ~/worktrees/app-topic/x.py",
 ])
 def test_reading_one_and_working_in_your_own_are_allowed(home, command):
     assert bash(command, home) is None, command

@@ -44,8 +44,9 @@ when to do something). An argument that is a list or an object is read by every 
 pull request's or an issue's title and body, a comment, a `gh api` body) are read too, the way the
 public-voice hook reads them. `files` holds glob patterns (`~` is expanded, and `*` also matches `/`)
 of files whose written text is read: what a Write, an Edit or a MultiEdit puts in such a file, and
-what a Bash line writes into one (a here-document given to `cat` or `tee`, or `echo` and `printf`
-sent to it with `>` or `>>`). Only the lines the file does not hold yet are judged, so rewriting a
+what a Bash line writes into one (a here-document given to `cat` or `tee`, `echo` and `printf`
+sent to it with `>` or `>>`, and the new text of each substitution a `sed -i` or a `perl -i -p`
+makes in it). Only the lines the file does not hold yet are judged, so rewriting a
 note does not judge the times already in it. Without `forward_words`, `zones` or the window, the
 defaults here are used.
 

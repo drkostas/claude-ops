@@ -6,9 +6,10 @@ bodies set aside and redirections dropped), the folder each one runs in (`cd`, `
 `git -C`), and, for a `git commit`, every line and file name it would record: the staged changes,
 the tracked changes for `-a`, what a `git add` on the same line would stage (untracked files read
 from the working tree, since the add has not run yet when a hook runs), and the paths the commit
-names. `writes` gives the text a line writes into files through here-documents and `echo` or
-`printf` redirected to a file or piped into `tee`, and `push_plans` with `pushed` give what a
-`git push` would publish: the commits no remote-tracking ref has yet.
+names. `writes` gives the text a line writes into files through here-documents, `echo` or
+`printf` redirected to a file or piped into `tee`, and the substitutions of a `sed -i` or a
+`perl -i -p` (`in_place`), and `push_plans` with `pushed` give what a `git push` would publish: the
+commits no remote-tracking ref has yet.
 
 Everything here fails soft: a line that cannot be read gives nothing, and a git call that fails,
 or takes longer than GIT_TIMEOUT_S, gives nothing.
@@ -353,10 +354,13 @@ def walk(command: str, cwd: str):
         yield cmd["words"], here
 
 
-def writes(command: str, cwd: str) -> list[tuple[str, str]]:
+def writes(command: str, cwd: str, edits: bool = True) -> list[tuple[str, str]]:
     """(file, text) for the text the line writes into files, as absolute paths: a here-document
-    given to a command whose output goes to a file or to `tee`, and the words of `echo` or `printf`
-    redirected to a file. Text a program makes itself is not known here and is not given out. A
+    given to a command whose output goes to a file or to `tee`, the words of `echo` or `printf`
+    redirected to a file, and the new text of each substitution a `sed -i` or `perl -i -p` makes in
+    the files it edits (see `in_place`; without `edits` those are left out, for a caller that takes
+    a text as all the file will hold). Text a program makes itself is not known here and is not
+    given out. A
     target's variables are expanded with those the line assigned (`D=/tmp/x && cat > $D/f`), so the
     file is judged where it really goes, not as a path under the current folder. A target that still
     starts with a variable after that (one the line did not assign and the environment does not
@@ -364,7 +368,7 @@ def writes(command: str, cwd: str) -> list[tuple[str, str]]:
     text out of a folder. `write_targets` gives each target as written, for a hook that must not
     guess where it goes."""
     return [(os.path.normpath(os.path.join(here, target)), text)
-            for here, target, text in write_targets(command, cwd)]
+            for here, target, text in write_targets(command, cwd, edits)]
 
 
 def unknown_start(target: str) -> bool:
@@ -379,12 +383,22 @@ def after_unknown(target: str) -> str:
     return rest[rest.find("/"):] if "/" in rest else ""
 
 
-def write_targets(command: str, cwd: str):
-    """(folder, target with the line's variables expanded, text) for each write `writes` reads."""
+def write_targets(command: str, cwd: str, edits: bool = True):
+    """(folder, target with the line's variables expanded, text) for each write `writes` reads.
+    Without `edits`, a `sed -i` or `perl -i -p` edit is left out, for a caller that takes each text
+    as the whole of what the file will hold."""
     piped_text = None                        # what the command before a `|` printed, when known
     for cmd, here in steps(command, cwd):
         words = cmd["words"]
         prog = os.path.basename(words[0])
+        edit = in_place(words) if edits else None
+        if edit is not None:
+            texts, files = edit
+            for f in files:
+                for text in texts or [""]:
+                    yield here, expand(f, cmd.get("names")), text
+            piped_text = None
+            continue
         targets = list(cmd["writes"])
         if prog == "tee":
             targets += [w for w in words[1:] if not w.startswith("-")]
@@ -402,6 +416,257 @@ def write_targets(command: str, cwd: str):
         for t in targets:
             if t not in NOT_FILES:
                 yield here, expand(t, cmd.get("names")), text
+
+
+# --- edits in place -------------------------------------------------------------------------------
+
+#: the sed command letters that take no argument, so the next command may follow on the same line
+SED_BARE = set("dDgGhHlnNpPqQxzF=")
+#: Perl's paired delimiters, for `s{...}{...}` and the like
+PERL_PAIRS = {"{": "}", "(": ")", "[": "]", "<": ">"}
+#: a Perl statement that is a substitution, up to its first delimiter
+PERL_SUBST = re.compile(r"s\s*([^\w\s=,;)])")
+#: Perl's flags after a substitution, and the digits after -0 or -l
+PERL_FLAGS = re.compile(r"[a-z]*")
+PERL_DIGITS = re.compile(r"x[0-9A-Fa-f]*|[0-7]*")
+
+
+def in_place(words: list[str]) -> tuple[list[str], list[str]] | None:
+    """(new texts, files) for a command that edits files in place with substitutions, or None for
+    any other command. It reads `sed -i` (GNU's `-i[SUFFIX]` and `--in-place`, and the BSD form whose
+    extension is the next word, `-i ''` or `-i .bak`) with its script as `-e` or the first plain word,
+    and `perl -i[ext] -p` with its code in `-e`. The texts are the replacements of the script's `s`
+    commands (sed's `s/OLD/NEW/flags`, with an address before it, and Perl's `s/OLD/NEW/`, `s{OLD}{NEW}`
+    and the like), with their escapes read. Any other command in the script is skipped, a replacement
+    Perl evaluates as code (the `e` flag) is left out, and a script from a file gives no text. The
+    files are the words after the script, as written."""
+    if not words:
+        return None
+    prog = os.path.basename(words[0])
+    if prog in ("sed", "gsed"):
+        found = _sed_in_place(words[1:])
+        return found and ([t for s in found[0] for t in _sed_replacements(s)], found[1])
+    if prog == "perl":
+        found = _perl_in_place(words[1:])
+        return found and (_perl_replacements(found[0]), found[1])
+    return None
+
+
+def _sed_in_place(args: list[str]) -> tuple[list[str], list[str]] | None:
+    """(scripts, files) for a sed command that edits in place, else None."""
+    edits, scripts, files = False, [], []
+    given, rest, i = False, False, 0           # given: a script came from -e, -f or a plain word
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if rest or a == "-" or not a.startswith("-"):
+            if given:
+                files.append(a)
+            else:
+                scripts.append(a)
+                given = True
+        elif a == "--":
+            rest = True
+        elif a.startswith("--"):
+            name, eq, value = a.partition("=")
+            if name == "--in-place":
+                edits = True
+            elif name in ("--expression", "--file"):
+                if not eq:
+                    value, i = nxt, i + 1
+                if name == "--expression" and value is not None:
+                    scripts.append(value)
+                given = True
+            elif name == "--line-length" and not eq:
+                i += 1
+        else:
+            for j, c in enumerate(a[1:], 1):
+                tail = a[j + 1:]
+                if c == "i":
+                    edits = True
+                    if not tail and nxt is not None and (nxt == "" or nxt.startswith(".")):
+                        i += 1                 # BSD sed's extension, a word of its own
+                    break                      # the rest of the word is GNU's suffix
+                if c in "ef":
+                    value = tail
+                    if not tail:
+                        value, i = nxt, i + 1
+                    if c == "e" and value is not None:
+                        scripts.append(value)
+                    given = True
+                    break
+                if c == "l":
+                    if not tail:
+                        i += 1
+                    break
+        i += 1
+    return (scripts, files) if edits and files else None
+
+
+def _sed_replacements(script: str) -> list[str]:
+    """The replacement of each `s` command in a sed script, with its escapes read."""
+    out: list[str] = []
+    i, n = 0, len(script)
+    while i < n:
+        c = script[i]
+        if c in " \t\n;{}!,$~+" or c.isdigit():
+            i += 1                             # separators and line addresses
+        elif c in "/\\":                       # a regular expression address, /re/ or \cREc
+            delim = c if c == "/" else script[i + 1:i + 2]
+            end = _closing(script, i + (1 if c == "/" else 2), delim, delim) if delim else None
+            if end is None:
+                return out
+            i = end + 1
+            while i < n and script[i] in "IM":
+                i += 1
+        elif c in "sy":
+            delim = script[i + 1:i + 2]
+            if not delim or delim in "\\\n":
+                return out
+            middle = _closing(script, i + 2, delim, delim)
+            end = None if middle is None else _closing(script, middle + 1, delim, delim)
+            if end is None:
+                return out
+            if c == "s":
+                out.append(_unescape(script[middle + 1:end], delim))
+            i = _sed_command_end(script, end + 1, flags=True)
+        elif c in SED_BARE:
+            i = _sed_command_end(script, i + 1, flags=False)
+        else:                                  # a, i, c, r, w, b and the rest take the line
+            nl = script.find("\n", i)
+            i = n if nl < 0 else nl + 1
+    return out
+
+
+def _sed_command_end(script: str, i: int, flags: bool) -> int:
+    """Where the next sed command may start after one that ended at `i`: after its flags (and a
+    `w file`, which takes the rest of the line), at the next `;`, `}` or newline."""
+    n = len(script)
+    while i < n and script[i] not in ";}\n":
+        if flags and script[i] == "w":
+            nl = script.find("\n", i)
+            return n if nl < 0 else nl
+        i += 1
+    return i
+
+
+def _perl_in_place(args: list[str]) -> tuple[str, list[str]] | None:
+    """(code, files) for a perl command that edits in place and prints each line (`-i` with `-p`),
+    with its code in `-e` or `-E`, else None."""
+    edits = printing = False
+    code: list[str] = []
+    files: list[str] = []
+    switches, i = True, 0
+    while i < len(args):
+        a = args[i]
+        if not switches or a == "-" or not a.startswith("-"):
+            if not code:
+                return None                    # the program is a file
+            switches = False
+            files.append(a)
+        elif a == "--":
+            switches = False
+        else:
+            j = 1
+            while j < len(a):
+                c, tail = a[j], a[j + 1:]
+                if c == "i":
+                    edits = True
+                    break                      # the rest of the word is the extension
+                if c in "eE":
+                    if tail:
+                        code.append(tail)
+                    elif i + 1 < len(args):
+                        i += 1
+                        code.append(args[i])
+                    break
+                if c in "0l":                  # -0777, -0x1ff, -l015: the digits are the value
+                    m = PERL_DIGITS.match(tail)
+                    j += 1 + len(m.group(0))
+                    continue
+                if c in "CDFIMmdx":            # the rest of the word is the value
+                    break
+                if c == "p":
+                    printing = True
+                j += 1
+        i += 1
+    return ("\n".join(code), files) if edits and printing and code and files else None
+
+
+def _perl_replacements(code: str) -> list[str]:
+    """The replacement of each statement of Perl code that is a substitution, with its escapes read.
+    A statement that is something else is skipped to its `;`."""
+    out: list[str] = []
+    i, n = 0, len(code)
+    while i < n:
+        while i < n and code[i] in " \t\n;":
+            i += 1
+        m = PERL_SUBST.match(code, i)
+        if m:
+            open_ = m.group(1)
+            close = PERL_PAIRS.get(open_, open_)
+            middle = _closing(code, m.end(), open_, close)
+            start, end = None, None
+            if middle is not None and open_ in PERL_PAIRS:
+                k = middle + 1
+                while k < n and code[k].isspace():
+                    k += 1
+                if k < n:
+                    second = code[k]
+                    start = k + 1
+                    end = _closing(code, start, second, PERL_PAIRS.get(second, second))
+                    open_, close = second, PERL_PAIRS.get(second, second)
+            elif middle is not None:
+                start = middle + 1
+                end = _closing(code, start, open_, close)
+            if end is None:
+                return out
+            flags = PERL_FLAGS.match(code, end + 1).group(0)
+            if "e" not in flags:
+                out.append(_unescape(code[start:end], open_, close))
+            i = end + 1 + len(flags)
+        semicolon = code.find(";", i)
+        i = n if semicolon < 0 else semicolon + 1
+    return out
+
+
+def _closing(text: str, i: int, open_: str, close: str) -> int | None:
+    """The index of the delimiter that closes a part started just before `i`, skipping escaped
+    characters and counting nested pairs when the delimiters differ, or None when it never closes."""
+    depth = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == close and depth == 0:
+            return i
+        if open_ != close:
+            depth += (c == open_) - (c == close)
+        i += 1
+    return None
+
+
+def _unescape(text: str, *delims: str) -> str:
+    """A replacement as the text it writes: `\\n` and `\\t` are a newline and a tab, a backslash
+    before a newline, a delimiter or another sign is that character, and a backslash before a letter
+    or a digit (`\\1`, `\\U`) is kept as written."""
+    out, i = [], 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt in "nt":
+                out.append("\n" if nxt == "n" else "\t")
+            elif nxt in delims or not nxt.isalnum():
+                out.append(nxt)
+            else:
+                out.append(text[i:i + 2])
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def git_invocations(command: str, cwd: str) -> list[dict]:

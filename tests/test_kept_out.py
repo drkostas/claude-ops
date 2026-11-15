@@ -91,6 +91,9 @@ def test_text_a_bash_command_writes_into_a_covered_file_is_refused(home):
     assert ko.check(bash("echo '~/scratch/tidy.py' >> notes/n.md", home), rules())
     assert ko.check(bash("printf 'use ~/scratch/tidy.py' | tee ~/skills/a/s.md", home), rules())
     assert ko.check(bash("echo '~/scratch/tidy.py' > ~/other.md", home), rules()) is None
+    assert ko.check(bash("sed -i '' 's|tidy|~/scratch/tidy.py|' ~/notes/n.md", home), rules())
+    assert ko.check(bash("perl -0pi -e 's/tidy/~\\/scratch\\/tidy.py/' ~/notes/n.md", home), rules())
+    assert ko.check(bash("sed -i '' 's|~/scratch/tidy.py|tidy|' ~/notes/n.md", home), rules()) is None
     assert ko.check(bash("cat ~/notes/n.md", home), rules()) is None
 
 
