@@ -466,9 +466,26 @@ def test_renew_keeps_any_other_refusal_as_it_was():
         with pytest.raises(urllib.error.HTTPError) as got:
             ac.renew(SAVED, fetch=answering(code, body)[0], now=NOW)
         assert not isinstance(got.value, ac.LoginExpired) and got.value.code == code, (code, body)
+        assert got.value.read() == body, (code, body)      # its caller can still read what the endpoint said
     with pytest.raises(urllib.error.HTTPError) as got:
         ac.renew(SAVED, fetch=refusing(400)[0], now=NOW)    # an error answer with no body at all
-    assert got.value.code == 400
+    assert got.value.code == 400 and got.value.read() == b""
+
+
+def test_renew_raises_a_refusal_it_read_with_its_address_reason_and_headers():
+    import io
+    headers = Message()
+    headers["Retry-After"] = "30"
+
+    def fetch(req, timeout=15):
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", headers,
+                                     io.BytesIO(b'{"error": "invalid_client"}'))
+    with pytest.raises(urllib.error.HTTPError) as got:
+        ac.renew(SAVED, fetch=fetch, now=NOW)
+    e = got.value
+    assert (e.code, e.reason, e.url, e.headers.get("Retry-After")) == (401, "Unauthorized", ac.TOKEN_URL, "30")
+    assert e.read() == b'{"error": "invalid_client"}'
+    assert e.__traceback__ is not None and "rt-9876543210" not in str(e)
 
 
 def test_retry_after_reads_seconds_or_an_http_date():

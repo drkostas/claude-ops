@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+import io
 import json
 import os
 import re
@@ -92,19 +93,27 @@ class LoginExpired(RuntimeError):
         super().__init__(f"the refresh token is no longer accepted{said}; only a new sign-in makes a new login")
 
 
-def _grant_refused(e: urllib.error.HTTPError) -> "LoginExpired | None":
-    """LoginExpired when a token endpoint's error answer is OAuth's `invalid_grant`, else None. Any
-    other refusal (a malformed request, a blocked client, an outage) may pass on a later try, so it is
-    left as the HTTPError it is."""
-    if e.code not in (400, 401):
-        return None
+def _grant_refused(raw: bytes) -> "LoginExpired | None":
+    """LoginExpired when a token endpoint's error answer `raw` is OAuth's `invalid_grant`, else None.
+    Any other refusal (a malformed request, a blocked client, an outage) may pass on a later try."""
     try:
-        body = json.loads(e.read() or b"{}")
+        body = json.loads(raw or b"{}")
     except Exception:  # noqa: BLE001 - an answer that is not JSON says nothing about the grant
         return None
     if not isinstance(body, dict) or body.get("error") != "invalid_grant":
         return None
     return LoginExpired(str(body.get("error_description") or "")[:200])
+
+
+def _read_answer(e: urllib.error.HTTPError) -> "tuple[bytes, urllib.error.HTTPError]":
+    """The error answer's body, and an HTTPError with the same address, code, reason and headers whose
+    body can still be read. Reading an HTTPError's body uses it up, and setting its `fp` afterwards
+    does not give it back, because the error reads through a wrapper that keeps the first file."""
+    try:
+        raw = e.read() or b""
+    except Exception:  # noqa: BLE001 - a body that cannot be read is an empty one
+        raw = b""
+    return raw, urllib.error.HTTPError(e.url, e.code, e.msg, e.hdrs, io.BytesIO(raw))
 
 
 def retry_after_seconds(value: "str | None", now: "dt.datetime | None" = None) -> "int | None":
@@ -279,7 +288,7 @@ def profile(token: str, *, fetch=urllib.request.urlopen) -> dict:
 def renew(login: dict, *, fetch=urllib.request.urlopen, now: dt.datetime | None = None) -> dict:
     """The login renewed with its refresh token (never the login in use, see the module's note).
     Raises LoginExpired when the endpoint refuses the refresh token itself (`invalid_grant`), which no
-    retry changes; any other refusal is raised as the HTTPError it is."""
+    retry changes. Any other refusal is raised as an HTTPError with its code, headers and body."""
     o = dict(login["claudeAiOauth"])
     body = json.dumps({"grant_type": "refresh_token", "refresh_token": o["refreshToken"],
                        "client_id": CLIENT_ID, "scope": " ".join(o.get("scopes") or [])}).encode()
@@ -289,10 +298,13 @@ def renew(login: dict, *, fetch=urllib.request.urlopen, now: dt.datetime | None 
         with fetch(req, timeout=15) as r:
             t = json.loads(r.read())
     except urllib.error.HTTPError as e:
-        gone = _grant_refused(e)
+        if e.code not in (400, 401):
+            raise
+        raw, kept = _read_answer(e)
+        gone = _grant_refused(raw)
         if gone is not None:
             raise gone from e
-        raise
+        raise kept.with_traceback(e.__traceback__) from None
     now = now or dt.datetime.now(dt.timezone.utc)
     o.update(accessToken=t["access_token"], refreshToken=t.get("refresh_token", o["refreshToken"]),
              expiresAt=int((now.timestamp() + int(t.get("expires_in", 0))) * 1000))
