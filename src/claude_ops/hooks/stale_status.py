@@ -1,31 +1,36 @@
-"""Keep a shell script from reading `$?` after a command substitution in the same word (a PreToolUse hook).
+"""Keep a shell script from reading `$?` after a command substitution in the same command (a PreToolUse hook).
 
 `$?` is the exit status of the most recent command, and a command substitution is a command. In
 `cmd; echo "$(date +%H:%M) cmd exited $?"` the substitution runs first, so `$?` is the status of
 `date`, nearly always 0, and a script that logs or tests it reports success for a command that failed.
-bash and zsh expand a word from left to right and both behave this way. The fix is to save the status
-on its own statement before anything else runs:
+The same holds across the words of one simple command: bash expands them from left to right, so in
+`cmd; echo $(date) exited $?`, `a=$(date) rc=$?` or a here-document whose command has a substitution,
+`$?` is the substitution's status too. The fix is to save the status on its own statement before
+anything else runs:
 
     cmd; rc=$?; echo "$(date +%H:%M) cmd exited $rc"
 
 After a pipe, bash keeps the status of each command of the pipe in `PIPESTATUS`.
 
 This hook reads what a tool call would write into a shell script and refuses it (exit 2, with the
-reason sent back to the model) when the text reads `$?` later in the same word or quoted string as a
-`$(...)` or a backtick substitution:
+reason sent back to the model) when the text reads `$?` later in the same simple command as a `$(...)`
+or a backtick substitution. A command ends at `;`, `&`, `|`, a parenthesis or the end of a line (a
+backslash before the newline continues it), and the body of an unquoted here-document belongs to the
+command that opened it, since the shell expands it after that command's words:
 
 - a Write of a file whose name ends in `.sh` or whose first line runs sh or bash (`#!/bin/sh`,
   `#!/bin/bash`, `#!/usr/bin/env bash`);
 - an Edit or MultiEdit of such a file: the edit is applied to the file as it is, and only a line the
   file did not already have is refused;
-- text a Bash command writes into such a file (a here-document, `echo` or `printf` redirected, or piped
-  into `tee`), read by `commandline`, shared with the other hooks.
+- text a Bash command writes into such a file (a here-document, `echo` or `printf` redirected, piped
+  into `tee`, or the replacement of a `sed -i` or `perl -i -p` substitution), read by `commandline`,
+  shared with the other hooks.
 
 The command line given to the Bash tool is not read. Single quotes, a quoted here-document, a comment
 and an escaped `\\$?` are text. `rc=$?` on its own statement, a plain `"$?"`, a `$?` before the
-substitution and a `$?` inside `$(( ... ))` with no substitution before it go through. The body of an
-unquoted here-document is one string, as the shell expands it. On anything unexpected the call goes
-through: a broken hook must never stop work.
+substitution, a `$?` inside a substitution of its own and a `$?` inside `$(( ... ))` with no substitution
+before it go through. Text with no `$?` or `${?` in it (a Write's, or the file's after an Edit) is not
+scanned at all. On anything unexpected the call goes through: a broken hook must never stop work.
 
     claude-ops hook stale-status      # reads the tool call on stdin
     python3 -P -m claude_ops.hooks.stale_status
@@ -43,17 +48,21 @@ from . import commandline
 SHEBANG = re.compile(r"^#!\s*(?:\S*/)?(?:env\s+(?:-\S+\s+)*)?(?:sh|bash)(?:\s|$)")
 #: the characters that end a word outside quotes
 BREAKS = set(" \t\n;&|<>()")
+#: the ones that also end the simple command (with the newline, handled on its own)
+ENDS = set(";&|()")
+#: what a status read is written as
+READS = ("$?", "${?")
 
 
 class Word:
-    """The word being read: whether a command substitution in it has already run."""
+    """The simple command being read: whether a command substitution in it has already run."""
 
     def __init__(self):
         self.ran = False
 
 
 class Scanner:
-    """Reads shell text and records where `$?` follows a command substitution in the same word.
+    """Reads shell text and records where `$?` follows a command substitution in the same command.
 
     Each method takes the index to read from and returns the index after what it read. `hits` holds
     the line number of each such `$?`, counted from `base` (the line before the text's first)."""
@@ -74,24 +83,24 @@ class Scanner:
     def script(self, i: int, closer: str | None = None) -> int:
         """Read statements from i until `closer` (")" for `$(...)`) or the end. Returns the index after
         the closer."""
-        word = Word()
+        word = Word()                                  # the simple command being read
         depth = 0                                      # subshell parentheses opened inside
-        heredocs: list[tuple[str, bool, bool]] = []    # (delimiter, quoted, strip tabs) to read at the newline
+        heredocs: list[tuple[str, bool, bool, Word]] = []   # (delimiter, quoted, strip tabs, its command)
         fresh = True                                   # nothing of the current word read yet
         while i < self.n:
             c = self.t[i]
             if c == "\n":
                 i += 1
-                for delim, quoted, strip in heredocs:
-                    i = self.heredoc(i, delim, quoted, strip)
+                for delim, quoted, strip, cmd in heredocs:
+                    i = self.heredoc(i, delim, quoted, strip, cmd)
                 heredocs = []
                 word, fresh = Word(), True
                 continue
             if c == "<" and self.t.startswith("<<", i) and not self.t.startswith("<<<", i):
                 i, doc = self.heredoc_start(i + 2)
                 if doc:
-                    heredocs.append(doc)
-                word, fresh = Word(), True
+                    heredocs.append(doc + (word,))     # its body is expanded after its command's words
+                fresh = True
                 continue
             if c in BREAKS:
                 if c == "(":
@@ -101,7 +110,9 @@ class Scanner:
                         depth -= 1
                     elif closer == ")":
                         return i + 1
-                word, fresh = Word(), True
+                if c in ENDS:
+                    word = Word()
+                fresh = True
                 i += 1
                 continue
             if c == "#" and fresh:
@@ -229,9 +240,9 @@ class Scanner:
         quoted = any(q in raw for q in "'\"\\")
         return i, (re.sub(r"['\"\\]", "", raw), quoted, strip)
 
-    def heredoc(self, i: int, delim: str, quoted: bool, strip: bool) -> int:
+    def heredoc(self, i: int, delim: str, quoted: bool, strip: bool, cmd: Word | None = None) -> int:
         """Read a here-document's body from i to its delimiter line. An unquoted body is one string, read
-        with a word of its own. Returns the index after the delimiter line, or i itself when no line ends
+        as part of the command that opened it (`cmd`). Returns the index after the delimiter line, or i itself when no line ends
         it (`<<` was a shift in `(( x << 2 ))`, or the text is a piece of a script), so the text after it
         is read as statements."""
         start = i
@@ -241,20 +252,22 @@ class Scanner:
             line = self.t[i:end]
             if (line.lstrip("\t") if strip else line) == delim:
                 if not quoted:
-                    self.body(start, i)
+                    self.body(start, i, cmd or Word())
                 return min(end + 1, self.n)
             i = end + 1
         return start
 
-    def body(self, start: int, end: int) -> None:
+    def body(self, start: int, end: int, cmd: Word) -> None:
         sub = Scanner(self.t[start:end], self.line(start) - 1)
-        sub.quoted(0, Word(), None)
+        sub.quoted(0, cmd, None)
         self.hits.extend(sub.hits)
 
 
 def stale_lines(text: str) -> list[tuple[int, str]]:
     """(line number, line) for each line of shell text that reads `$?` after a command substitution in
-    the same word, each line once."""
+    the same command, each line once."""
+    if not any(r in text for r in READS):            # no status read, nothing to find
+        return []
     sc = Scanner(text)
     sc.script(0)
     lines = text.splitlines()
@@ -303,6 +316,8 @@ def edited(path: str, edits: list[dict]) -> tuple[str, str] | None:
 
 def new_hits(old: str, new: str) -> list[tuple[int, str]]:
     """The lines of `new` that read a stale `$?` and are not such a line in `old` already."""
+    if not any(r in new for r in READS):             # the edited file reads no status: skip both scans
+        return []
     before: dict[str, int] = {}
     for _, line in stale_lines(old):
         before[line] = before.get(line, 0) + 1
@@ -353,7 +368,7 @@ def check(payload: dict) -> str | None:
     shown = line.strip()
     shown = shown if len(shown) <= 100 else shown[:97] + "..."
     more = f" (and {len(hits) - 1} more)" if len(hits) > 1 else ""
-    return (f"line {n} of {path} reads $? after a command substitution in the same word{more}: {shown}. "
+    return (f"line {n} of {path} reads $? after a command substitution in the same command{more}: {shown}. "
             "The substitution runs first, so $? is its status (0 for $(date)), not the status of the command "
             "before it. Save the status on its own statement first, cmd; rc=$? and then use $rc (after a "
             "pipe, rc=${PIPESTATUS[0]}). If you meant the status of the substitution itself, save it the "

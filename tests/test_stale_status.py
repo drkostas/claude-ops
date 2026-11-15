@@ -1,4 +1,4 @@
-"""The stale-status hook: a shell script that reads `$?` after a command substitution in the same word
+"""The stale-status hook: a shell script that reads `$?` after a command substitution in the same command
 is refused in a Write, an Edit, a MultiEdit and in text a Bash command writes into it, and everything
 else goes through."""
 import io
@@ -20,6 +20,15 @@ WRONG = [
     'echo "rc $(( $(true; echo 0) + $? ))"',
     'x=$(true)$?; echo "rc $x"',
     'cat <<EOF\n$(true)\nrc $?\nEOF',
+    # later words of the same simple command, which bash expands from left to right
+    'echo $(true) rc $?',
+    'echo "$(true)" "rc $?"',
+    'printf "%s rc %s\\n" "$(true)" "$?"',
+    'a=$(true) b=$?; echo "rc $b"',
+    'f() { local a=$(true) b=$?; echo "rc $b"; }; f',
+    'echo $(true) \\\nrc $?',
+    # a here-document's body is expanded after the words of the command that opened it
+    'cat $(echo /dev/null) - <<EOF\nrc $?\nEOF',
 ]
 RIGHT = [
     'rc=$?; echo "$(true) rc $rc"',
@@ -27,6 +36,11 @@ RIGHT = [
     'echo "rc $? $(true)"',
     'echo "rc $(( $? + 0 ))"',
     'echo "rc $(echo $?)"',
+    'echo rc $? $(true)',
+    'echo rc $? `true`',
+    'echo "rc $(echo $?)" $(true)',
+    'rc=$?; echo $(true) rc $rc',
+    'cat <<EOF; true $(true)\nrc $?\nEOF',
 ]
 # Text, not a read of the status: nothing to run, nothing to refuse.
 TEXT = [
@@ -37,6 +51,9 @@ TEXT = [
     'cat <<"EOF"\n$(date) rc $?\nEOF',
     '(( x << 2 ))\necho "$(date)"\necho "rc $?"',
     'out=$(cmd) || rc=$?\nif [ $? -ne 0 ]; then echo failed; fi',
+    'echo $(date) && echo "rc $?"',
+    '[ -n "$(date)" ]; echo $?',
+    'for f in $(ls); do echo $?; done',
 ]
 
 
@@ -59,6 +76,24 @@ def test_bash_reads_the_status_as_the_hook_says(line, expected):
 @pytest.mark.parametrize("text", TEXT)
 def test_quotes_escapes_comments_and_other_statements_go_through(text):
     assert ss.stale_lines(text) == []
+
+
+def test_text_with_no_status_read_is_not_scanned(monkeypatch):
+    def no_scan(*a, **k):
+        raise AssertionError("scanned")
+    monkeypatch.setattr(ss.Scanner, "script", no_scan)
+    assert ss.stale_lines('echo "$(date) done"\n') == []
+    assert ss.new_hits('echo "$(date) $?"\n', 'echo "$(date) done"\n') == []
+    with pytest.raises(AssertionError):
+        ss.stale_lines('echo "$(date) $?"')
+
+
+def test_an_edit_that_puts_a_substitution_before_an_old_status_read_is_refused(tmp_path):
+    script = tmp_path / "job.sh"
+    script.write_text('run_job\necho "rc $?"\n')
+    edit = {"tool_name": "Edit", "cwd": "/", "tool_input": {
+        "file_path": str(script), "old_string": 'echo "rc', "new_string": 'echo "$(date) rc'}}
+    assert ss.check(edit).startswith("line 2 of ")
 
 
 def test_a_finding_names_the_line_it_is_on():
