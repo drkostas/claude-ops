@@ -128,3 +128,34 @@ def test_several_records_read_the_process_table_once(heavy, monkeypatch):
         f.unlink()
     (heavy.PAST / f"{dead.pid}.json").write_text(json.dumps({"chat": "a", "what": "gone", "pid": dead.pid, "at": 0}))
     assert heavy.past_jobs() == [] and calls == []            # no live pid, no ps
+
+
+def test_one_poll_of_a_waiter_reads_the_process_table_once(heavy, fresh, monkeypatch):
+    """A waiter's poll reads a holder, a job past its turn, their memory samples and the tickets, and each read
+    asked `ps` for itself. Under load one `ps` took most of a second of wall time, so the poll shares one."""
+    calls = []
+
+    def counted():
+        calls.append(1)
+        return {}
+
+    monkeypatch.setattr(heavy, "starts", counted)
+    monkeypatch.setattr(heavy, "machine", lambda: (20.0, 0.0, 50.0, 1.0, 500.0))
+    monkeypatch.setattr(heavy, "say", lambda *_a, **_k: None)
+    monkeypatch.setattr(heavy, "hook", lambda *_a, **_k: None)
+    me, now = os.getpid(), time.time()
+    heavy.SLOT.mkdir(parents=True)
+    (heavy.SLOT / "who.json").write_text(json.dumps(
+        {"chat": "a", "what": "long build", "pid": me, "since": "03:21", "at": now - (heavy.TURN_MIN + 5) * 60}))
+    heavy.PAST.mkdir(parents=True)
+    (heavy.PAST / f"{fresh.pid}.json").write_text(json.dumps({"chat": "a", "what": "old build", "pid": fresh.pid,
+                                                              "at": now}))
+    heavy.TAKING.mkdir(parents=True)
+    for pid in (me, fresh.pid):
+        (heavy.TAKING / f"{pid}.json").write_text(json.dumps({"now_gb": 1.0, "peak_gb": 3.0, "at": now}))
+    heavy.QUEUE.mkdir(parents=True)
+    (heavy.QUEUE / f"{time.time_ns() - 10**9:020d}.{fresh.pid}.json").write_text(
+        json.dumps({"chat": "c", "what": "queued first", "waiter": fresh.pid}))
+    with pytest.raises(heavy.GaveUp):
+        heavy.wait_turn("b", "job", me, max_wait=0)
+    assert len(calls) == 1, f"one poll asked ps {len(calls)} times"

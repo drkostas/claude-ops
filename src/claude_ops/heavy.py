@@ -481,9 +481,9 @@ def taking(pid: int, now_gb: float, peak_gb: float) -> None:
         pass
 
 
-def may_take_again(h: dict | None) -> tuple[float, float]:
+def may_take_again(h: dict | None, started: Starts | None = None) -> tuple[float, float]:
     """(GB the job of holder `h` may take again, its peak so far): its sampled peak less what it uses now,
-    (0, 0) when it has written no sample or has ended."""
+    (0, 0) when it has written no sample or has ended. `started` is a caller's Starts, shared across its reads."""
     if not h:
         return 0.0, 0.0
     try:
@@ -492,17 +492,19 @@ def may_take_again(h: dict | None) -> tuple[float, float]:
         now, peak = float(rec.get("now_gb", 0)), float(rec.get("peak_gb", 0))
     except (KeyError, TypeError, ValueError, OSError):
         return 0.0, 0.0
-    if not same_job(pid, h.get("at")):
+    if not same_job(pid, h.get("at"), started):
         return 0.0, 0.0
     return round(max(0.0, peak - now), 1), peak
 
 
-def taking_back(h: dict | None) -> tuple[float, str]:
+def taking_back(h: dict | None, started: Starts | None = None) -> tuple[float, str]:
     """(GB every running job past its turn may take again, the words for it): the slot's holder when it is past
     its turn, and each job that gave the slot up and still runs (past_jobs). A job that took over the slot is
-    within its turn, and the one it took over from keeps running in PAST, so both are read."""
-    jobs = ([h] if past_turn(h) else []) + [j for j in past_jobs() if not h or int(j["pid"]) != int(h["pid"])]
-    got = [(j, *may_take_again(j)) for j in jobs]
+    within its turn, and the one it took over from keeps running in PAST, so both are read. Every record read here
+    shares one Starts, the caller's when it gives one."""
+    started = Starts() if started is None else started
+    jobs = ([h] if past_turn(h) else []) + [j for j in past_jobs(started) if not h or int(j["pid"]) != int(h["pid"])]
+    got = [(j, *may_take_again(j, started)) for j in jobs]
     got = [(j, back, top) for j, back, top in got if back > 0]
     if not got:
         return 0.0, ""
@@ -520,11 +522,11 @@ def _ago(minutes: float) -> str:
     return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min"
 
 
-def past_jobs() -> list[dict]:
+def past_jobs(started: Starts | None = None) -> list[dict]:
     """The jobs that gave the slot up past their turn and still run; a file whose job ended goes, and so does
     one whose pid now belongs to a newer process (same_job)."""
     out = []
-    started = Starts()
+    started = Starts() if started is None else started
     for f in sorted(PAST.glob("*.json")) if PAST.is_dir() else []:
         try:
             j = json.loads(f.read_text())
@@ -537,7 +539,7 @@ def past_jobs() -> list[dict]:
     return out
 
 
-def clear_stale() -> None:
+def clear_stale(started: Starts | None = None) -> None:
     """A slot whose holder is gone is free; one made but never filled is free after a minute.
 
     A holder that gives the slot back removes its record and then the folder, so a look that finds
@@ -548,7 +550,7 @@ def clear_stale() -> None:
     A holder or a sample whose pid now belongs to a newer process is gone too (same_job): the system
     gives an ended job's pid to another process in time, and that slot was held by nobody until a person
     removed it."""
-    started = Starts()
+    started = Starts() if started is None else started
     for f in TAKING.glob("*.json") if TAKING.is_dir() else ():
         try:
             pid = int(f.stem)
@@ -574,11 +576,11 @@ def clear_stale() -> None:
         shutil.rmtree(SLOT, ignore_errors=True)
 
 
-def waiters() -> list[dict]:
+def waiters(started: Starts | None = None) -> list[dict]:
     """The live tickets, oldest first; a ticket whose waiter is gone is removed, and so is one whose pid now
     belongs to a newer process (same_job, with the time in the ticket's name)."""
     out = []
-    started = Starts()
+    started = Starts() if started is None else started
     for t in sorted(QUEUE.glob("*.json")) if QUEUE.is_dir() else []:
         try:
             w = json.loads(t.read_text())
@@ -699,11 +701,14 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
         while True:
             if not alive(holder_pid):
                 return False
-            clear_stale()
+            # One look at the process table for the whole poll: under load one `ps` took most of a second of
+            # wall time, and each reader below made its own.
+            started = Starts()
+            clear_stale(started)
             m = machine()
             held = reasons(m, ask)
             # beside jobs past their turn, the room they may take again is not free
-            back, words = taking_back(holder())
+            back, words = taking_back(holder(), started)
             if not held and back and m[0] - back < ask:
                 held = [("memory", f"only {round(m[0] - back, 1):g} GB of memory free once {words} "
                                    f"(needs {ask:g})")]
@@ -724,7 +729,7 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
             # it. The turn goes to the first waiter that could start now.
             _mark(ticket, why, {"at": held_since, "most_free_gb": most_free} if held_since else None,
                   sorted({kind for kind, _words in held}))
-            order = turn_order([w for w in waiters() if not w.get("short")])
+            order = turn_order([w for w in waiters(started) if not w.get("short")])
             h = holder()
             if not why and (not SLOT.exists() or past_turn(h)) and order and order[0]["ticket"] == ticket.name:
                 if SLOT.exists():       # its holder is past its turn: it keeps running, and moves aside
