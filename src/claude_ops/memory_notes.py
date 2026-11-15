@@ -1,0 +1,138 @@
+"""Memory notes that have grown large and are still being written.
+
+Claude Code keeps a project's memory as markdown files in `~/.claude/projects/<folder>/memory/`.
+A note that a session appends to all day grows without limit, and anything that republishes or
+syncs the whole file on each write pays for its size every time. These functions find such notes
+from their size and modification time alone. The notes themselves are never opened.
+
+A folder may keep an index note whose lines link each session's current note, for example
+`- [build state, 15 Nov](build-state-2026-11-15.md)`. When `index_name` is given, a large note is
+returned with the link text of the line that links it, so a caller can tell whose it is.
+
+A note the index does not link but still names was rolled away: its history was kept and a new note
+took its place (the note linked on the line that names it). So was an unlinked note whose name
+without its date (`build-state` for `build-state-2026-11-01.md`) is a linked note's. A rolled note is
+left out only while it has not been written since its successor was created. One written after that
+is a session still appending to its old note, and it is returned with its successor's label. Where
+the file system gives no creation time (Linux), a rolled note is always left out.
+"""
+from __future__ import annotations
+
+import os
+import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+PROJECTS = Path.home() / ".claude/projects"
+#: a note above this many bytes counts as large
+MIN_BYTES = 60_000
+#: a note written within this many seconds is still being written
+WITHIN_S = 86_400
+
+LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+\.md)\)")
+DATED = re.compile(r"-\d{4}-\d{2}-\d{2}.*$")
+
+
+@dataclass(frozen=True)
+class LargeNote:
+    folder: Path          # the memory folder
+    path: Path
+    size: int             # bytes
+    written_at: float     # modification time, seconds since the epoch
+    label: str | None     # the link text of the index line that links it, None when none does
+
+
+def stem(name: str) -> str:
+    """A note's name without `.md` and without a date suffix: `build-state-2026-11-01-night.md`
+    gives `build-state`."""
+    base = name[:-3] if name.endswith(".md") else name
+    return DATED.sub("", base)
+
+
+@dataclass(frozen=True)
+class Index:
+    links: dict[str, str]                       # linked file name to its link text
+    lines: list[tuple[str, list[str]]]          # each line, and the file names it links
+
+
+def read_index(path: Path) -> Index:
+    """The index's links and lines. A missing or unreadable index gives neither."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return Index({}, [])
+    links: dict[str, str] = {}
+    lines: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        found = LINK.findall(line)
+        for label, target in found:
+            links.setdefault(os.path.basename(target), label.strip())
+        lines.append((line, [os.path.basename(t) for _l, t in found]))
+    return Index(links, lines)
+
+
+def names(text: str, name: str) -> bool:
+    """True when `text` names the file `name` as a whole name, so `a.md` is not found in `data.md`."""
+    return re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9])", text) is not None
+
+
+def successor(name: str, index: Index) -> str | None:
+    """The linked note that replaced an unlinked one: the note linked on a line that names it, else a
+    linked note with the same name without its date. None for a linked note or one never replaced."""
+    if name in index.links:
+        return None
+    for line, linked in index.lines:
+        if linked and names(line, name):
+            return linked[0]
+    own = stem(name)
+    return next((n for n in index.links if stem(n) == own), None)
+
+
+def birth_time(path: Path) -> float | None:
+    """When the file was created, where the file system keeps it (macOS, BSD), else None."""
+    try:
+        return getattr(os.stat(path), "st_birthtime", None)
+    except OSError:
+        return None
+
+
+def large_notes(projects: Path = PROJECTS, *, min_bytes: int = MIN_BYTES, within_s: float = WITHIN_S,
+                index_name: str | None = None, now: float | None = None,
+                birth: Callable[[Path], float | None] = birth_time) -> list[LargeNote]:
+    """Every memory note over `min_bytes` written within `within_s` seconds, largest first.
+
+    Only sizes and modification times are read, the creation time of a rolled note's successor, and
+    the index note when `index_name` names one. A folder that cannot be listed is skipped, and a note
+    that disappears while it is read too. `birth` gives a file's creation time (None when unknown)."""
+    now = time.time() if now is None else now
+    found: list[LargeNote] = []
+    try:
+        folders = sorted(p / "memory" for p in Path(projects).iterdir() if (p / "memory").is_dir())
+    except OSError:
+        return []
+    for folder in folders:
+        index = read_index(folder / index_name) if index_name else Index({}, [])
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.endswith(".md") or not entry.is_file(follow_symlinks=False):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if st.st_size <= min_bytes or now - st.st_mtime > within_s:
+                continue
+            label = index.links.get(entry.name)
+            nxt = successor(entry.name, index) if index_name and entry.name != index_name else None
+            if nxt is not None:
+                born = birth(folder / nxt)
+                if born is None or st.st_mtime < born:
+                    continue                    # rolled, and not written since
+                label = index.links.get(nxt)    # still written after the roll: its successor's
+            found.append(LargeNote(folder, Path(entry.path), st.st_size, st.st_mtime, label))
+    return sorted(found, key=lambda n: -n.size)
