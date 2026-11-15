@@ -333,6 +333,20 @@ only mDNS announces, so a machine on another network cannot find it. `adb-reach`
 port, and when that refuses it scans the address for the wireless-debugging port, connects there and
 runs `tcpip`, so the fixed port listens again. It needs a key the device already accepts.
 
+## The adb server's log under a size
+
+```bash
+claude-ops adb-log                          # cut the log over 100 MB, its last 5 MB kept in <log>.1
+claude-ops adb-log --max 50 --keep 2 --json
+```
+
+The adb server appends to one log file for as long as it runs, and a new server appends to the same
+file, so the log only grows. A server that keeps retrying a device it cannot reach writes a few lines a
+second. Because the server opens the log for appending, the file can be emptied while the server runs,
+and its next lines start at the top. `adb-log` keeps the log's end in `<log>.1` and then empties the log.
+It finds the log where adb does (`ANDROID_ADB_LOG_PATH`, else `adb.<uid>.log` in `TMPDIR` or `/tmp`), or
+takes `--path`.
+
 ## One heavy job at a time
 
 ```bash
