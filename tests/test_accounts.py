@@ -469,7 +469,7 @@ def test_renew_keeps_any_other_refusal_as_it_was():
         assert got.value.read() == body, (code, body)      # its caller can still read what the endpoint said
     with pytest.raises(urllib.error.HTTPError) as got:
         ac.renew(SAVED, fetch=refusing(400)[0], now=NOW)    # an error answer with no body at all
-    assert got.value.code == 400 and got.value.read() == b""
+    assert got.value.code == 400
 
 
 def test_renew_raises_a_refusal_it_read_with_its_address_reason_and_headers():

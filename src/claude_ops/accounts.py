@@ -108,7 +108,11 @@ def _grant_refused(raw: bytes) -> "LoginExpired | None":
 def _read_answer(e: urllib.error.HTTPError) -> "tuple[bytes, urllib.error.HTTPError]":
     """The error answer's body, and an HTTPError with the same address, code, reason and headers whose
     body can still be read. Reading an HTTPError's body uses it up, and setting its `fp` afterwards
-    does not give it back, because the error reads through a wrapper that keeps the first file."""
+    does not give it back, because the error reads through a wrapper that keeps the first file. An
+    error made with no file has no body, and Python 3.9 keeps no address on it, so it is given back
+    as it is."""
+    if e.fp is None:
+        return b"", e
     try:
         raw = e.read() or b""
     except Exception:  # noqa: BLE001 - a body that cannot be read is an empty one
