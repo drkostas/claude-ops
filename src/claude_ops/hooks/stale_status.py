@@ -22,8 +22,9 @@ command that opened it, since the shell expands it after that command's words:
   `#!/bin/bash`, `#!/usr/bin/env bash`);
 - an Edit or MultiEdit of such a file: the edit is applied to the file as it is, and only a line the
   file did not already have is refused;
-- text a Bash command writes into such a file (a here-document, `echo` or `printf` redirected, or piped
-  into `tee`), read by `commandline`, shared with the other hooks.
+- text a Bash command writes into such a file (a here-document, `echo` or `printf` redirected, piped
+  into `tee`, or the replacement of a `sed -i` or `perl -i -p` substitution), read by `commandline`,
+  shared with the other hooks.
 
 The command line given to the Bash tool is not read. Single quotes, a quoted here-document, a comment
 and an escaped `\\$?` are text. `rc=$?` on its own statement, a plain `"$?"`, a `$?` before the
