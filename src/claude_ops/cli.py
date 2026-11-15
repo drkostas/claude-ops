@@ -39,7 +39,9 @@ HOOKS = {
                    {"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
                     "hooks": [{"type": "command", "command": "claude-ops hook kept-out"}]},
                    {"matcher": "Bash|Write|Edit|MultiEdit|mcp__.*",
-                    "hooks": [{"type": "command", "command": "claude-ops hook clock-ahead"}]}],
+                    "hooks": [{"type": "command", "command": "claude-ops hook clock-ahead"}]},
+                   {"matcher": "Bash|Write|Edit|MultiEdit",
+                    "hooks": [{"type": "command", "command": "claude-ops hook stale-status"}]}],
 }
 
 
@@ -168,6 +170,9 @@ def cmd_hook(a) -> int:
     if a.name == "kept-out":
         from .hooks import kept_out
         return kept_out.main([])
+    if a.name == "stale-status":
+        from .hooks import stale_status
+        return stale_status.main([])
     if a.name == "clock-ahead":
         from .hooks import clock_ahead
         return clock_ahead.main([])
@@ -485,7 +490,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
                                     "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "mail-guard", "wide-kill",
-                                    "clock-ahead",
+                                    "clock-ahead", "stale-status",
                                     "rtk-rewrite", "chain"))
     s.set_defaults(func=cmd_hook)
 
