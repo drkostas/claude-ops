@@ -424,6 +424,53 @@ def test_other_http_errors_come_through_as_they_were():
         ac.profile("tok", fetch=refusing(500, "10")[0])
 
 
+# --- a refresh token the endpoint no longer accepts ------------------------------------------
+
+def answering(code, body: bytes):
+    """A fetch that refuses with `code` and `body` as the error answer."""
+    import io
+    calls = []
+
+    def fetch(req, timeout=15):
+        calls.append(req)
+        raise urllib.error.HTTPError(req.full_url, code, "Bad Request", Message(), io.BytesIO(body))
+    return fetch, calls
+
+
+SAVED = {"claudeAiOauth": {"accessToken": "at-0123456789", "refreshToken": "rt-9876543210", "expiresAt": 0,
+                           "scopes": ["user:inference"]}}
+
+
+def test_renew_says_the_login_expired_when_the_grant_is_refused():
+    fetch, calls = answering(400, b'{"error": "invalid_grant", "error_description": "Refresh token expired"}')
+    with pytest.raises(ac.LoginExpired) as got:
+        ac.renew(SAVED, fetch=fetch, now=NOW)
+    assert got.value.detail == "Refresh token expired"
+    assert "Refresh token expired" in str(got.value) and "new sign-in" in str(got.value)
+    assert isinstance(got.value.__cause__, urllib.error.HTTPError) and got.value.__cause__.code == 400
+    assert len(calls) == 1                                  # asked once, never again by itself
+    first = str(got.value)
+    # a revoked or reused token is the same refusal, with or without words
+    with pytest.raises(ac.LoginExpired) as got:
+        ac.renew(SAVED, fetch=answering(400, b'{"error": "invalid_grant"}')[0], now=NOW)
+    assert got.value.detail == ""
+    # nothing secret reaches the message, which a caller writes to a log
+    for said in (first, str(got.value)):
+        assert "rt-9876543210" not in said and "at-0123456789" not in said
+
+
+def test_renew_keeps_any_other_refusal_as_it_was():
+    # a malformed request, a blocked client or an outage may pass on a later try
+    for code, body in ((400, b'{"error": "invalid_request"}'), (400, b"not json"), (400, b""),
+                       (403, b'{"error": "invalid_grant"}'), (500, b"")):
+        with pytest.raises(urllib.error.HTTPError) as got:
+            ac.renew(SAVED, fetch=answering(code, body)[0], now=NOW)
+        assert not isinstance(got.value, ac.LoginExpired) and got.value.code == code, (code, body)
+    with pytest.raises(urllib.error.HTTPError) as got:
+        ac.renew(SAVED, fetch=refusing(400)[0], now=NOW)    # an error answer with no body at all
+    assert got.value.code == 400
+
+
 def test_retry_after_reads_seconds_or_an_http_date():
     assert ac.retry_after_seconds("120") == 120
     assert ac.retry_after_seconds(" 7 ") == 7
