@@ -17,6 +17,11 @@ ROOMY = "20 2 50"          # free GB, swap GB, disk %: a machine with room
 SRC = str(Path(claude_ops.__file__).resolve().parents[1])
 
 
+
+# records below are written hours back for processes the test has just started; a job's process starts
+# before its record, so these tests read every process as started at the epoch (same_job)
+PROCESSES_STARTED = "0"
+
 def test_a_slot_given_back_while_it_is_looked_at_is_no_error(monkeypatch, tmp_path):
     """clear_stale finds the slot's folder, then reads its age. A holder that gives the slot back in
     between (its record goes first, then the folder) used to end the waiter that looked with
@@ -149,7 +154,7 @@ def test_a_waiter_beside_a_job_past_its_turn_counts_the_room_that_job_may_take_a
         sample.write_text(json.dumps({"now_gb": 2.0, "peak_gb": 9.0, "at": time.time()}))
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
                "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC,
-               "HEAVY_LOG": str(tmp_path / "heavy.log")}
+               "HEAVY_LOG": str(tmp_path / "heavy.log"), "HEAVY_FAKE_STARTED": PROCESSES_STARTED}
         waiter = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "second", "--", "echo", "ran"],
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         time.sleep(2)
@@ -193,8 +198,9 @@ def test_a_job_that_gave_the_slot_up_still_counts_for_the_next_waiter(tmp_path):
         sample.write_text(json.dumps({"now_gb": 2.0, "peak_gb": 9.0, "at": time.time()}))
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
                "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC,
-               "HEAVY_TURN_MIN": "60"}
+               "HEAVY_TURN_MIN": "60", "HEAVY_FAKE_STARTED": PROCESSES_STARTED}
         os.environ["HEAVY_DIR"] = str(state)   # the words for two jobs, read in this process, with this folder
+        os.environ["HEAVY_FAKE_STARTED"] = PROCESSES_STARTED
         sys.modules.pop("claude_ops.heavy", None)
         h = importlib.import_module("claude_ops.heavy")
         (state / "past" / f"{other.pid}.json").write_text(json.dumps(
@@ -219,6 +225,7 @@ def test_a_job_that_gave_the_slot_up_still_counts_for_the_next_waiter(tmp_path):
         assert waiter.returncode == 0 and "ran" in out, out
     finally:
         os.environ.pop("HEAVY_DIR", None)
+        os.environ.pop("HEAVY_FAKE_STARTED", None)
         sys.modules.pop("claude_ops.heavy", None)   # the tests after import it again with their own folder
         for p in (old, new, other):
             p.kill()

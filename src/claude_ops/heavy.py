@@ -75,6 +75,15 @@ counts the room that job may take again (its peak less what it uses now) as memo
 build that shrank between two steps cannot let a second job in that the build then pushes into swap. The
 waiter says so in the same measured words, and waits until both fit.
 
+A PID GIVEN AGAIN IS NOT THE JOB. Every record here names a pid: the slot's holder, a job past its turn,
+a memory sample and a ticket. The system gives an ended job's pid to another process in time, and a
+record checked only for a live pid then held the slot, or counted memory a job could take back, for a
+process that was never a job. Each record says when it was written, and the process it names already ran
+then, so a live pid whose process started more than SAME_START_S (1 s) later is a newer process, and
+the record goes. A start that cannot be read keeps the record. `ps` runs once for all the records one
+reader looks at, and only when one of their pids is alive. HEAVY_FAKE_STARTED (an epoch) stands in for
+every process's start in tests.
+
 WHAT IT TOOK. Every job's finished or ENDED line says its peak memory, and HEAVY_DIR/done/<pid>.json
 keeps it with the exit code and the minutes, so a chat knows the cap a job needs before running it
 again. The peak is the largest of the group's sampled memory and the biggest child's own maximum
@@ -142,7 +151,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import killguard
+from . import config, killguard
 from .footprint import total_gb
 
 DIR = Path(os.environ.get("HEAVY_DIR", "/tmp/claude-ops-heavy"))
@@ -396,6 +405,55 @@ def alive(pid: int) -> bool:
     return True
 
 
+#: ps prints a start to the second, so a job's process reads as started at most this long after its record
+SAME_START_S = 1.0
+
+
+def starts() -> dict[int, float]:
+    """Every process's start, as epoch seconds by pid, from one `ps`; empty when it cannot be read.
+    HEAVY_FAKE_STARTED (an epoch) stands in for every process's start in tests."""
+    fake = os.environ.get("HEAVY_FAKE_STARTED")
+    if fake:
+        return _FakeStarts(float(fake))
+    return {pid: p["started"].timestamp() for pid, p in config.processes().items()}
+
+
+class _FakeStarts(dict):
+    def __init__(self, at: float):
+        super().__init__()
+        self.at = at
+
+    def get(self, pid, default=None):
+        return self.at
+
+
+class Starts:
+    """starts() for a caller that reads several records: `ps` runs once, and only when a live pid needs it."""
+
+    def __init__(self):
+        self._table: dict[int, float] | None = None
+
+    def get(self, pid: int) -> float | None:
+        if self._table is None:
+            self._table = starts()
+        return self._table.get(pid)
+
+
+def same_job(pid: int, at, started: Starts | None = None) -> bool:
+    """Whether `pid` is still the process a record names. The record was written at `at` (epoch seconds) by
+    or for a process that already ran, so a live pid whose process started later is a newer process the
+    system gave the same pid after the job ended, and the record is stale. A start that cannot be read, or a
+    record without a time, keeps the job."""
+    if not alive(pid):
+        return False
+    try:
+        at = float(at)
+    except (TypeError, ValueError):
+        return True
+    began = (started or Starts()).get(int(pid))
+    return began is None or began <= at + SAME_START_S
+
+
 def holder() -> dict | None:
     try:
         return json.loads((SLOT / "who.json").read_text())
@@ -434,7 +492,7 @@ def may_take_again(h: dict | None) -> tuple[float, float]:
         now, peak = float(rec.get("now_gb", 0)), float(rec.get("peak_gb", 0))
     except (KeyError, TypeError, ValueError, OSError):
         return 0.0, 0.0
-    if not alive(pid):
+    if not same_job(pid, h.get("at")):
         return 0.0, 0.0
     return round(max(0.0, peak - now), 1), peak
 
@@ -463,14 +521,16 @@ def _ago(minutes: float) -> str:
 
 
 def past_jobs() -> list[dict]:
-    """The jobs that gave the slot up past their turn and still run; a file whose job ended goes."""
+    """The jobs that gave the slot up past their turn and still run; a file whose job ended goes, and so does
+    one whose pid now belongs to a newer process (same_job)."""
     out = []
+    started = Starts()
     for f in sorted(PAST.glob("*.json")) if PAST.is_dir() else []:
         try:
             j = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
-        if alive(int(j["pid"])):
+        if same_job(int(j["pid"]), j.get("at"), started):
             out.append(j)
         else:
             f.unlink(missing_ok=True)
@@ -483,10 +543,20 @@ def clear_stale() -> None:
     A holder that gives the slot back removes its record and then the folder, so a look that finds
     the folder but no record may find no folder a moment later. That is a slot given back, not an
     error: it raised FileNotFoundError here, and the waiter that looked ended without running its job
-    (about 1 job in 45 when twelve short jobs queued at once)."""
+    (about 1 job in 45 when twelve short jobs queued at once).
+
+    A holder or a sample whose pid now belongs to a newer process is gone too (same_job): the system
+    gives an ended job's pid to another process in time, and that slot was held by nobody until a person
+    removed it."""
+    started = Starts()
     for f in TAKING.glob("*.json") if TAKING.is_dir() else ():
         try:
-            if not alive(int(f.stem)):
+            pid = int(f.stem)
+            try:
+                at = json.loads(f.read_text()).get("at")
+            except ValueError:
+                at = None
+            if not same_job(pid, at, started):
                 f.unlink(missing_ok=True)       # a job killed before it could remove its own sample
         except (ValueError, OSError):
             pass
@@ -500,19 +570,25 @@ def clear_stale() -> None:
             return
         if time.time() - made > 60:
             shutil.rmtree(SLOT, ignore_errors=True)
-    elif not alive(int(h["pid"])):
+    elif not same_job(int(h["pid"]), h.get("at"), started):
         shutil.rmtree(SLOT, ignore_errors=True)
 
 
 def waiters() -> list[dict]:
-    """The live tickets, oldest first; a ticket whose waiter is gone is removed."""
+    """The live tickets, oldest first; a ticket whose waiter is gone is removed, and so is one whose pid now
+    belongs to a newer process (same_job, with the time in the ticket's name)."""
     out = []
+    started = Starts()
     for t in sorted(QUEUE.glob("*.json")) if QUEUE.is_dir() else []:
         try:
             w = json.loads(t.read_text())
         except (OSError, ValueError):
             continue
-        if alive(int(w["waiter"])):
+        try:
+            made = int(t.name.split(".", 1)[0]) / 1e9
+        except ValueError:
+            made = None
+        if same_job(int(w["waiter"]), made, started):
             out.append({**w, "ticket": t.name})
         else:
             t.unlink(missing_ok=True)
