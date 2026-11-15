@@ -3,12 +3,15 @@ clearing of what died. Every run uses its own state folder and stand-in machine 
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+import pytest
 
 import claude_ops
 
@@ -96,7 +99,8 @@ def test_a_held_job_says_a_new_waiting_line_only_when_the_kinds_of_reason_change
     for k in [k for k in os.environ if k.startswith("HEAVY_")]:
         monkeypatch.delenv(k)
     for k, v in {"HEAVY_DIR": str(tmp_path), "HEAVY_MIN_FREE_GB": "6", "HEAVY_MAX_SWAP_GB": "14",
-                 "HEAVY_SWAP_DISK_FACTOR": "3", "HEAVY_MIN_DISK_PCT": "10"}.items():
+                 "HEAVY_SWAP_DISK_FACTOR": "3", "HEAVY_MIN_DISK_PCT": "10",
+                 "HEAVY_FAKE_CAUSE": "4242 bigapp 3G 2.5"}.items():   # its machine is a stand-in, so is the cause
         monkeypatch.setenv(k, v)
     sys.modules.pop("claude_ops.heavy", None)
     h = importlib.import_module("claude_ops.heavy")
@@ -1009,7 +1013,8 @@ def _kill(pid):
 
 def _heavy_env(state, **extra):
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
-            "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_CHECK": "0.2", "PYTHONPATH": SRC, **extra}
+            "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_CHECK": "0.2", "PYTHONPATH": SRC,
+            "HEAVY_FAKE_CAUSE": "4242 bigapp 3G 2.5", **extra}
 
 
 def test_a_child_in_a_session_of_its_own_is_still_the_jobs(tmp_path):
@@ -1209,6 +1214,11 @@ def test_hold_max_wait_gives_up_on_the_gate_and_withdraws_its_ask(tmp_path):
         assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
         assert time.time() - t0 < 20
         assert "gave up after" in r.stderr and "gate (memory)" in r.stderr, r.stderr
+        gave = [ln for ln in r.stderr.splitlines() if "gave up after" in ln][-1]
+        assert gave.endswith("; the biggest process is bigapp (pid 4242) at 3.2 GB, and 2.5 GB is wired"), gave
+        waiting = [ln for ln in r.stderr.splitlines() if "heavy: waiting, " in ln]
+        assert waiting and waiting[0].endswith("; the biggest process is bigapp (pid 4242) at 3.2 GB, and 2.5 GB is wired"), \
+            r.stderr
         assert not list((state / "queue").glob("*.json")), "its ticket goes with it"
         events = [ln.split()[0] for ln in told.read_text().splitlines()]
         assert events == ["asked", "withdrawn"], events
@@ -1297,3 +1307,72 @@ def test_status_json_gives_the_machine_the_slot_and_each_waiters_reason_kind(tmp
         for p in (holder, waiter):
             p.kill()
             p.wait()
+
+
+TOP_OUT = """Processes: 812 total, 4 running, 808 sleeping, 5390 threads
+Load Avg: 17.20, 15.04, 12.33  CPU usage: 30.50% user, 25.21% sys, 44.28% idle
+PhysMem: 31G used (13G wired, 11G compressor), 120M unused.
+
+PID    COMMAND          MEM
+429    fseventsd        16G+
+"""
+
+
+def test_the_biggest_process_and_the_wired_memory_are_read_from_top_and_vm_stat():
+    """biggest_process takes the first row under top's PID COMMAND MEM header, with MEM as top wrote it, and
+    wired_gb reads vm_stat's wired pages at its own page size, in GB as machine() counts free memory."""
+    from claude_ops import heavy as h
+    assert h.biggest_process(TOP_OUT) == (429, "fseventsd", "16G+")
+    assert h.biggest_process("PID COMMAND MEM\n31967 com.apple.Virtua 4111M\n") == (31967, "com.apple.Virtua", "4111M")
+    assert h.biggest_process("") is None and h.biggest_process("PID COMMAND MEM\n") is None
+    assert h._top_bytes("16G+") == 16 * 1024 ** 3 and h._top_bytes("512K") == 512 * 1024 and h._top_bytes("n/a") is None
+    vm = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:  7000.\nPages wired down:  848389.\n"
+    assert h.wired_gb(vm) == 13.9
+    assert h.wired_gb("Pages free: 7000.\n") is None
+
+
+def test_a_line_about_memory_names_the_standing_cause(monkeypatch):
+    """A held note or line about memory or pressure ends with the biggest process and the wired memory, so its
+    reader sees what keeps memory short. A reading that fails is said, and a line about swap or disk alone, or
+    about another job, carries none."""
+    from claude_ops import heavy as h
+    monkeypatch.setenv("HEAVY_FAKE_CAUSE", "429 fseventsd 16G 13.9")
+    assert h.standing_cause() == "the biggest process is fseventsd (pid 429) at 17.2 GB, and 13.9 GB is wired"
+    assert h.cause_if_memory(["memory"]) == "; " + h.standing_cause()
+    assert h.cause_if_memory({"pressure", "swap"}) == "; " + h.standing_cause()
+    assert h.cause_if_memory(["swap", "disk"]) == "" and h.cause_if_memory([]) == ""
+    note = h.held_note("only 4.1 GB of memory free (needs 6)", {"memory"}, 61, 4.4, 6.0, None, h.cause_if_memory({"memory"}))
+    assert ("only 4.1 GB of memory free (needs 6); the biggest process is fseventsd (pid 429) at 17.2 GB, and 13.9 GB "
+            "is wired. That is the machine") in note, note
+    monkeypatch.setenv("HEAVY_FAKE_CAUSE", "")
+    assert h.standing_cause() == "the biggest process could not be read, and the wired memory could not be read"
+    monkeypatch.delenv("HEAVY_FAKE_CAUSE")
+    monkeypatch.setenv("HEAVY_FAKE_MACHINE", "3 0 50")
+    assert h.standing_cause() == "the biggest process could not be read, and the wired memory could not be read", \
+        "a stand-in machine never reads the real one"
+
+
+def test_a_cause_that_cannot_be_read_is_said_never_raised(monkeypatch):
+    """With no top or vm_stat to run (another system, or a path that is gone), the cause says it could not be
+    read, and the line about memory is still said."""
+    from claude_ops import heavy as h
+    monkeypatch.delenv("HEAVY_FAKE_CAUSE", raising=False)
+    monkeypatch.delenv("HEAVY_FAKE_MACHINE", raising=False)
+    real = h.subprocess.run
+
+    def missing(cmd, *a, **k):
+        if cmd[0] in ("/usr/bin/top", "/usr/bin/vm_stat", "/bin/ps"):
+            raise FileNotFoundError(2, "No such file or directory", cmd[0])
+        return real(cmd, *a, **k)
+    monkeypatch.setattr(h.subprocess, "run", missing)
+    assert h.standing_cause() == "the biggest process could not be read, and the wired memory could not be read"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="top -l and vm_stat are macOS's")
+def test_the_standing_cause_reads_this_machine(monkeypatch):
+    """On macOS the cause is read from top and vm_stat: a process with its pid and size, and the wired memory."""
+    from claude_ops import heavy as h
+    monkeypatch.delenv("HEAVY_FAKE_CAUSE", raising=False)
+    monkeypatch.delenv("HEAVY_FAKE_MACHINE", raising=False)
+    said = h.standing_cause()
+    assert re.fullmatch(r"the biggest process is .+ \(pid \d+\) at [\d.]+ GB, and [\d.]+ GB is wired", said), said
