@@ -288,6 +288,82 @@ def reasons(m: tuple, ask_gb: float | None = None) -> list[tuple[str, str]]:
     return why
 
 
+#: kinds of reason whose cause is the machine's memory, so a line about them also names what holds it
+MEMORY_KINDS = ("memory", "pressure")
+_UNITS = {"B": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def _top_bytes(mem: str) -> float | None:
+    """top's MEM column ("16G", "4111M", "512K", with a + or - after it when it moved) in bytes, or None."""
+    m = re.fullmatch(r"([\d.]+)([BKMGT])[+-]?", mem.strip())
+    return float(m.group(1)) * _UNITS[m.group(2)] if m else None
+
+
+def biggest_process(top_out: str) -> tuple[int, str, str] | None:
+    """(pid, command, MEM as top wrote it) of the first process in `top -o mem` output, or None."""
+    rows = top_out.splitlines()
+    for i, line in enumerate(rows):
+        if line.split()[:3] == ["PID", "COMMAND", "MEM"]:
+            for row in rows[i + 1:]:
+                parts = row.split()
+                if len(parts) >= 3 and parts[0].isdigit() and _top_bytes(parts[-1]) is not None:
+                    return int(parts[0]), " ".join(parts[1:-1]), parts[-1]
+            return None
+    return None
+
+
+def wired_gb(vm: str) -> float | None:
+    """The memory wired down, in GB (as machine() counts free memory), from vm_stat's output, or None."""
+    page = int(re.search(r"page size of (\d+)", vm).group(1)) if "page size of" in vm else 16384
+    m = re.search(r"Pages wired down:\s+(\d+)", vm)
+    return round(int(m.group(1)) * page / 1e9, 1) if m else None
+
+
+def _try_out(cmd: list[str]) -> str:
+    """A command's output, or "" when it cannot run or takes over ten seconds."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=TOOLS_ENV).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def standing_cause() -> str:
+    """What holds the machine's memory, for a line that says the gate held a job for memory: the biggest process
+    and how much memory is wired, so a reader sees what keeps memory short and does not suspect the gauge. The
+    biggest process comes from top, which reads every process's MEM (its footprint, compressed pages included),
+    since proc_pid_rusage reads only this user's processes and the biggest is often a system one. It costs about
+    a second, so it is read only when such a line is said. HEAVY_FAKE_CAUSE ("<pid> <command> <MEM> <wired GB>")
+    stands in for both readings in tests, and a stand-in machine (HEAVY_FAKE_MACHINE) without it reads neither, so
+    a test never waits for the real top. A reading that fails is said as such, never guessed."""
+    fake = os.environ.get("HEAVY_FAKE_CAUSE")
+    if fake is None and os.environ.get("HEAVY_FAKE_MACHINE"):
+        fake = ""
+    if fake is not None:
+        f = fake.split()
+        top_out = f"PID COMMAND MEM\n{' '.join(f[:3])}\n" if len(f) >= 3 else ""
+        vm = f"Pages wired down: {round(float(f[3]) * 1e9 / 16384)}\n" if len(f) >= 4 else ""
+    else:
+        # each reading may fail (no top or vm_stat on another system, a top that hangs): it is then said as unread
+        top_out = _try_out(["/usr/bin/top", "-l", "1", "-o", "mem", "-n", "1", "-stats", "pid,command,mem"])
+        vm = _try_out(["/usr/bin/vm_stat"])
+    big = biggest_process(top_out)
+    wired = wired_gb(vm)
+    if big:
+        pid, name, mem = big
+        if fake is None:      # top cuts a command at 16 characters: ps gives the whole name, whoever runs it
+            full = os.path.basename(_try_out(["/bin/ps", "-o", "comm=", "-p", str(pid)]).strip())
+            name = full or name
+        said = f"the biggest process is {name} (pid {pid}) at {round(_top_bytes(mem) / 1e9, 1):g} GB"
+    else:
+        said = "the biggest process could not be read"
+    return said + (f", and {wired:g} GB is wired" if wired is not None else ", and the wired memory could not be read")
+
+
+def cause_if_memory(kinds) -> str:
+    """"; " and standing_cause() when `kinds` holds a memory kind, else ""."""
+    return f"; {standing_cause()}" if set(kinds) & set(MEMORY_KINDS) else ""
+
+
 def short(m: tuple) -> str:
     """Why the machine is too short to start a heavy job, or ""."""
     return "; ".join(words for _kind, words in reasons(m))
@@ -367,12 +443,12 @@ def judge_need(chat: str, what: str, need: float | None, peak: float) -> str | N
 
 
 def held_note(why: str, kinds: set[str], minutes: float, most_free: float, ask_gb: float | None = None,
-              declared: tuple[str, str] | None = None) -> str:
+              declared: tuple[str, str] | None = None, cause: str = "") -> str:
     """What a waiter says once its gate has held it for OWN_LIMIT_NOTE_MIN: for how long, what holds it in the
     gate's own words, whether that is a limit set in the job's own environment or the machine, and what would
     let it start. `ask_gb` is the free memory the job asks (MIN_FREE_GB when not given), and `declared` is
     where its declared need came from and its words, ("--need-gb", "--need-gb 2") say, when it declared one:
-    its memory limit is then that need and not HEAVY_MIN_FREE_GB."""
+    its memory limit is then that need and not HEAVY_MIN_FREE_GB. `cause` (cause_if_memory) follows the gate's words."""
     own: list[tuple[str, str]] = []
     for k in sorted(kinds):
         if k == "memory" and declared:
@@ -380,7 +456,7 @@ def held_note(why: str, kinds: set[str], minutes: float, most_free: float, ask_g
             continue
         own += [(v, f"{v}={os.environ[v]}") for v in LIMIT_VARS.get(k, ())
                 if v in os.environ and v != "HEAVY_NEED_GB"]
-    note = (f"the gate has held this job for {_ago(minutes)}: {why}. "
+    note = (f"the gate has held this job for {_ago(minutes)}: {why}{cause}. "
             + (f"That is this job's own limit ({', '.join(words for _name, words in own)})"
                if own else "That is the machine, not a limit this job set"))
     if "memory" in kinds:
@@ -719,7 +795,7 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
                 kinds |= {kind for kind, _words in held}
                 mins = (time.time() - held_since) / 60
                 if mins >= OWN_LIMIT_NOTE_MIN and not noted:
-                    say(held_note(why, kinds, mins, most_free, ask, declared))
+                    say(held_note(why, kinds, mins, most_free, ask, declared, cause_if_memory(kinds)))
                     noted = True
             else:
                 held_since, most_free, noted, kinds = None, 0.0, False, set()
@@ -763,7 +839,8 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
                 raise GaveUp(bool(held), sorted({kind for kind, _words in held}), time.time() - began, why)
             key = wait_key(held, why)
             if key != said:
-                say(f"waiting, {why}")
+                # a new waiting line about memory names what holds it (read only then: top takes a second)
+                say(f"waiting, {why}{cause_if_memory(kind for kind, _words in held)}")
                 said = key
             time.sleep(POLL if max_wait is None else max(0.0, min(POLL, began + max_wait - time.time())))
     finally:
@@ -1397,7 +1474,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if wait_turn(argv[1], argv[2], pid, *declared_need(), max_wait=wait) else 1
         except GaveUp as g:
             who = (f"the machine's gate ({', '.join(g.kinds)})" if g.gate else "another job holding the slot or the turn")
-            say(f"{argv[2]} gave up after {g.waited:.0f} s, held by {who}: {g.why}")
+            say(f"{argv[2]} gave up after {g.waited:.0f} s, held by {who}: {g.why}"
+                + (cause_if_memory(g.kinds) if g.gate else ""))
             return EXIT_GAVE_UP_GATE if g.gate else EXIT_GAVE_UP_HOLDER
     if argv[:1] == ["release"] and len(argv) == 3 and argv[1] == "--pid":
         release(int(argv[2]))
