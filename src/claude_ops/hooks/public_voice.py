@@ -24,7 +24,7 @@ cached), and it checks:
   yet, however they were made (in a script, by `cherry-pick`, `am` or `stash pop`);
 - text a Bash command writes into a file inside a public repository: a here-document given to
   `cat` or `tee` whose output goes to the file, `echo` or `printf` redirected to it or piped into
-  `tee`;
+  `tee`, and the new text of each substitution a `sed -i` or a `perl -i -p` makes in it;
 - the text arguments of a GitHub MCP call that writes to a public owner/repo;
 - and, on a line that publishes to a public repository, the whole command with its path words left
   out, for what the checks above cannot read (a message built from a variable, a shell given a
@@ -392,7 +392,7 @@ def _gh_target(words: list[str], here: str, env: dict | None = None, repo: str |
 def published(command: str, cwd: str) -> list[tuple[str, str, str]]:
     """(where, target, text) for every message a git or gh command on the line would publish.
     The target is a folder, or `slug:owner/repo` when the command names its repository."""
-    written = dict(writes(command, cwd))
+    written = dict(writes(command, cwd, edits=False))     # a whole file, not an edit's new text
     found = []
     for inv in git_invocations(command, cwd):
         if inv["sub"] in MESSAGE_SUBCOMMANDS:

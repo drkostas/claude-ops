@@ -218,6 +218,17 @@ def test_text_a_command_writes_into_a_public_file(cfg, public, private):
     assert pv.check(bash("echo zorblax 2> err.txt", public), cfg) is None
     assert pv.check(bash(f"echo zorblax > {public}/x.txt", private), cfg) is not None
     assert pv.check(bash("cat > README.md <<'EOF'\nnothing private\nEOF", public), cfg) is None
+    assert pv.check(bash("sed -i '' 's/Intro/Intro for zorblax/' README.md", public), cfg) == \
+        "'zorblax' in the text written to README.md"
+    assert pv.check(bash("perl -pi -e 's/Intro/quuxcorp/' README.md", public), cfg) is not None
+    assert pv.check(bash("sed -i '' 's/Intro/Intro for zorblax/' README.md", private), cfg) is None
+
+
+def test_a_message_file_edited_in_place_is_read_whole(cfg, public):
+    # the commit message is the whole file after the edit, so the file is read, not the new text alone
+    (public / "msg.txt").write_text("subject\n\nbody naming quuxcorp\n")
+    assert pv.check(bash("sed -i '' 's/subject/better subject/' msg.txt && git commit -F msg.txt", public),
+                    cfg) == "'quuxcorp' in the commit message"
 
 
 def test_a_file_outside_every_repository_written_from_a_public_one(cfg, public, tmp_path):
@@ -313,6 +324,46 @@ def test_writes_resolves_targets_from_the_folder_the_command_runs_in(tmp_path):
     got = commandline.writes(f"export D={tmp_path}; echo hi | tee \"$D/t.txt\"; echo yo > ${{D}}/e.txt", "/")
     assert got == [(str(tmp_path / "t.txt"), "hi"), (str(tmp_path / "e.txt"), "yo")]
 
+
+
+@pytest.mark.parametrize("command, texts, files", [
+    ("sed -i 's/old/new/' a.md", ["new"], ["a.md"]),                       # GNU
+    ("sed -i '' 's/old/new/g' a.md b.md", ["new"], ["a.md", "b.md"]),        # BSD, its extension a word
+    ("sed -i .bak 's/a/b/' a.md", ["b"], ["a.md"]),
+    ("sed -Ei.bak -e 's|a|b\\|c|' -e '/^## /s/x/y/;2,$s/p/q/I' a.md", ["b|c", "y", "q"], ["a.md"]),
+    ("sed --in-place=.bak --expression='1s/a/\\$?/' a.md", ["$?"], ["a.md"]),
+    ("sed -i '' -e '/x/d' -e 's/a/b\\nc/' a.md", ["b\nc"], ["a.md"]),
+    ("sed -i '' 'y/abc/xyz/;s/a/b/w out.txt' a.md", ["b"], ["a.md"]),
+    ("sed -i '' '1a\\\nadded' a.md", [], ["a.md"]),                         # not a substitution
+    ("sed -i '' -f script.sed a.md", [], ["a.md"]),                          # a script from a file
+    ("perl -i -pe 's/OLD/NEW/g' a.md", ["NEW"], ["a.md"]),
+    ("perl -0pi -e 's{a}{b\\}c}gs; s/x/y/ if /z/' a.md b.md", ["b}c", "y"], ["a.md", "b.md"]),
+    ("perl -0777 -pi.bak -e 'next unless /z/; s#q#r\\#s#' a.md", ["r#s"], ["a.md"]),
+    ("perl -i -pe 's {a} [b]; s/(\\d+)/$1+1/e' a.md", ["b"], ["a.md"]),      # an evaluated one is left out
+])
+def test_in_place_reads_the_substitutions_of_sed_and_perl(command, texts, files):
+    assert commandline.in_place(commandline.simple_commands(command)[0]) == (texts, files)
+
+
+@pytest.mark.parametrize("command", [
+    "sed 's/a/b/' a.md",                 # prints, edits nothing
+    "sed -n 's/a/b/p' a.md",
+    "sed -i 's/a/b/'",                   # no file
+    "perl -pie 's/a/b/' a.md",           # -i takes "e" as its extension, so the code is a file name
+    "perl -ni -e 's/a/b/; print' a.md",  # -n: what it writes is what the code prints
+    "perl -pi script.pl a.md",
+    "grep -i 's/a/b/' a.md",
+])
+def test_in_place_leaves_other_commands_out(command):
+    assert commandline.in_place(commandline.simple_commands(command)[0]) is None
+
+
+def test_writes_gives_each_file_an_edit_changes(tmp_path):
+    got = commandline.writes(f"D={tmp_path} && sed -i '' 's/a/b/' $D/x.md; cd {tmp_path} && sed -i '/a/d' y.md", "/")
+    assert got == [(str(tmp_path / "x.md"), "b"), (str(tmp_path / "y.md"), "")]
+    assert commandline.writes(f"sed -i '' 's/a/b/' {tmp_path}/x.md", "/", edits=False) == []
+    targets = list(commandline.write_targets("sudo sed -i 's/a/b/' $D/x.md", "/w"))
+    assert targets == [("/w", "$D/x.md", "b")]
 
 def test_commit_repos_and_commit_lines_for_one_repository(cfg, public, private):
     (public / "b.txt").write_text("p\n")

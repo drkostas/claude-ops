@@ -10,7 +10,8 @@ reason sent back to the model):
 - Write (its content), Edit (its new text), MultiEdit (each edit's new text) and NotebookEdit (the new
   cell) of a file a rule covers;
 - text a Bash command writes into such a file (a here-document, `echo` or `printf` redirected, or piped
-  into `tee`), read by `commandline`, shared with the other hooks. Text a program writes itself is not
+  into `tee`, and the new text of a `sed -i` or `perl -i -p` substitution), read by `commandline`,
+  shared with the other hooks. Text a program writes itself is not
   known before it runs and goes through.
 
 Only the new text is read. An edit that leaves an old line alone goes through, and an edit whose new
