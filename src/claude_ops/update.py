@@ -834,6 +834,38 @@ def held_paste(screen: str | None) -> int | None:
     return int(m.group(1) or 0) if m else None
 
 
+#: one stand-in anywhere in a line, for held_pastes
+PASTED_ONE = re.compile(r"\[Pasted text #\d+(?: \+(\d+) lines)?\]")
+
+
+def held_pastes(screen: str | None) -> list[int] | None:
+    """The sizes, in order, of every paste Claude Code holds unsent in its input line, when those
+    stand-ins (with only spaces between them) are all the line holds; None otherwise, as for
+    held_paste. A line too long for the pane goes on in the screen lines below it, up to the
+    input box's lower edge, and those count too.
+
+    Several pastes that each lost their Enter sit side by side ("[Pasted text #7 +5 lines][Pasted
+    text #8 +19 lines]"), and held_paste, which reads one, sees none of them. A sender compares
+    these sizes with the texts it pasted, in the same order, before it presses Enter."""
+    if not screen:
+        return None
+    lines = screen.splitlines()[-8:]
+    at = [i for i, ln in enumerate(lines)
+          if ln.strip().startswith("❯") and not OPTION.match(ln.strip())]
+    if not at:
+        return None
+    held = [lines[at[-1]].strip()[1:]]
+    for ln in lines[at[-1] + 1:]:
+        if not ln.strip() or ln.strip().startswith("─"):
+            break
+        held.append(ln)
+    text = " ".join(held)
+    sizes = [int(m.group(1) or 0) for m in PASTED_ONE.finditer(text)]
+    if not sizes or PASTED_ONE.sub("", text).replace("\xa0", " ").strip():
+        return None
+    return sizes
+
+
 #: what a session's screen says when it lost its login, or its Remote Control with it: how such
 #: a line starts, after the bullet Claude Code draws. The same words further in a line are a
 #: conversation about the outage, or a command that searched for them, and do not count

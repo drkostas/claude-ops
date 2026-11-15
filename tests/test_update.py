@@ -225,6 +225,27 @@ def test_a_paste_held_in_the_input_line_is_seen_with_its_size():
     # a stand-in answered as a dialog's choice is not the input line either
     assert cu.held_paste("Pick one\n❯ 1. [Pasted text #3 +5 lines]\nEnter to select") is None
 
+
+def test_several_pastes_held_in_the_input_line_are_seen_in_order():
+    # three pastes that each lost their Enter sit side by side as three stand-ins
+    three = ("⏺ Done.\n───\n❯ [Pasted text #177 +5 lines][Pasted text #178 +19 lines]"
+             "[Pasted text #179 +27 lines]\n───\n  ⏵⏵ bypass permissions on")
+    assert cu.held_pastes(three) == [5, 19, 27]
+    assert cu.empty_prompt(three) == (False, cu.TYPED)
+    # held_paste keeps its meaning: one stand-in and nothing else
+    assert cu.held_paste(three) is None
+    # a space between them, a one-line paste among them, and a single one
+    assert cu.held_pastes("───\n❯\xa0[Pasted text #1 +2 lines] [Pasted text #2]\n───") == [2, 0]
+    assert cu.held_pastes("───\n❯ [Pasted text #24 +20 lines]\n───") == [20]
+    # a line too long for the pane goes on in the next screen line, up to the box's lower edge
+    wrapped = "───\n❯ [Pasted text #7 +5 lines][Pasted text #8 +19 lines]\n  [Pasted text #9 +27 lines]\n───"
+    assert cu.held_pastes(wrapped) == [5, 19, 27]
+    # typed words anywhere among them make it somebody's message
+    assert cu.held_pastes("───\n❯ [Pasted text #1 +2 lines] see [Pasted text #2 +3 lines]\n───") is None
+    assert cu.held_pastes("───\n❯ [Pasted text #1 +2 lines]\n  and this\n───") is None
+    assert cu.held_pastes("───\n❯ \n───") is None and cu.held_pastes(None) is None
+    assert cu.held_pastes("Pick one\n❯ 1. [Pasted text #3 +5 lines]\nEnter to select") is None
+
 #: the menu a session opens for /remote-control while its Remote Control is on (the link is invented)
 RC_MENU_SCREEN = """⏺ Done, the tests pass.
 
