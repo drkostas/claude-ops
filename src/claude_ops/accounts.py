@@ -80,6 +80,33 @@ class RateLimited(RuntimeError):
         return (now or dt.datetime.now(dt.timezone.utc)) + dt.timedelta(seconds=self.retry_after_s)
 
 
+class LoginExpired(RuntimeError):
+    """The token endpoint refused a renewal with `invalid_grant`: the refresh token has expired, was
+    revoked, or was already used. No later renewal brings this login back, so a caller that retries
+    it every few minutes only repeats the refusal. Only a new sign-in makes a new login
+    (`sign_in.SignIn`). `detail` is the endpoint's own `error_description`, for a log."""
+
+    def __init__(self, detail: str = ""):
+        self.detail = detail
+        said = f" ({detail})" if detail else ""
+        super().__init__(f"the refresh token is no longer accepted{said}; only a new sign-in makes a new login")
+
+
+def _grant_refused(e: urllib.error.HTTPError) -> "LoginExpired | None":
+    """LoginExpired when a token endpoint's error answer is OAuth's `invalid_grant`, else None. Any
+    other refusal (a malformed request, a blocked client, an outage) may pass on a later try, so it is
+    left as the HTTPError it is."""
+    if e.code not in (400, 401):
+        return None
+    try:
+        body = json.loads(e.read() or b"{}")
+    except Exception:  # noqa: BLE001 - an answer that is not JSON says nothing about the grant
+        return None
+    if not isinstance(body, dict) or body.get("error") != "invalid_grant":
+        return None
+    return LoginExpired(str(body.get("error_description") or "")[:200])
+
+
 def retry_after_seconds(value: "str | None", now: "dt.datetime | None" = None) -> "int | None":
     """The seconds a Retry-After header asks for: a number of seconds, or an HTTP date read against
     `now` (never negative). None when the header is missing or unreadable."""
@@ -250,14 +277,22 @@ def profile(token: str, *, fetch=urllib.request.urlopen) -> dict:
 
 
 def renew(login: dict, *, fetch=urllib.request.urlopen, now: dt.datetime | None = None) -> dict:
-    """The login renewed with its refresh token (never the login in use, see the module's note)."""
+    """The login renewed with its refresh token (never the login in use, see the module's note).
+    Raises LoginExpired when the endpoint refuses the refresh token itself (`invalid_grant`), which no
+    retry changes; any other refusal is raised as the HTTPError it is."""
     o = dict(login["claudeAiOauth"])
     body = json.dumps({"grant_type": "refresh_token", "refresh_token": o["refreshToken"],
                        "client_id": CLIENT_ID, "scope": " ".join(o.get("scopes") or [])}).encode()
     req = urllib.request.Request(TOKEN_URL, data=body, method="POST",
                                  headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
-    with fetch(req, timeout=15) as r:
-        t = json.loads(r.read())
+    try:
+        with fetch(req, timeout=15) as r:
+            t = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        gone = _grant_refused(e)
+        if gone is not None:
+            raise gone from e
+        raise
     now = now or dt.datetime.now(dt.timezone.utc)
     o.update(accessToken=t["access_token"], refreshToken=t.get("refresh_token", o["refreshToken"]),
              expiresAt=int((now.timestamp() + int(t.get("expires_in", 0))) * 1000))

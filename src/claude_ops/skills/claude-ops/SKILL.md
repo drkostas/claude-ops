@@ -418,6 +418,8 @@ accounts.write_account(accounts.CLAUDE_JSON, block, backup="/path/to/claude.json
   again after the next rewrite (`changed_since`) to see that it was kept.
 - Never renew the login in use (`accounts.renew` is for a saved copy): a renewal replaces the
   refresh token, and the chats holding the old one are signed out.
+- `accounts.renew` raises `LoginExpired` when the endpoint refuses the refresh token itself
+  (`invalid_grant`). Stop retrying that copy, since no renewal brings it back.
 - A saved copy that no longer renews needs a new sign-in, and `/login` would replace the login in
   use. `sign_in.SignIn.start(email)` signs that account in on the side, in a config folder of its
   own: show `url()` where the person is signed in, and `wait()` returns the new login for
