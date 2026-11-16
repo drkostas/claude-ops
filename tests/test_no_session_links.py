@@ -440,3 +440,20 @@ def test_redact_removes_links_trailers_and_real_ids_only():
     assert OTHER_ID in out                       # not a transcript on this machine, so kept
     assert out.count(nsl.REDACTED) == 3
     assert nsl.redact("") == "" and nsl.redact("plain words") == "plain words"
+
+
+def test_a_link_in_a_file_the_command_names_says_the_file_is_read_before_the_command_runs(tmp_path, monkeypatch,
+                                                                                          capsys):
+    (tmp_path / "body.md").write_text("see " + LINK + "\n")
+    why, note = nsl.review(bash("gh pr create --title t --body-file body.md", tmp_path))
+    assert "from body.md" in why and note.startswith("That text was read from body.md as it is now")
+    _, note = nsl.review(bash("sed -i '' 's/see/look at/' body.md && gh pr create --title t --body-file body.md",
+                              tmp_path))
+    assert note.startswith("This command also writes body.md, but the check reads body.md as it is now")
+    assert nsl.review(bash(f"gh pr create --body 'see {FAKE_ID}'", tmp_path))[1] == ""
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(bash("gh pr create --title t --body-file body.md",
+                                                                   tmp_path))))
+    assert nsl.main() == 2
+    err = capsys.readouterr().err
+    assert err.rstrip().endswith("Remove it. That text was read from body.md as it is now, before the command "
+                                 "runs. Change body.md in a call of its own, then send the command again.")

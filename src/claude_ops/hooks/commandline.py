@@ -418,6 +418,40 @@ def write_targets(command: str, cwd: str, edits: bool = True):
                 yield here, expand(t, cmd.get("names")), text
 
 
+def written_paths(command: str, cwd: str) -> set[str]:
+    """Every file the line writes into or edits, as absolute paths, whether or not the text it puts
+    there can be read: the target of an output redirection, the files `tee` writes, and the files a
+    `sed -i` or `perl -i -p` edits."""
+    out = set()
+    for cmd, here in steps(command, cwd):
+        words = cmd["words"]
+        targets = list(cmd["writes"])
+        if os.path.basename(words[0]) == "tee":
+            targets += [w for w in words[1:] if not w.startswith("-")]
+        edit = in_place(words)
+        if edit is not None:
+            targets += edit[1]
+        out |= {os.path.normpath(os.path.join(here, expand(t, cmd.get("names"))))
+                for t in targets if t not in NOT_FILES}
+    return out
+
+
+def read_note(path: str, command: str, cwd: str) -> str:
+    """What a refusal says when the text it names was read from a file the command names (a body,
+    notes, message or input file). A PreToolUse hook runs before the command, so it reads that file
+    as it stands then. A command that rewrites the file and sends it in the same call is refused
+    again for the old text, so the note says to change the file in a call of its own first, and says
+    so plainly when the same line writes the file."""
+    path = os.path.normpath(path)
+    rel = os.path.relpath(path, cwd)
+    shown = rel if not rel.startswith("..") else path
+    if path in written_paths(command, cwd):
+        return (f"This command also writes {shown}, but the check reads {shown} as it is now, before "
+                f"the command runs. Write {shown} in a call of its own, then send the command again")
+    return (f"That text was read from {shown} as it is now, before the command runs. Change {shown} "
+            f"in a call of its own, then send the command again")
+
+
 # --- edits in place -------------------------------------------------------------------------------
 
 #: the sed command letters that take no argument, so the next command may follow on the same line
