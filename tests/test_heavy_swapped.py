@@ -142,6 +142,22 @@ def test_status_shows_the_holders_resident_figures(monkeypatch, tmp_path):
         sys.modules.pop("claude_ops.heavy", None)
 
 
+def test_the_sample_is_one_line_that_a_text_reader_can_match(monkeypatch, tmp_path):
+    """A scheduler written in shell counts a swapped-out job by matching the sample's text, without a JSON
+    parser: it looks for `"swapped_out": true` on the file's one line. So the sample stays one line with
+    json.dumps' default separators, and a change to that format must change such readers in the same release."""
+    h = _fresh(monkeypatch, tmp_path, HEAVY_FAKE_MACHINE="20 2 50")
+    try:
+        h.taking(4242, 3.0, 3.0, 0.27, 3.0, True)
+        text = (h.TAKING / "4242.json").read_text()
+        assert "\n" not in text.rstrip("\n") and '"swapped_out": true' in text, text
+        h.taking(4242, 3.0, 3.0, 2.9, 3.0, False)
+        text = (h.TAKING / "4242.json").read_text()
+        assert "\n" not in text.rstrip("\n") and '"swapped_out": false' in text, text
+    finally:
+        sys.modules.pop("claude_ops.heavy", None)
+
+
 def test_group_memory_reads_footprint_and_resident_over_the_same_processes(monkeypatch, tmp_path):
     h = _fresh(monkeypatch, tmp_path)
     try:
