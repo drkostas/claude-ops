@@ -583,6 +583,8 @@ def taking(pid: int, now_gb: float, peak_gb: float, resident_gb: float | None = 
     try:
         TAKING.mkdir(parents=True, exist_ok=True)
         tmp = TAKING / f".{pid}.json"
+        # ⚠️ One line with json.dumps' default separators: a shell scheduler matches `"swapped_out": true` as
+        # text (tests/test_heavy_swapped.py holds it), so a new format must change such readers too.
         tmp.write_text(json.dumps(rec))
         os.replace(tmp, TAKING / f"{pid}.json")
     except OSError:
