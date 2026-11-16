@@ -111,11 +111,13 @@ def test_env_file_values_reach_the_commands_and_are_never_printed(world, capsys)
     secret = "pw-" + uuid.uuid4().hex                  # built here, so no literal looks like a key
     env_file = world["tmp"] / "test.env"
     env_file.write_text(f"# the test database\nexport DB_PASSWORD=\"{secret}\"\nDB_HOST=localhost\n\n")
-    out = world["tmp"] / "out"
+    out, seen_by_lock = world["tmp"] / "out", world["tmp"] / "lock-env"
     code, report, said = run(world, env_file=str(env_file), lint=["true"],
+                             lock=f"printf %s \"${{DB_PASSWORD:-none}}\" > {seen_by_lock}; echo held; cat > /dev/null",
                              tests=[f"printf %s \"$DB_PASSWORD\" > {out}", "test \"$DB_HOST\" = localhost"])
     assert code == pg.GREEN, said
     assert out.read_text() == secret                   # it reached the command's environment
+    assert seen_by_lock.read_text() == "none"          # and not the lock command's
     printed = "\n".join(said) + json.dumps(report) + capsys.readouterr().out
     logs = "".join(p.read_text() for p in (world["home"] / "logs").rglob("*.log"))
     assert secret not in printed and secret not in logs
@@ -198,14 +200,16 @@ def test_leftovers_of_ended_runs_are_removed_and_nothing_else(world):
     assert any("ended runs" in s for s in said)
 
 
-def test_sigterm_and_sigkill_let_the_lock_go(world):
-    """As a separate process, through the command line, with gh as a stand-in program on PATH."""
+def test_signals_let_the_lock_go_and_a_killed_gates_step_keeps_it_until_it_ends(world):
+    """As a separate process, through the command line, with gh as a stand-in program on PATH. SIGTERM and SIGHUP
+    end the step, let the lock go and remove the worktree. After a SIGKILL the step runs on, so the lock stays held
+    until the step ends, and the next run removes the worktree."""
     fake_gh = world["bin"] / "gh"
     fake_gh.write_text(f"#!/bin/sh\necho '{json.dumps(pr(world['sha']))}'\n")
     fake_gh.chmod(0o755)
     env = {**os.environ, "PATH": f"{world['bin']}{os.pathsep}/usr/bin{os.pathsep}/bin",
            "CLAUDE_OPS_PR_GATE_HOME": str(world["home"]), "PYTHONPATH": str(Path(pg.__file__).parents[1])}
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGKILL):
         mark, started = world["tmp"] / f"released-{sig}", world["tmp"] / f"started-{sig}"
         child = world["tmp"] / f"child-{sig}"
         cmd = [sys.executable, "-m", "claude_ops.pr_gate", "7", "--repo", REPO, "--checkout", str(world["checkout"]),
@@ -219,16 +223,18 @@ def test_sigterm_and_sigkill_let_the_lock_go(world):
         assert started.exists(), p.stdout.read() if p.poll() is not None else "the test never started"
         p.send_signal(sig)
         p.wait(timeout=30)
+        if sig == signal.SIGKILL:
+            time.sleep(1.5)
+            assert not mark.exists()                        # the gate is gone, its step runs: the lock is held
+            assert len(trees(world)) == 1                   # and its worktree waits for the next run
+            os.kill(int(child.read_text()), signal.SIGTERM)  # the step ends, so the last write end closes
         for _ in range(100):
             if mark.exists():
                 break
             time.sleep(0.05)
-        assert mark.read_text() == "released\n", sig      # the holder let go, even after a SIGKILL
-        if sig == signal.SIGTERM:
-            assert p.returncode == pg.STOPPED and trees(world) == []
-        else:
-            assert len(trees(world)) == 1                   # a killed run leaves its worktree for the next run
-            os.kill(int(child.read_text()), signal.SIGTERM)  # and its command, which no one is left to end
+        assert mark.read_text() == "released\n", sig      # the holder let go
+        if sig != signal.SIGKILL:
+            assert p.returncode == pg.STOPPED and trees(world) == [], sig
     code, report, said = run(world, tests=["true"])
     assert code == pg.GREEN and trees(world) == []
 

@@ -23,7 +23,10 @@ prints a verdict. It merges and pushes nothing.
 4. A MACHINE LOCK HELD BY A PROCESS. `--lock` is a command that takes a lock, prints "held" and keeps it
    until its standard input closes. pr-gate waits up to `--lock-wait` minutes for that line and closes
    the pipe at the end, so the lock is let go even when pr-gate itself is killed. A lock that records its
-   holder's process id needs exactly this: a take command that exits would leave a stale lock.
+   holder's process id needs exactly this: a take command that exits would leave a stale lock. Every step
+   holds the pipe's write end too, so a step still running after pr-gate was killed keeps the lock until it
+   ends. A step that leaves a daemon behind holding that descriptor keeps the lock as long as the daemon runs.
+   The lock command gets the environment without the --env-file values.
 5. A CANARY AGAINST A RECORDED BASELINE. One short command runs first, timed. The fastest of its last
    ten green times is kept per repository, and a canary slower than four times that (at least
    `CANARY_FLOOR_S`) means the machine cannot carry the suite now: nothing more runs (exit 3), so a slow
@@ -34,7 +37,7 @@ prints a verdict. It merges and pushes nothing.
 `--env-file` lines (KEY=VALUE, `export` allowed) go only into the commands' environment, and their values
 are never printed: not in a log, not in a verdict line, not in --json. The commands run at the normal disk
 I/O priority, since a suite under a throttled one can take many times its time; a nice value is kept.
-The worktrees live under pr-gate's own folder, one per run, and go at the end and on SIGTERM or SIGINT.
+The worktrees live under pr-gate's own folder, one per run, and go at the end and on SIGTERM, SIGINT or SIGHUP.
 At start, the folders of earlier runs whose process ended are removed, and `git worktree prune` runs.
 
 Exit codes: 0 green, 1 the code is red (lint, canary or a test), 2 no lock by its deadline (nothing run),
@@ -213,6 +216,13 @@ class Holder:
         self.p = subprocess.Popen(["bash", "-c", cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=self.log, env=env, text=True, start_new_session=True)
 
+    def fd(self) -> int | None:
+        """The write end of the holder's input, which the steps hold too, or None once it is closed."""
+        try:
+            return self.p.stdin.fileno() if self.p.stdin and not self.p.stdin.closed else None
+        except ValueError:
+            return None
+
     def wait_held(self, wait_s: float, clock=time.monotonic) -> str | None:
         """None once the holder said READY, else why not (it ended, or the deadline passed)."""
         end = clock() + wait_s
@@ -279,7 +289,11 @@ class Gate:
         with open(log, "w") as fh:
             fh.write(f"$ {cmd}\n")
             fh.flush()
-            self.child = subprocess.Popen(["bash", "-c", cmd], cwd=cwd, env=env, stdout=fh,
+            # each step holds the write end of the lock holder's input too, so the lock is let go only once the
+            # gate and every step are gone: a gate killed mid-step leaves its step running, and that step still
+            # needs the machine to itself
+            keep = (self.holder.fd(),) if self.holder is not None and self.holder.fd() is not None else ()
+            self.child = subprocess.Popen(["bash", "-c", cmd], cwd=cwd, env=env, stdout=fh, pass_fds=keep,
                                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
             over = False
             try:
@@ -358,7 +372,7 @@ def gate(repo: str, pr: str, *, checkout: Path, lint=(), tests=(), canary: str |
     def on_signal(signum, _frame):
         raise Stopped(signal.Signals(signum).name)
 
-    old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT)}
+    old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     try:
         with _unthrottled():
             return _run(g, report, done, sha=sha, lint=lint, tests=tests, canary=canary,
@@ -419,6 +433,7 @@ def _run(g: Gate, report: dict, done, *, sha, lint, tests, canary, canary_limit_
             return done(SETUP, f"the workflow names Python {want}, and the commands' environment has "
                                + (", ".join(f"{k} {v}" for k, v in seen.items()) or "no python3"))
         g.say(f"Python {want}, as the workflow names it")
+    lock_env = dict(env)                      # the lock command gets none of the env file's values
     if env_file:
         try:
             values = read_env_file(Path(env_file).expanduser())
@@ -433,7 +448,7 @@ def _run(g: Gate, report: dict, done, *, sha, lint, tests, canary, canary_limit_
             return done(SETUP, f"a requirement failed: `{cmd}`, nothing more run")
 
     if lock:
-        g.holder = Holder(lock, env=env, log=g.logs / "00-lock.log")
+        g.holder = Holder(lock, env=lock_env, log=g.logs / "00-lock.log")
         g.say(f"waiting up to {lock_wait_s / 60:.0f} minutes for the lock")
         why = g.holder.wait_held(lock_wait_s)
         if why:
