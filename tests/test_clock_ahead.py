@@ -48,6 +48,13 @@ def bash(command, cwd="/"):
     ("the build was stopped by the user, who read the log at 13:25", ["13:25"]),
     # a sentence-wide word after the time marks nothing before it, so "by" far back still decides
     ("the run was ended by its pid at 13:25, and tomorrow it runs again", ["13:25"]),
+    # a log line that starts with its time and a colon, the commonest way to start one
+    ("UPDATE 13:22: queued", ["13:22"]),
+    ("- 13:22: shipped", ["13:22"]),
+    ("it stopped at 13:22:\nthe rest", ["13:22"]),
+    ("the last line, 13:22:", ["13:22"]),
+    ("the line 13:21:30 was written", ["13:21:30"]),
+    ("UPDATE 13:21:30: queued", ["13:21:30"]),
 ])
 def test_a_time_a_few_minutes_ahead_is_found(text, found):
     assert hits(text) == found
@@ -83,6 +90,13 @@ def test_a_time_a_few_minutes_ahead_is_found(text, found):
     "a plan for 14:45, an hour on",                      # past the window
     "23:58 was the last line",
     "a version 1.13:20 or a path a/13:20 or 2:13:20",
+    # a colon right after a time, with no space after it, is something else
+    "17:58:99 and 1:23:4x and fe80::1:23:45",
+    "13:22:99 is no time",
+    "13:22:4x is no time",
+    "13:22:x is no time",
+    "an address fe80::13:22:45 or fe80:13:22::1",
+    "after 13:22: it runs",
 ])
 def test_what_is_left_alone(text):
     assert hits(text) == []
@@ -196,6 +210,25 @@ def test_what_a_bash_line_writes_into_a_watched_file(tmp_path):
     assert ca.check(bash(f"sed 's/13:10/13:22/' {notes}/state.md", tmp_path), c, now=NOW) is None
     assert ca.check(bash(f"perl -pi -e 's/13:10/sprintf(\"13:%02d\", 22)/e' {notes}/state.md", tmp_path), c,
                     now=NOW) is None
+
+
+def test_a_note_line_that_starts_with_its_time_and_a_colon(tmp_path):
+    notes = tmp_path / "memory"
+    notes.mkdir()
+    note = notes / "state.md"
+    note.write_text("# State\n\nUPDATE 13:10: started.\n")
+    c = cfg(files=[f"{notes}/*.md"])
+    for line in ("UPDATE 13:22: queued", "- 13:22: shipped"):
+        write = {"tool_name": "Write", "tool_input": {"file_path": str(note),
+                                                      "content": f"# State\n\nUPDATE 13:10: started.\n{line}\n"}}
+        assert ca.check(write, c, now=NOW).startswith("13:22 is 4 minutes ahead"), line
+        edit = {"tool_name": "Edit", "tool_input": {"file_path": str(note), "old_string": "UPDATE 13:10: started.",
+                                                    "new_string": f"UPDATE 13:10: started.\n{line}"}}
+        assert ca.check(edit, c, now=NOW) is not None, line
+        here = f"cat >> {note} <<'EOF'\n{line}\nEOF"
+        assert ca.check(bash(here, tmp_path), c, now=NOW) is not None, line
+    after = f"cat >> {note} <<'EOF'\nafter 13:22: it runs again\nEOF"
+    assert ca.check(bash(after, tmp_path), c, now=NOW) is None
 
 
 def _ahead_now(minutes):

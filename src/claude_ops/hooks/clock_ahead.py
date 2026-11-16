@@ -86,7 +86,10 @@ FORWARD_WORDS_BACK = 3
 #: among the last FORWARD_WORDS_BACK words
 SENTENCE_WIDE = ("if", "will", "tomorrow", "tonight")
 
-TIME = re.compile(r"(?:(?<![\w:.\-/])|(?<=\dT))([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?(?![\w:])")
+#: a time of day. A colon may end it when a space or the end of the text follows, as in a log line that starts
+#: "13:22: queued". A colon with anything else after it ("13:22:99", "1:23:4x", "fe80::1:23:45") means the
+#: text is not a time.
+TIME = re.compile(r"(?:(?<![\w:.\-/])|(?<=\dT))([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?(?!\w|:\S)")
 #: a zone after a time, past any fractional seconds (`13:22:00.000Z`) and an opening bracket (`13:22 (+02)`)
 _OFFSET = re.compile(r"(?:\.\d+)?\s?\(?(?:[+-](?:[01]\d|2[0-3])(?::?[0-5]\d)?\b|Z\b)")
 _FENCED = re.compile(r"^\s{0,3}(```|~~~).*?^\s{0,3}\1[^\n]*$", re.S | re.M)
