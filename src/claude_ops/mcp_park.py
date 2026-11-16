@@ -7,11 +7,15 @@ definition (its command, arguments and keys) in a separate file, `~/.claude/mcp-
 where no session starts it. A session that needs a parked server can still be given it with
 `--mcp-config <file>` built from `definitions()`, and `unpark` puts it back for every session.
 `put` keeps a definition parked without it ever being configured, for an installer.
+`set_command` points a server at another command and arguments and keeps the rest of its definition,
+so a server started through a launcher that resolves its package at each start (uvx, npx) can be
+moved to an installed copy without its keys passing through a command line.
 
     claude-ops mcp-park list
     claude-ops mcp-park park <server>...
     claude-ops mcp-park unpark <server>...
     claude-ops mcp-park keep <server>...      # park every configured server except these
+    claude-ops mcp-park command <server> -- <command> [<arg>...]   # run it with another command, same keys
 
 The configuration is rewritten with `config.update_json`, which running sessions cannot break,
 and a copy of it is kept before the first change. The parked file is a JSON object of server name
@@ -26,7 +30,7 @@ import os
 import sys
 import tempfile
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from claude_ops import config
@@ -136,6 +140,37 @@ def put(servers: dict[str, dict], *, parked_path: os.PathLike | str = PARKED) ->
     return changed
 
 
+def set_command(name: str, command: str, args: Sequence[str] = (), *, config_path: os.PathLike | str = CONFIG,
+                parked_path: os.PathLike | str = PARKED, backup: os.PathLike | str | None = None) -> list[str]:
+    """Make the server `name` run `command` with `args`, keeping every other field of its definition (its
+    keys, its type). The definition is changed where it is kept: "parked", "configured", or both when
+    both files hold one. Returns those places, sorted, and [] when the server already runs that command.
+    Raises KeyError when neither file holds the server, and ValueError for an empty command."""
+    if not command:
+        raise ValueError("the command is empty")
+    args = [str(a) for a in args]
+    have = parked(parked_path)
+    if name not in have and name not in configured(config_path):
+        raise KeyError(name)
+    changed: list[str] = []
+    if name in have and (have[name].get("command"), have[name].get("args", [])) != (command, args):
+        _write_parked(parked_path, {**have, name: {**have[name], "command": command, "args": args}})
+        changed.append("parked")
+
+    def change(data: dict):
+        servers = dict(data.get(KEY) or {})
+        old = servers.get(name)
+        if not isinstance(old, dict) or (old.get("command"), old.get("args", [])) == (command, args):
+            return None
+        servers[name] = {**old, "command": command, "args": args}
+        data[KEY] = servers
+        return data
+
+    if name in configured(config_path) and config.update_json(config_path, change, backup=backup).get("changed"):
+        changed.append("configured")
+    return sorted(changed)
+
+
 def keep_only(names: Iterable[str], *, config_path: os.PathLike | str = CONFIG,
               parked_path: os.PathLike | str = PARKED, backup: os.PathLike | str | None = None) -> list[str]:
     """Park every configured server except the named ones; the names parked, sorted."""
@@ -150,10 +185,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", default=str(CONFIG), help="Claude Code's user configuration")
     p.add_argument("--parked", default=str(PARKED), help="the parked file")
     p.add_argument("--no-backup", action="store_true", help="keep no copy of the configuration")
-    p.add_argument("action", choices=("list", "park", "unpark", "keep"))
-    p.add_argument("servers", nargs="*")
-    a = p.parse_args(argv)
+    p.add_argument("action", choices=("list", "park", "unpark", "keep", "command"))
+    p.add_argument("servers", nargs="*", help="server names; for command, the server, then -- and its new command")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    after = argv.index("--") if "--" in argv else len(argv)
+    a = p.parse_args(argv[:after])
+    run = argv[after + 1:]
     backup = None if a.no_backup else f"{a.config}.bak-mcp-park-{time.strftime('%Y%m%d-%H%M%S')}"
+    if a.action == "command":
+        if len(a.servers) != 1 or not run:
+            p.error("command needs one server, then -- and the command with its arguments")
+        try:
+            where = set_command(a.servers[0], run[0], run[1:], config_path=a.config, parked_path=a.parked,
+                                backup=backup)
+        except KeyError:
+            print(f"refused: no server named {a.servers[0]!r} is configured or parked", file=sys.stderr)
+            return 1
+        except (ValueError, config.ConfigChanged) as e:
+            print(f"refused: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps({"server": a.servers[0], "command": run, "changed": where,
+                          "backup": backup if "configured" in where else None}, indent=2))
+        return 0
+    if run:
+        p.error(f"{a.action} takes no -- part")
     if a.action == "list":
         on, off = configured(a.config), parked(a.parked)
         print(json.dumps({"configured": sorted(on), "parked": sorted(n for n in off if n not in on)}, indent=2))
