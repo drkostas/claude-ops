@@ -522,6 +522,7 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "mutate": ("mutate", "change code on purpose and check the tests catch it"),
          "plan-apply": ("plan_apply", "apply a written plan's Write and Edit steps exactly"),
          "heavy": ("heavy", "run heavy jobs one at a time across chats, under a memory cap"),
+         "ci-run": ("ci_run", "wait for a pull request's workflow run, re-run only a job its runner lost, merge, see it deployed"),
          "restack": ("restack", "rebuild a stack of branches on a new base, settling add-only conflicts"),
          "detach": ("detach", "start a command in its own session, so it outlives the chat"),
          "adb-reach": ("adb", "reach an Android device over adb again after a restart undid tcpip"),

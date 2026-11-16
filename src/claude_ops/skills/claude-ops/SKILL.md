@@ -484,6 +484,14 @@ green at the end. Read its exit code: 0 merged, 2 still running or no checks, 3 
 names are printed), 4 the merge was refused, 5 not open, 6 not the dependency update asked for,
 8 the head moved while it waited.
 
+When a chat waits for a pull request's workflow run before merging it, it runs `claude-ops ci-run
+<run> --pr <number> --budget <minutes>` instead of writing its own loop. It waits on a deadline, re-runs
+only a job its runner lost before the first step (`--rerun-starved N`, after `--gate` passed twice),
+never a job that failed in its own code, merges pinned to the run's head, and with `--serving` waits
+until what the service runs holds the merge commit. Read its exit code: 0 done, 2 a deadline passed,
+3 a real failure or no re-run left, 4 a refusal or a re-run that did not start, 5 not open or not on
+the head, 7 not deployed in time, 8 the head moved.
+
 A bot's dependency update (Dependabot, Renovate) is merged with `--dependency-bump patch` or
 `minor`: the command refuses, with the reason, anything that is not a bot's change of lockfiles and
 manifests alone within that level, so a chat does not have to read the files and the versions
