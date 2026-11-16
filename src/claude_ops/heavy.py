@@ -122,13 +122,24 @@ scheduler that also gives out test slots, say) needs to know when a heavy job wa
 so a running heavy job can count against that work too. HEAVY_HOOK names a command that is run with
 the event, the chat, the job and the pid that holds or would hold the slot appended: `asked` when a
 job starts to wait, `admitted` when it takes the slot, `released` when it gives back a slot it held
-(or ends after it was past its turn), and `withdrawn` when it stops waiting without the slot (its
-holder ended, or the waiter was stopped). A job run inside another heavy job tells nothing, since it
-takes no slot. The hook is told and never asked: it runs for at most HEAVY_HOOK_TIMEOUT seconds (5),
+(or ends after it was past its turn), `withdrawn` when it stops waiting without the slot (its
+holder ended, or the waiter was stopped), and `swapped` when a running job was swapped out (see below).
+A job run inside another heavy job tells nothing, since it takes no slot. The hook is told and never asked: it runs for at most HEAVY_HOOK_TIMEOUT seconds (5),
 and a hook that fails, hangs or is missing never holds up or stops a job. The first failure is said.
 A hook that timed out was ended before it could write anything, and a job's own output is often kept
 nowhere, so with HEAVY_HOOK_LOG set every failure is also one line in that file: the time, the event,
 the chat, the job, the pid and why.
+
+A JOB THE MACHINE SWAPPED OUT IS SAID. A job can hold the slot while it does almost none of its work,
+because the system moved its memory to swap: an emulator whose guest stops answering still holds its
+gigabytes, and its slot, for as long as nobody notices. Each sample also reads the job's resident size
+(what of it is in memory now) and keeps its resident peak. Once the resident size falls under
+HEAVY_SWAPPED_SHARE (a quarter) of that peak while the machine's swap has grown since the peak, and the
+peak was at least HEAVY_SWAPPED_MIN_GB (1 GB), the job says so in one line, with both sizes and how much
+swap grew, and HEAVY_HOOK is told `swapped`. It is said once, and again only after the job came back
+above half its peak. The job's sample in TAKING and `status --json` carry `resident_gb`,
+`peak_resident_gb` and `swapped_out`, so a scheduler that counts heavy jobs can count a swapped-out one
+as the load it is. Nothing is ended for it: the job goes on.
 
 ONE LOG FOR THE MACHINE. Each job says its waits and decisions on its own stderr, which ends in that
 job's log. With HEAVY_LOG set, every such line is also appended to that one file with the date, the
@@ -152,7 +163,7 @@ import time
 from pathlib import Path
 
 from . import config, killguard
-from .footprint import total_gb
+from .footprint import total_gb, total_resident_gb
 
 DIR = Path(os.environ.get("HEAVY_DIR", "/tmp/claude-ops-heavy"))
 SLOT, QUEUE, LAST = DIR / "slot", DIR / "queue", DIR / "last"
@@ -210,6 +221,10 @@ REPEAT_FAILS = int(_num("HEAVY_REPEAT_FAILS", 3))
 REPEAT_HOURS = _num("HEAVY_REPEAT_HOURS", 24)
 #: how long the HEAVY_HOOK command may take before it is left behind
 HOOK_TIMEOUT = _num("HEAVY_HOOK_TIMEOUT", 5)
+#: a job is swapped out when its resident size falls under this share of its resident peak while swap grows
+SWAPPED_SHARE = _num("HEAVY_SWAPPED_SHARE", 0.25)
+#: a job whose resident peak stays under this many GB is never judged swapped out
+SWAPPED_MIN_GB = _num("HEAVY_SWAPPED_MIN_GB", 1)
 #: what the system tools need, and nothing from the caller's environment
 TOOLS_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin"}
 
@@ -252,14 +267,23 @@ def machine() -> tuple[float, float, float, float, float | None]:
     page = int(re.search(r"page size of (\d+)", vm).group(1)) if "page size of" in vm else 16384
     pages = {k: int(v) for k, v in re.findall(r"Pages (free|inactive|speculative):\s+(\d+)", vm)}
     free = sum(pages.values()) * page / 1e9
-    m = re.search(r"used = ([\d.]+)M", _out("/usr/sbin/sysctl", "-n", "vm.swapusage"))
-    swap = float(m.group(1)) / 1024 if m else 0.0
+    swap = swap_gb()
     st = os.statvfs("/System/Volumes/Data" if Path("/System/Volumes/Data").exists() else "/")
     disk = st.f_bavail * 100 / st.f_blocks
     disk_gb = st.f_bavail * st.f_frsize / 1e9
     level = _out("/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level").strip()
     return (round(free, 1), round(swap, 1), round(disk, 1), float(level) if level.isdigit() else 1.0,
             round(disk_gb, 1))
+
+
+def swap_gb() -> float:
+    """Swap used now in GB, the reading machine() gives, alone (HEAVY_FAKE_MACHINE's second value in tests)."""
+    fake = os.environ.get("HEAVY_FAKE_MACHINE")
+    if fake:
+        vals = fake.split()
+        return float(vals[1]) if len(vals) > 1 else 0.0
+    m = re.search(r"used = ([\d.]+)M", _out("/usr/sbin/sysctl", "-n", "vm.swapusage"))
+    return round(float(m.group(1)) / 1024, 1) if m else 0.0
 
 
 def reasons(m: tuple, ask_gb: float | None = None) -> list[tuple[str, str]]:
@@ -546,15 +570,32 @@ def past_turn(h: dict | None) -> bool:
     return h is not None and held_min(h) > TURN_MIN
 
 
-def taking(pid: int, now_gb: float, peak_gb: float) -> None:
-    """Write what the job of slot pid `pid` uses now and its peak so far, for a waiter beside it."""
+def taking(pid: int, now_gb: float, peak_gb: float, resident_gb: float | None = None,
+           peak_resident_gb: float | None = None, swapped_out: bool = False) -> None:
+    """Write what the job of slot pid `pid` uses now and its peak so far, for a waiter beside it, with its
+    resident size, its resident peak and whether it is swapped out now (swapped_words), when given."""
+    rec = {"now_gb": round(now_gb, 2), "peak_gb": round(peak_gb, 2), "at": time.time()}
+    if resident_gb is not None:
+        rec.update(resident_gb=round(resident_gb, 2), peak_resident_gb=round(peak_resident_gb or 0.0, 2),
+                   swapped_out=bool(swapped_out))
     try:
         TAKING.mkdir(parents=True, exist_ok=True)
         tmp = TAKING / f".{pid}.json"
-        tmp.write_text(json.dumps({"now_gb": round(now_gb, 2), "peak_gb": round(peak_gb, 2), "at": time.time()}))
+        tmp.write_text(json.dumps(rec))
         os.replace(tmp, TAKING / f"{pid}.json")
     except OSError:
         pass
+
+
+def sampled(h: dict | None) -> dict:
+    """The resident figures of holder `h`'s last sample (resident_gb, peak_resident_gb, swapped_out), or
+    each None when it wrote none yet or its sample has no resident size."""
+    rec = {}
+    try:
+        rec = json.loads((TAKING / f"{int(h['pid'])}.json").read_text()) if h else {}
+    except (KeyError, TypeError, ValueError, OSError):
+        pass
+    return {k: rec.get(k) for k in ("resident_gb", "peak_resident_gb", "swapped_out")}
 
 
 def may_take_again(h: dict | None, started: Starts | None = None) -> tuple[float, float]:
@@ -902,7 +943,12 @@ def still_running(strays: dict[int, int], table: dict | None = None) -> list[int
 
 
 def group_gb(pgid: int, seen: dict[int, int] | None = None) -> float:
-    """The memory of a job in GB: every process in its process group and every descendant of them in a
+    """The footprint half of group_memory: the job's memory in GB as top's MEM counts it."""
+    return group_memory(pgid, seen)[0]
+
+
+def group_memory(pgid: int, seen: dict[int, int] | None = None) -> tuple[float, float]:
+    """(footprint, resident) of a job in GB, both over the same processes. The footprint is the memory of a job in GB: every process in its process group and every descendant of them in a
     group of its own (job_tree), as top's MEM (compressed included), read for each with proc_pid_rusage
     (footprint.py), far cheaper than asking `top`. With `seen` (pid -> group, kept by the caller from one
     sample to the next), each process found outside the group is added to it, and every one seen before
@@ -911,9 +957,22 @@ def group_gb(pgid: int, seen: dict[int, int] | None = None) -> float:
     table = killguard.process_table() or {}
     members, outside = job_tree(pgid, table)
     if seen is None:
-        return round(total_gb(members + list(outside)), 1)
-    seen.update(outside)
-    return round(total_gb(sorted(set(members) | set(still_running(seen, table)))), 1)
+        pids = members + list(outside)
+    else:
+        seen.update(outside)
+        pids = sorted(set(members) | set(still_running(seen, table)))
+    return round(total_gb(pids), 1), round(total_resident_gb(pids), 2)
+
+
+def swapped_words(what: str, resident: float, peak_resident: float, swap_now: float, swap_at_peak: float,
+                  share: float = SWAPPED_SHARE, least: float = SWAPPED_MIN_GB) -> str | None:
+    """Pure. The line that says job `what` was swapped out, or None: its resident size is under `share` of
+    its resident peak, that peak was at least `least` GB, and the machine's swap grew since the peak."""
+    if peak_resident < least or resident >= share * peak_resident or swap_now <= swap_at_peak:
+        return None
+    return (f"{what} was swapped out: {resident:g} GB of its {peak_resident:g} GB resident peak is in memory, "
+            f"and swap grew {swap_now - swap_at_peak:.1f} GB since that peak. It holds the slot while it waits "
+            f"on swap, so it may take far longer than its usual time")
 
 
 def program(pid: int, table: dict) -> str:
@@ -1268,6 +1327,8 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, forward)
     over, ended, began, peak = None, False, time.time(), 0.0
+    # the resident peak, the swap when it was reached, and whether the job is said to be swapped out now
+    peak_res, swap_at_peak, swapped = 0.0, 0.0, False
     try:
         while True:
             try:
@@ -1281,9 +1342,19 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 end_job()
                 rc = 124
                 break
-            used = group_gb(job.pid, strays)
+            used, resident = group_memory(job.pid, strays)
             peak = max(peak, used)
-            taking(os.getpid(), used, peak)
+            if resident > peak_res:
+                peak_res, swap_at_peak = resident, swap_gb()
+            if swapped and resident >= peak_res / 2:
+                swapped = False                     # back in memory: a second swap-out is said again
+            elif not swapped and resident < SWAPPED_SHARE * peak_res:
+                line = swapped_words(what, resident, peak_res, swap_gb(), swap_at_peak)
+                if line:
+                    swapped = True
+                    say(line)
+                    hook("swapped", chat, what, os.getpid())
+            taking(os.getpid(), used, peak, resident, peak_res, swapped)
             if used > MAX_GB:
                 over = used
                 end_job()
@@ -1322,7 +1393,8 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
 def status_data() -> dict:
     """What `status` prints, as data, so a caller chooses without reading text. `machine` is the reading the
     gate used (free_gb, swap_gb, disk_free_pct, disk_free_gb, pressure as normal, raised or critical),
-    `short` the kinds and words that hold a job with no declared need now, `slot` the holder or None,
+    `short` the kinds and words that hold a job with no declared need now, `slot` the holder or None (with
+    its last sample's `resident_gb`, `peak_resident_gb` and `swapped_out`, each None before its first sample),
     `past_turn` the jobs that gave the slot up and still run, and `waiting` each waiter in the order it goes
     next. A waiter's `gate` is None when nothing but the turn holds it, else its reason `kinds` (memory,
     pressure, swap, disk), the gate's `words`, how many `held_s` seconds it has held and the `most_free_gb`
@@ -1340,7 +1412,8 @@ def status_data() -> dict:
     }
     if h:
         out["slot"] = {"chat": h["chat"], "what": h["what"], "pid": h["pid"], "since": h["since"],
-                       "held_min": round(held_min(h), 1), "need_gb": h.get("need_gb"), "past_turn": past_turn(h)}
+                       "held_min": round(held_min(h), 1), "need_gb": h.get("need_gb"), "past_turn": past_turn(h),
+                       **sampled(h)}
     for j in past_jobs():
         out["past_turn"].append({"chat": j["chat"], "what": j["what"], "pid": j["pid"], "since": j["since"],
                                  "held_min": round(held_min(j), 1)})
@@ -1374,8 +1447,11 @@ def status(as_json: bool = False) -> int:
         late = (f", past its turn of {TURN_MIN:g} min: the next waiter starts beside it"
                 if past_turn(h) else "")
         need = f", declared need {float(h['need_gb']):g} GB" if h.get("need_gb") is not None else ""
+        s = sampled(h)
+        out = (f", swapped out: {s['resident_gb']:g} GB of its {s['peak_resident_gb']:g} GB resident peak in memory"
+               if s["swapped_out"] else "")
         print(f"slot: {h['chat']}: {h['what']} (pid {h['pid']}, since {h['since']}, held "
-              f"{_ago(held_min(h))}{need}{late})")
+              f"{_ago(held_min(h))}{need}{out}{late})")
     else:
         print("slot: free")
     for j in past_jobs():
@@ -1410,7 +1486,7 @@ _hook_said = [False]
 
 
 def hook(event: str, chat: str, what: str, pid: int) -> bool:
-    """Tell the HEAVY_HOOK command that this job was `asked`, `admitted`, `released` or `withdrawn`,
+    """Tell the HEAVY_HOOK command that this job was `asked`, `admitted`, `released`, `withdrawn` or `swapped`,
     with the chat, the job and the pid that holds or would hold the slot. Without HEAVY_HOOK nobody is
     told. It is only told: a hook that fails, hangs past HOOK_TIMEOUT or cannot start returns False
     and the job goes on, and the first such failure in a process is said."""

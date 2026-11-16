@@ -381,7 +381,7 @@ def test_a_run_over_its_need_makes_the_next_run_wait_for_its_peak(monkeypatch, t
     said = []
     monkeypatch.setattr(h, "say", said.append)
     peak = [1.4]
-    monkeypatch.setattr(h, "group_gb", lambda _pgid, _seen=None: peak[0])
+    monkeypatch.setattr(h, "group_memory", lambda _pgid, _seen=None: (peak[0], peak[0]))
     monkeypatch.setattr(h, "peak_of_children", lambda: peak[0])
     try:
         assert h.run("t-chat", "invented sheet job", ["sleep", "0.4"], need_gb="1") == 0

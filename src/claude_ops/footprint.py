@@ -25,10 +25,9 @@ class _RusageInfoV2(ctypes.Structure):
 _libproc = None
 
 
-def footprint_gb(pid: int) -> float | None:
-    """A process's memory footprint in GB, the figure top shows as MEM (phys_footprint, which counts
-    compressed pages), from proc_pid_rusage in about a microsecond. None for a process that is gone
-    or another user's."""
+def _usage(pid: int) -> _RusageInfoV2 | None:
+    """proc_pid_rusage's counters for one process, or None for a process that is gone or another user's,
+    and on a system that has no libproc."""
     global _libproc
     if _libproc is None:
         try:
@@ -40,9 +39,30 @@ def footprint_gb(pid: int) -> float | None:
     info = _RusageInfoV2()
     if _libproc.proc_pid_rusage(int(pid), 2, ctypes.byref(info)) != 0:     # RUSAGE_INFO_V2
         return None
-    return info.ri_phys_footprint / 1024 ** 3
+    return info
+
+
+def footprint_gb(pid: int) -> float | None:
+    """A process's memory footprint in GB, the figure top shows as MEM (phys_footprint, which counts
+    compressed pages), from proc_pid_rusage in about a microsecond. None for a process that is gone
+    or another user's."""
+    info = _usage(pid)
+    return None if info is None else info.ri_phys_footprint / 1024 ** 3
+
+
+def resident_gb(pid: int) -> float | None:
+    """How much of a process is in memory now, in GB (resident_size, the figure ps shows as RSS). Pages
+    the system swapped out or compressed are not in it, so a process whose resident size falls far below
+    its footprint is mostly waiting on swap. None for a process that is gone or another user's."""
+    info = _usage(pid)
+    return None if info is None else info.ri_resident_size / 1024 ** 3
 
 
 def total_gb(pids) -> float:
     """The footprints of these processes added up, in GB; a process that is gone counts nothing."""
     return sum(gb for pid in pids if (gb := footprint_gb(pid)) is not None)
+
+
+def total_resident_gb(pids) -> float:
+    """The resident sizes of these processes added up, in GB; a process that is gone counts nothing."""
+    return sum(gb for pid in pids if (gb := resident_gb(pid)) is not None)
