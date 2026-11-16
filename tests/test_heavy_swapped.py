@@ -1,6 +1,8 @@
 """A heavy job the machine swapped out is said once, told to HEAVY_HOOK as `swapped`, and kept in its sample,
 so a scheduler that counts heavy jobs can count it. The sampled sizes and the swap reading stand in for a
 real job's, so every figure is the test's own."""
+from __future__ import annotations
+
 import importlib
 import os
 import signal
