@@ -10,7 +10,9 @@ A folder may keep an index note whose lines link each session's current note, fo
 returned with the link text of the line that links it, so a caller can tell whose it is.
 
 A note the index does not link but still names was rolled away: its history was kept and a new note
-took its place (the note linked on the line that names it). So was an unlinked note whose name
+took its place (the note linked on the line that names it). So was a note the index links only after
+another link on the same line: a line's first link is the current note, and later links on it point
+at its history. So was an unlinked note whose name
 without its date (`build-state` for `build-state-2026-11-01.md`) is a linked note's. A rolled note is
 left out only while it has not been written since its successor was created. One written after that
 is a session still appending to its old note, and it is returned with its successor's label. Where
@@ -79,15 +81,19 @@ def names(text: str, name: str) -> bool:
 
 
 def successor(name: str, index: Index) -> str | None:
-    """The linked note that replaced an unlinked one: the note linked on a line that names it, else a
-    linked note with the same name without its date. None for a linked note or one never replaced."""
-    if name in index.links:
+    """The note that replaced `name`: the first link of a line that links it later on the line
+    (`- [build state](build-state-2026-11-16.md), older history in [part c](build-state-2026-11-15.md)`),
+    else the first link of a line that names it, else a line's first link with the same name without its
+    date. A line's first link is the current note and later links on it are its history. None for a
+    note that is the first link of a line, and for one never replaced."""
+    current = [linked[0] for _line, linked in index.lines if linked]
+    if name in current:
         return None
     for line, linked in index.lines:
-        if linked and names(line, name):
+        if name in linked[1:] or (linked and names(line, name)):
             return linked[0]
     own = stem(name)
-    return next((n for n in index.links if stem(n) == own), None)
+    return next((n for n in current if stem(n) == own), None)
 
 
 def birth_time(path: Path) -> float | None:
@@ -96,6 +102,27 @@ def birth_time(path: Path) -> float | None:
         return getattr(os.stat(path), "st_birthtime", None)
     except OSError:
         return None
+
+
+def memory_folders(projects: Path = PROJECTS) -> list[Path]:
+    """Each project's memory folder once by its real path, sorted. Several project folders can link to
+    one shared memory folder, and without this every note in it would count once per link. Of the
+    folders that reach one real folder, the one that is not reached through a link is kept, else the
+    first by name. Raises OSError when `projects` cannot be listed."""
+    kept: dict[str, Path] = {}
+    for p in sorted(Path(projects).iterdir()):
+        folder = p / "memory"
+        if not folder.is_dir():
+            continue
+        real = os.path.realpath(folder)
+        if real not in kept or (_through_link(kept[real]) and not _through_link(folder)):
+            kept[real] = folder
+    return sorted(kept.values())
+
+
+def _through_link(folder: Path) -> bool:
+    """Whether a memory folder, or the project folder holding it, is a symbolic link."""
+    return folder.is_symlink() or folder.parent.is_symlink()
 
 
 def large_notes(projects: Path = PROJECTS, *, min_bytes: int = MIN_BYTES, within_s: float = WITHIN_S,
@@ -109,7 +136,7 @@ def large_notes(projects: Path = PROJECTS, *, min_bytes: int = MIN_BYTES, within
     now = time.time() if now is None else now
     found: list[LargeNote] = []
     try:
-        folders = sorted(p / "memory" for p in Path(projects).iterdir() if (p / "memory").is_dir())
+        folders = memory_folders(projects)
     except OSError:
         return []
     for folder in folders:
