@@ -197,3 +197,57 @@ def test_memory_folders_lists_each_real_folder_once(tmp_path):
     (tmp_path / "-c" / "memory").symlink_to(tmp_path / "-a" / "memory")
     (tmp_path / "-d").mkdir()                     # a project with no memory folder
     assert mn.memory_folders(tmp_path) == [tmp_path / "-a" / "memory", tmp_path / "-b" / "memory"]
+
+
+def only_a_later_index(tmp_path, old_age_s):
+    """A folder whose only index is MEMORY.md, which links the new note first and the old one later on its line."""
+    mem = tmp_path / "-p" / "memory"
+    note(mem, "project_in_flight_14nov.md", 73_000, old_age_s)
+    note(mem, "project_in_flight_16nov.md", 4_000, 30)
+    note(mem, "MEMORY.md", 0, 30,
+         "- [project_in_flight_16nov.md](project_in_flight_16nov.md), the 14 to 16 Nov history in "
+         "[project_in_flight_14nov.md](project_in_flight_14nov.md)\n")
+    return lambda p: {"project_in_flight_16nov.md": NOW - 120}.get(p.name)
+
+
+def test_a_folder_whose_only_index_is_a_later_name_reads_that_index(tmp_path):
+    birth = only_a_later_index(tmp_path, 600)
+    wanted = ("chat-state-notes.md", "MEMORY.md")
+    assert mn.large_notes(tmp_path, index_name=wanted, now=NOW, birth=birth) == []
+    # one name only, which this folder does not hold: the rolled note reads as unlinked and is reported
+    got = mn.large_notes(tmp_path, index_name="chat-state-notes.md", now=NOW, birth=birth)
+    assert [(n.path.name, n.label) for n in got] == [("project_in_flight_14nov.md", None)]
+
+
+def test_a_rolled_note_still_written_takes_its_label_from_the_later_index_name(tmp_path):
+    birth = only_a_later_index(tmp_path, 10)
+    got = mn.large_notes(tmp_path, index_name=["chat-state-notes.md", "MEMORY.md"], now=NOW, birth=birth)
+    assert [(n.path.name, n.label) for n in got] == [("project_in_flight_14nov.md", "project_in_flight_16nov.md")]
+
+
+def test_the_first_index_name_a_folder_holds_is_its_index(tmp_path):
+    mem = tmp_path / "-p" / "memory"
+    note(mem, "state-a.md", 70_000, 60)
+    note(mem, "notes-index.md", 0, 30, "- [chat a state](state-a.md)\n")
+    note(mem, "MEMORY.md", 0, 30, "- [memory line](state-a.md)\n")
+    got = mn.large_notes(tmp_path, index_name=["notes-index.md", "MEMORY.md"], now=NOW)
+    assert [n.label for n in got] == ["chat a state"]
+    got = mn.large_notes(tmp_path, index_name=["absent.md", "MEMORY.md"], now=NOW)
+    assert [n.label for n in got] == ["memory line"]
+
+
+def test_a_note_with_an_index_name_is_never_taken_for_a_rolled_note(tmp_path):
+    mem = tmp_path / "-p" / "memory"
+    note(mem, "MEMORY.md", 70_000, 600)
+    note(mem, "state-b.md", 4_000, 30)
+    note(mem, "notes-index.md", 0, 30, "- [chat b state](state-b.md), also listed in MEMORY.md\n")
+    birth = lambda p: NOW - 120
+    got = mn.large_notes(tmp_path, index_name=("notes-index.md", "MEMORY.md"), now=NOW, birth=birth)
+    assert [n.path.name for n in got] == ["MEMORY.md"]
+
+
+def test_index_names_takes_one_name_several_or_none():
+    assert mn.index_names("a.md") == ("a.md",)
+    assert mn.index_names(["a.md", "", "b.md"]) == ("a.md", "b.md")
+    assert mn.index_names(None) == ()
+    assert mn.index_names("") == ()
