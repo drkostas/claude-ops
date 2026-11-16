@@ -34,6 +34,7 @@ import argparse
 import ast
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -205,6 +206,27 @@ def run_mutations(root: Path, muts: list[dict], run: list[str], *, caught: tuple
     return 1 if survivors else 0
 
 
+#: words that mean something only to a shell: the command runs with no shell, so each reaches the program as a word
+SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+#: commands a shell runs itself: run as a program, each does nothing and exits 0 (macOS has /usr/bin/cd)
+SHELL_BUILTINS = {"cd", "export", "source", ".", "set", "unset", "pushd", "popd"}
+REDIRECT = re.compile(r"^\d*(>>?|<)(&\d+)?$")
+
+
+def needs_shell(words: list[str]) -> str | None:
+    """Pure. Why `words` (the --run text, split as the command will be run) needs a shell, or None.
+    `cd {copy} && pytest` would run /usr/bin/cd with the rest as its words: it does nothing and exits 0,
+    so the baseline passes and every mutation passes too, without one test having run."""
+    if not words:
+        return None
+    if words[0] in SHELL_BUILTINS:
+        return f"it starts with {words[0]!r}, which only a shell runs"
+    for w in words:
+        if w in SHELL_OPERATORS or w.endswith(";") or REDIRECT.match(w):
+            return f"it holds {w!r}, which only a shell reads"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="claude-ops mutate", description=__doc__.split("\n")[0])
     ap.add_argument("worktree", type=Path)
@@ -246,6 +268,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if 0 in caught:
         print("REFUSED: exit 0 is a pass, never a caught mutation", file=sys.stderr)
+        return 2
+    why = needs_shell(shlex.split(a.run))
+    if why:
+        print(f"REFUSED: --run is run with no shell, and {why}. Wrap it: --run 'bash -c \"...\"'",
+              file=sys.stderr)
         return 2
     return run_mutations(root, muts, shlex.split(a.run), caught=caught,
                          env=dict(os.environ, **extra), out=a.out)
