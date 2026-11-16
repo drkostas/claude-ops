@@ -25,7 +25,9 @@ prints a verdict. It merges and pushes nothing.
    the pipe at the end, so the lock is let go even when pr-gate itself is killed. A lock that records its
    holder's process id needs exactly this: a take command that exits would leave a stale lock. Every step
    holds the pipe's write end too, so a step still running after pr-gate was killed keeps the lock until it
-   ends. A step that leaves a daemon behind holding that descriptor keeps the lock as long as the daemon runs.
+   ends. A step that leaves a daemon behind holding that descriptor keeps the lock as long as the daemon runs,
+   but only after a kill: a pr-gate that ends by itself gives the lock command 30 seconds to end and then
+   sends it SIGTERM, so the lock is let go then, whatever still holds the descriptor.
    The lock command gets the environment without the --env-file values.
 5. A CANARY AGAINST A RECORDED BASELINE. One short command runs first, timed. The fastest of its last
    ten green times is kept per repository, and a canary slower than four times that (at least
