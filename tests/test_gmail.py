@@ -177,6 +177,29 @@ def test_body_is_empty_when_there_is_no_text_part(tmp_path):
     assert Mailbox(t, c, fetch=g).body("m3") == ""
 
 
+def test_links_gives_each_link_of_the_html_part_with_its_words(tmp_path):
+    t, c = files(tmp_path)
+    html = ('<p>Click the button below.</p><a href="https://example.org/sign-in?t=abc">  Sign\n in </a>'
+            '<a href="#top">Back to top</a><a>no address</a>'
+            '<a href="https://example.org/help"><b>Help</b> centre</a>')
+    payload = {"mimeType": "multipart/alternative", "parts": [
+        {"mimeType": "text/plain", "body": {"data": _b64("Click the button below.")}},
+        {"mimeType": "text/html", "body": {"data": _b64(html)}},
+    ]}
+    g = Google([{"payload": payload}])
+    assert Mailbox(t, c, fetch=g).links("m4") == [
+        {"text": "Sign in", "href": "https://example.org/sign-in?t=abc"},
+        {"text": "Help centre", "href": "https://example.org/help"},
+    ]
+    assert query_of(g.requests[1])["format"] == ["full"]
+
+
+def test_links_is_empty_for_a_text_only_message(tmp_path):
+    t, c = files(tmp_path)
+    g = Google([{"payload": {"mimeType": "text/plain", "body": {"data": _b64("see https://example.org")}}}])
+    assert Mailbox(t, c, fetch=g).links("m5") == []
+
+
 def _failed(code=503, headers=None):
     return urllib.error.HTTPError("https://gmail.googleapis.com/", code, "Failed", headers or {},
                                   io.BytesIO(b'{"error": "internal_failure"}'))
