@@ -24,23 +24,27 @@ def _fresh(monkeypatch, tmp_path, **extra):
 
 def test_the_words_come_only_when_resident_falls_under_a_quarter_of_its_peak_while_swap_grows(monkeypatch, tmp_path):
     h = _fresh(monkeypatch, tmp_path)
-    line = h.swapped_words("emulator job", 0.27, 3.0, 26.0, 21.0)
+    line = h.swapped_words("emulator job", 0.27, 3.0, 3.0, 26.0, 21.0)
     assert line is not None and line.startswith("emulator job was swapped out: 0.27 GB of its 3 GB resident peak")
     assert "swap grew 5.0 GB since that peak" in line
-    assert h.swapped_words("emulator job", 0.27, 3.0, 21.0, 21.0) is None, "swap that did not grow says nothing"
-    assert h.swapped_words("emulator job", 0.8, 3.0, 26.0, 21.0) is None, "over a quarter of the peak is not swapped out"
-    assert h.swapped_words("small job", 0.1, 0.9, 26.0, 21.0) is None, "a peak under HEAVY_SWAPPED_MIN_GB is never judged"
+    assert h.swapped_words("emulator job", 0.27, 3.0, 3.0, 21.0, 21.0) is None, "swap that did not grow says nothing"
+    assert h.swapped_words("emulator job", 0.8, 3.0, 3.0, 26.0, 21.0) is None, "over a quarter of the peak is not swapped out"
+    assert h.swapped_words("small job", 0.1, 0.9, 0.9, 26.0, 21.0) is None, "a peak under HEAVY_SWAPPED_MIN_GB is never judged"
+    assert h.swapped_words("build job", 0.27, 3.0, 0.3, 26.0, 21.0) is None, \
+        "a job whose footprint fell with its resident size let its memory go, it was not swapped out"
     h = _fresh(monkeypatch, tmp_path, HEAVY_SWAPPED_SHARE="0.5", HEAVY_SWAPPED_MIN_GB="0.5")
-    assert h.swapped_words("small job", 0.4, 0.9, 26.0, 21.0) is not None, "both limits are settings"
+    assert h.swapped_words("small job", 0.4, 0.9, 0.9, 26.0, 21.0) is not None, "both limits are settings"
 
 
-def _run(h, monkeypatch, tmp_path, resident: list[float], swap: list[float], seconds: float = 1.6):
-    """Run a job whose samples read `resident` in turn (then its last value) and whose swap reads `swap` in
-    turn. Returns what it said, the hook's lines and every sample it wrote."""
+def _run(h, monkeypatch, tmp_path, resident: list[float], swap: list[float], seconds: float = 1.6,
+         footprint: list[float] | None = None):
+    """Run a job whose samples read `resident` (and `footprint`, else 3 GB) in turn, then their last value,
+    and whose swap reads `swap` in turn. Returns what it said, the hook's lines and every sample it wrote."""
     said, samples = [], []
     monkeypatch.setattr(h, "say", said.append)
-    res, sw = list(resident), list(swap)
-    monkeypatch.setattr(h, "group_memory", lambda _pgid, _seen=None: (3.0, res.pop(0) if len(res) > 1 else res[0]))
+    res, sw, foot = list(resident), list(swap), list(footprint or [3.0])
+    monkeypatch.setattr(h, "group_memory", lambda _pgid, _seen=None: (
+        foot.pop(0) if len(foot) > 1 else foot[0], res.pop(0) if len(res) > 1 else res[0]))
     monkeypatch.setattr(h, "swap_gb", lambda: sw.pop(0) if len(sw) > 1 else sw[0])
     monkeypatch.setattr(h, "peak_of_children", lambda: 3.0)
     real_taking = h.taking
@@ -100,6 +104,26 @@ def test_a_job_that_stays_in_memory_or_is_small_says_nothing(monkeypatch, tmp_pa
         assert not [x for x in said if "was swapped out" in x] and not [x for x in told if x.startswith("swapped")]
         said, told, _ = _run(h, monkeypatch, tmp_path, resident=[0.6, 0.05], swap=[20.0, 26.0], seconds=0.8)
         assert not [x for x in said if "was swapped out" in x], "a resident peak under 1 GB is never judged"
+    finally:
+        sys.modules.pop("claude_ops.heavy", None)
+
+
+def test_a_job_that_lets_its_memory_go_is_never_called_swapped_out(monkeypatch, tmp_path):
+    """Footprint and resident size fall together (a build whose compiler ended, a job that freed its arrays)
+    while swap grows from other work: nothing is said and the hook is told nothing. And a job said to be
+    swapped out that then lets its memory go is no longer marked so."""
+    h = _fresh(monkeypatch, tmp_path, HEAVY_FAKE_MACHINE="20 2 50", HEAVY_CHECK="0.05")
+    try:
+        said, told, samples = _run(h, monkeypatch, tmp_path, resident=[3.0, 3.0, 0.27], footprint=[3.2, 3.2, 0.3],
+                                   swap=[20.0, 26.0], seconds=0.8)
+        assert not [x for x in said if "was swapped out" in x], said
+        assert not [x for x in told if x.startswith("swapped")], told
+        assert samples[-1] == (0.27, 3.0, False), samples[-3:]
+        said, told, samples = _run(h, monkeypatch, tmp_path, resident=[3.0, 0.27, 0.27, 0.27, 0.27],
+                                   footprint=[3.2, 3.2, 3.2, 3.2, 0.3], swap=[20.0, 26.0], seconds=1.2)
+        assert len([x for x in said if "was swapped out" in x]) == 1, said
+        assert (0.27, 3.0, True) in samples and samples[-1] == (0.27, 3.0, False), \
+            "swapped out while its footprint stayed, and no longer once the footprint went"
     finally:
         sys.modules.pop("claude_ops.heavy", None)
 

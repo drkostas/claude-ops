@@ -134,10 +134,12 @@ A JOB THE MACHINE SWAPPED OUT IS SAID. A job can hold the slot while it does alm
 because the system moved its memory to swap: an emulator whose guest stops answering still holds its
 gigabytes, and its slot, for as long as nobody notices. Each sample also reads the job's resident size
 (what of it is in memory now) and keeps its resident peak. Once the resident size falls under
-HEAVY_SWAPPED_SHARE (a quarter) of that peak while the machine's swap has grown since the peak, and the
-peak was at least HEAVY_SWAPPED_MIN_GB (1 GB), the job says so in one line, with both sizes and how much
-swap grew, and HEAVY_HOOK is told `swapped`. It is said once, and again only after the job came back
-above half its peak. The job's sample in TAKING and `status --json` carry `resident_gb`,
+HEAVY_SWAPPED_SHARE (a quarter) of that peak and of its footprint now, while the machine's swap has grown
+since the peak, and the peak was at least HEAVY_SWAPPED_MIN_GB (1 GB), the job says so in one line, with
+both sizes and how much swap grew, and HEAVY_HOOK is told `swapped`. The footprint is what tells a
+swapped job from one that let its memory go (its big process ended, or it freed what it held): the first
+keeps its footprint, the second loses it with its resident size. It is said once, and again only after
+the job came back above half its peak or its memory went. The job's sample in TAKING and `status --json` carry `resident_gb`,
 `peak_resident_gb` and `swapped_out`, so a scheduler that counts heavy jobs can count a swapped-out one
 as the load it is. Nothing is ended for it: the job goes on.
 
@@ -964,11 +966,15 @@ def group_memory(pgid: int, seen: dict[int, int] | None = None) -> tuple[float, 
     return round(total_gb(pids), 1), round(total_resident_gb(pids), 2)
 
 
-def swapped_words(what: str, resident: float, peak_resident: float, swap_now: float, swap_at_peak: float,
-                  share: float = SWAPPED_SHARE, least: float = SWAPPED_MIN_GB) -> str | None:
+def swapped_words(what: str, resident: float, peak_resident: float, footprint: float, swap_now: float,
+                  swap_at_peak: float, share: float = SWAPPED_SHARE, least: float = SWAPPED_MIN_GB) -> str | None:
     """Pure. The line that says job `what` was swapped out, or None: its resident size is under `share` of
-    its resident peak, that peak was at least `least` GB, and the machine's swap grew since the peak."""
-    if peak_resident < least or resident >= share * peak_resident or swap_now <= swap_at_peak:
+    its resident peak AND of its footprint now, that peak was at least `least` GB, and the machine's swap
+    grew since the peak. The footprint tells a swapped job from one that let its memory go: a swapped job
+    keeps its footprint (its pages are in swap or compressed), and a job whose big process ended or that
+    freed its arrays loses footprint and resident size together, so it is never called swapped out."""
+    if (peak_resident < least or resident >= share * peak_resident or resident >= share * footprint
+            or swap_now <= swap_at_peak):
         return None
     return (f"{what} was swapped out: {resident:g} GB of its {peak_resident:g} GB resident peak is in memory, "
             f"and swap grew {swap_now - swap_at_peak:.1f} GB since that peak. It holds the slot while it waits "
@@ -1346,10 +1352,10 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
             peak = max(peak, used)
             if resident > peak_res:
                 peak_res, swap_at_peak = resident, swap_gb()
-            if swapped and resident >= peak_res / 2:
-                swapped = False                     # back in memory: a second swap-out is said again
-            elif not swapped and resident < SWAPPED_SHARE * peak_res:
-                line = swapped_words(what, resident, peak_res, swap_gb(), swap_at_peak)
+            if swapped and (resident >= peak_res / 2 or resident >= SWAPPED_SHARE * used):
+                swapped = False                     # back in memory, or the memory itself went: said again later
+            elif not swapped and resident < SWAPPED_SHARE * min(peak_res, used):
+                line = swapped_words(what, resident, peak_res, used, swap_gb(), swap_at_peak)
                 if line:
                     swapped = True
                     say(line)
