@@ -256,16 +256,23 @@ def new_lines(path: str, text: str) -> str:
 
 def texts(payload: dict, cfg: Config) -> list[str]:
     """The texts of this tool call that the configuration says a person reads."""
+    return [text for text, _source in sourced_texts(payload, cfg)]
+
+
+def sourced_texts(payload: dict, cfg: Config) -> list[tuple[str, str | None]]:
+    """`texts` with each text's file: the path when the text is what a file the command names holds
+    now (a body, notes, message or input file), else None."""
     tool = str(payload.get("tool_name", ""))
     ti = payload.get("tool_input") or {}
     if tool == "Bash":
         command, cwd = str(ti.get("command", "")), payload.get("cwd") or os.getcwd()
-        found = _command_texts(command, cwd, cfg) if cfg.commands else []
+        found = [(t, None) for t in _command_texts(command, cwd, cfg)] if cfg.commands else []
         if cfg.messages:
-            from .public_voice import published
-            found += [t for _where, _target, t in published(command, cwd)]
+            from .public_voice import published_from
+            found += [(t, source) for _where, _target, t, source in published_from(command, cwd)]
         if cfg.files:
-            found += [new_lines(path, t) for path, t in commandline.writes(command, cwd) if watched(path, cfg)]
+            found += [(new_lines(path, t), None) for path, t in commandline.writes(command, cwd)
+                      if watched(path, cfg)]
         return found
     if tool in ("Write", "Edit", "MultiEdit"):
         path = str(ti.get("file_path", ""))
@@ -277,24 +284,29 @@ def texts(payload: dict, cfg: Config) -> list[str]:
             written = [ti.get("new_string")]
         else:
             written = [e.get("new_string") for e in ti.get("edits") or [] if isinstance(e, dict)]
-        return [new_lines(path, t) for t in written if isinstance(t, str)]
+        return [(new_lines(path, t), None) for t in written if isinstance(t, str)]
     from .public_voice import strings
-    return [v for k in cfg.tools.get(tool, []) if k in ti for v in strings(ti.get(k))]
+    return [(v, None) for k in cfg.tools.get(tool, []) if k in ti for v in strings(ti.get(k))]
 
 
 def check(payload: dict, cfg: Config, now: dt.datetime | None = None) -> str | None:
-    """Why this tool call is refused, or None."""
+    """Why this tool call is refused, or None. A time read from a file the command names says so,
+    because the check reads that file before the command runs."""
     if cfg.empty:
         return None
     now = now or dt.datetime.now()
-    for text in texts(payload, cfg):
+    for text, source in sourced_texts(payload, cfg):
         hits = ahead(text, now, cfg)
         if hits:
             written, minutes = hits[0]
             more = f" (and {len(hits) - 1} more)" if len(hits) > 1 else ""
-            return (f"{written} is {minutes:.0f} minutes ahead of the clock, which reads {now:%H:%M}{more}. "
-                    f"Read the clock and write the time it gives, or put a word such as after or until "
-                    f"before a time still to come.")
+            why = (f"{written} is {minutes:.0f} minutes ahead of the clock, which reads {now:%H:%M}{more}. "
+                   f"Read the clock and write the time it gives, or put a word such as after or until "
+                   f"before a time still to come.")
+            if source:
+                command = str((payload.get("tool_input") or {}).get("command", ""))
+                why += " " + commandline.read_note(source, command, payload.get("cwd") or os.getcwd()) + "."
+            return why
     return None
 
 

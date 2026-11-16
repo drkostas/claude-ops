@@ -158,6 +158,32 @@ def test_a_commit_message_and_a_pull_request_body(tmp_path):
                     now=NOW) is None
 
 
+def test_a_time_read_from_a_file_says_to_change_the_file_in_a_call_of_its_own(tmp_path):
+    (tmp_path / "body.md").write_text("The queue was empty at 13:22.\n")
+    (tmp_path / "msg.txt").write_text("Fix the reader\n\nThe queue was empty at 13:22.\n")
+    c = cfg()
+    why = ca.check(bash("gh pr create --title t --body-file body.md", tmp_path), c, now=NOW)
+    assert why.startswith("13:22 is 4 minutes ahead of the clock, which reads 13:17.")
+    assert why.endswith("before a time still to come. That text was read from body.md as it is now, before "
+                        "the command runs. Change body.md in a call of its own, then send the command again.")
+    assert "\n" not in why
+    # the same line edits the file and then sends it, and the check still reads the file as it is now
+    why = ca.check(bash("sed -i '' 's/13:22/13:10/' body.md && gh pr create --title t --body-file body.md",
+                        tmp_path), c, now=NOW)
+    assert why.endswith("This command also writes body.md, but the check reads body.md as it is now, before "
+                        "the command runs. Write body.md in a call of its own, then send the command again.")
+    assert ca.check(bash(f"git -C {tmp_path} commit -F msg.txt", tmp_path), c, now=NOW).endswith(
+        "Change msg.txt in a call of its own, then send the command again.")
+    # a text in the command itself, or one an earlier command on the line writes, names no file
+    plain = ("Read the clock and write the time it gives, or put a word such as after or until "
+             "before a time still to come.")
+    assert ca.check(bash("gh pr create --title t --body 'empty at 13:22'", tmp_path), c, now=NOW).endswith(plain)
+    assert ca.check(bash("printf 'empty at 13:22' > new.md && gh pr create --title t --body-file new.md",
+                         tmp_path), c, now=NOW).endswith(plain)
+    assert ca.texts(bash("gh pr create --title t --body-file body.md", tmp_path), c) == [
+        "t", "The queue was empty at 13:22.\n"]
+
+
 def test_what_a_write_adds_to_a_watched_file(tmp_path):
     notes = tmp_path / "memory"
     notes.mkdir()
