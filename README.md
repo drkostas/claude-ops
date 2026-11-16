@@ -146,6 +146,39 @@ no re-run is allowed, 4 gh refused something or a re-run did not start, 5 the pu
 open or the run is not on its head, 7 the service did not show the merge commit in time, 8 the head
 moved while it waited.
 
+## Gate a pull request on a local run of its checks
+
+```bash
+claude-ops pr-gate 42 --repo owner/app --checkout ~/src/app --cwd backend \
+    --python-from .github/workflows/ci.yml --path ~/.venvs/app/bin --env-file ~/.config/app/test.env \
+    --require "pg_isready -h localhost" --lock "flock /tmp/suite.lock -c 'echo held; cat'" \
+    --lint "ruff check ." --canary "python -m pytest tests/unit/test_small.py -q" \
+    --test "python -m pytest tests -q" --budget 90
+```
+
+When a repository's CI runner cannot carry its suite, `pr-gate` runs the same commands on this machine and
+prints a verdict. It merges and pushes nothing. It tests the pull request's own head commit, fetched into a
+detached worktree of its own that must be clean, and it reads the head again at the end, so a head that
+moved while it ran is said (exit 8). A pull request from a fork is refused before anything is fetched
+(exit 6), because the gate runs that pull request's code on this machine and anyone can open one on a
+public repository. Read the change first, then pass `--allow-fork`.
+
+`--python-from` reads the Python version the workflow names (PYTHON_VERSION, else setup-python's
+python-version), and `python3` in the commands' own environment must say that version, or nothing runs.
+`--lock` is a command that takes a lock, prints `held` and keeps it until its standard input closes, so the
+lock is let go even when pr-gate is killed. Every command holds the write end of that input too, so a command
+still running after pr-gate was killed keeps the lock until it ends, and a command that leaves a daemon behind
+holding that descriptor keeps the lock for as long as the daemon runs. The lock command gets the environment
+without the `--env-file` values. `--canary` is one short command timed against the fastest of
+its last ten green times, and a canary more than four times slower (at least a minute) stops the gate,
+because the machine cannot carry the suite now (exit 3). Each test command has `--budget` minutes, from the
+clock. `--env-file` values go only into the commands' environment and are never printed. The commands run at
+the normal disk I/O priority. The worktrees live under pr-gate's own folder and go at the end and on SIGTERM,
+SIGINT or SIGHUP, and a later run removes those of runs that were killed.
+
+Exit codes: 0 green, 1 the code is red, 2 no lock by its deadline, 3 the machine cannot carry it, 4 set-up
+failed, 5 the pull request is not open, 6 it comes from a fork, 8 its head moved while the gate ran.
+
 ## Steps of a self-hosted runner's jobs that ran far too long
 
 ```bash
