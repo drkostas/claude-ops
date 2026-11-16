@@ -230,9 +230,11 @@ DEP_SECTIONS = frozenset({"dependencies", "optionalDependencies", "peerDependenc
 
 
 def _is_exact_version(spec: str) -> bool:
-    """Whether a pin names one exact version ("16.4.5"), not a range ("^16.4.5", "~16.4", ">=1.0"),
-    a wildcard or anything else."""
-    return bool(re.fullmatch(r"v?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?", (spec or "").strip()))
+    """Whether a pin names one exact version, a full major.minor.patch with an optional prerelease or
+    build ("16.4.5", "16.4.5-rc.1"). A shorter number is an npm X-range, not exact ("16" means 16.x.x
+    and "16.4" means 16.4.x), and matters because _canon drops trailing zeros, so "16.4" would read as
+    equal to a landing of 16.4.0. A caret, tilde, comparator or wildcard is a range too."""
+    return bool(re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", (spec or "").strip()))
 
 
 def moves(diff: str) -> tuple[Move, ...]:
@@ -385,8 +387,11 @@ def _pinned_comoves(diff: str, named: set[str]) -> dict[str, list[tuple[str, str
     the diff adds. A co-move is expected only when one of its pins is an exact version equal to where
     it lands. Reads the dependencies, optionalDependencies and peerDependencies maps of a
     package-lock.json or npm-shrinkwrap.json entry. A format without such a map yields nothing, so a
-    co-move there carries no pin and stays refused. `section` is dropped at every hunk boundary, so a
-    pin is read only inside a map the diff actually shows opening, never allowed by a shared name."""
+    co-move there carries no pin and stays refused. `section` is dropped at every hunk boundary but
+    the enclosing entry `current` is carried across, so a pin counts under the entry whose header the
+    diff last showed, even when its map sits in a later hunk. That is sound because an npm entry's
+    pins change only when its version does, and the version line follows the entry's header, so the
+    header of any entry whose pins move is shown in the diff before them."""
     pins: dict[str, list[tuple[str, str]]] = {}
     file = kind = current = section = None
     for line in diff.splitlines():

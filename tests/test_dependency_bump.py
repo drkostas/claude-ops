@@ -509,3 +509,47 @@ def test_review_refuses_a_pinned_comove_that_adds_an_install_script():
         '+      "version": "16.4.5",\n+      "hasInstallScript": true,\n+      "resolved": "https://registry.npmjs.org/@next/env/-/env-16.4.5.tgz",')
     v = db.review(title, "", files, BOT, up_to="minor", diff=script)
     assert not v.ok and "@next/env in web/package-lock.json as running an install script" in v.reason, v.reason
+
+
+def test_review_refuses_an_x_range_pin():
+    # _canon drops trailing zeros, so a two-number X-range pin ("16.4" means 16.4.x) would otherwise
+    # read as equal to a landing of 16.4.0. An exact pin is a full major.minor.patch.
+    title = "chore(deps): bump next from 16.4.1 to 16.4.5 in /web"
+    files = ["web/package.json", "web/package-lock.json"]
+    assert not db._is_exact_version("16") and not db._is_exact_version("16.4")
+    assert db._is_exact_version("16.4.5") and db._is_exact_version("16.4.5-rc.1")
+    # @next/env moves to 16.4.0 and next pins it with the X-range "16.4"
+    xr = NEXT_PINS.replace(
+        '-      "version": "16.4.1",\n-      "resolved": "https://registry.npmjs.org/@next/env/-/env-16.4.1.tgz",',
+        '-      "version": "16.3.0",\n-      "resolved": "https://registry.npmjs.org/@next/env/-/env-16.4.1.tgz",')
+    xr = xr.replace(
+        '+      "version": "16.4.5",\n+      "resolved": "https://registry.npmjs.org/@next/env/-/env-16.4.5.tgz",',
+        '+      "version": "16.4.0",\n+      "resolved": "https://registry.npmjs.org/@next/env/-/env-16.4.5.tgz",')
+    xr = xr.replace('+        "@next/env": "16.4.5",', '+        "@next/env": "16.4",')
+    assert '"version": "16.3.0"' in xr and '"version": "16.4.0"' in xr and '"@next/env": "16.4",' in xr
+    v = db.review(title, "", files, BOT, up_to="minor", diff=xr)
+    assert not v.ok and "@next/env to 16.4.0" in v.reason and "16.4" in v.reason, v.reason
+
+
+def test_review_does_not_count_a_pin_from_an_unnamed_entry():
+    # The enclosing entry is carried across hunk boundaries, so a pin counts only under the entry whose
+    # header the diff last showed. A second entry (header shown, not named) that pins an @next/* package
+    # does not pin it for next, so that co-move stays refused.
+    title = "chore(deps): bump next from 16.4.1 to 16.4.5 in /web"
+    files = ["web/package.json", "web/package-lock.json"]
+    second = (
+        "@@ -9990,8 +9990,8 @@\n"
+        '     "node_modules/some-wrapper": {\n'
+        '       "version": "2.0.0",\n'
+        '       "dependencies": {\n'
+        '-        "@next/swc-win32-x64-msvc": "16.4.1",\n'
+        '+        "@next/swc-win32-x64-msvc": "16.4.5"\n'
+        "       }\n"
+        "     },\n")
+    base = NEXT_PINS.replace('-        "@next/swc-win32-x64-msvc": "16.4.1",\n', "")
+    base = base.replace('+        "@next/swc-win32-x64-msvc": "16.4.5",\n', "")
+    fixture = base.replace("diff --git a/web/package.json", second + "diff --git a/web/package.json")
+    assert "some-wrapper" in fixture
+    assert '+        "@next/swc-win32-x64-msvc": "16.4.5",\n' not in fixture, "next no longer pins this swc"
+    v = db.review(title, "", files, BOT, up_to="minor", diff=fixture)
+    assert not v.ok and "@next/swc-win32-x64-msvc" in v.reason and "do not name" in v.reason, v.reason
