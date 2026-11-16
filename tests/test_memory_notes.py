@@ -7,6 +7,7 @@ from claude_ops import memory_notes as mn
 
 NOW = 1_800_000_000.0
 DAY = 86_400
+HOUR = 3_600
 
 
 def note(folder, name, size, age_s, text=None):
@@ -65,7 +66,7 @@ def test_a_rolled_note_is_left_out(tmp_path):
     assert [(n.path.name, n.label) for n in got] == [("loose-notes.md", None)]
 
 
-def rolled(tmp_path, old_age_s):
+def rolled(tmp_path, old_age_s, born_ago=120):
     mem = tmp_path / "-p" / "memory"
     note(mem, "build-state-2026-11-01-night.md", 150_000, old_age_s)
     note(mem, "build-state-2026-11-15.md", 4_000, 30)
@@ -74,13 +75,13 @@ def rolled(tmp_path, old_age_s):
     note(mem, "notes-index.md", 0, 30,
          "- [builder state](build-state-2026-11-15.md) read it\n"
          "- [stats state](stats-state-2026-11-15.md) older history in calendar-work-2026-11-03.md\n")
-    born = {"build-state-2026-11-15.md": NOW - 120, "stats-state-2026-11-15.md": NOW - 120}
+    born = {"build-state-2026-11-15.md": NOW - born_ago, "stats-state-2026-11-15.md": NOW - born_ago}
     return lambda p: born.get(p.name)
 
 
 def test_a_rolled_note_still_written_is_reported_with_its_successors_label(tmp_path):
-    # written 10 s ago, after its successor was created 120 s ago: a session still appends to it
-    birth = rolled(tmp_path, 10)
+    # written 10 s ago, an hour after its successor was created: a session still appends to it
+    birth = rolled(tmp_path, 10, born_ago=HOUR + 10)
     got = mn.large_notes(tmp_path, index_name="notes-index.md", now=NOW, birth=birth)
     assert sorted((n.path.name, n.label) for n in got) == [
         ("build-state-2026-11-01-night.md", "builder state"),
@@ -90,6 +91,18 @@ def test_a_rolled_note_still_written_is_reported_with_its_successors_label(tmp_p
 def test_a_rolled_note_written_before_its_successor_is_left_out(tmp_path):
     birth = rolled(tmp_path, 600)
     assert mn.large_notes(tmp_path, index_name="notes-index.md", now=NOW, birth=birth) == []
+
+
+def test_a_rolled_note_written_just_after_its_successor_is_left_out(tmp_path):
+    # the roll's own closing line: the old note gets a pointer to the new one 16 s after the new one is made
+    birth = rolled(tmp_path, 104, born_ago=120)
+    assert mn.large_notes(tmp_path, index_name="notes-index.md", now=NOW, birth=birth) == []
+
+
+def test_a_rolled_note_written_past_the_grace_is_still_appended_to(tmp_path):
+    birth = rolled(tmp_path, 10, born_ago=mn.ROLL_GRACE_S + 20)
+    got = mn.large_notes(tmp_path, index_name="notes-index.md", now=NOW, birth=birth)
+    assert sorted(n.path.name for n in got) == ["build-state-2026-11-01-night.md", "calendar-work-2026-11-03.md"]
 
 
 def test_without_a_creation_time_a_rolled_note_is_left_out(tmp_path):
@@ -139,7 +152,7 @@ def test_a_missing_projects_folder_gives_nothing(tmp_path):
     assert mn.large_notes(tmp_path / "absent", now=NOW) == []
 
 
-def history_linked(tmp_path, old_age_s):
+def history_linked(tmp_path, old_age_s, born_ago=120):
     """A note rolled into a new one whose index line still links it, after the new note's link."""
     mem = tmp_path / "-p" / "memory"
     note(mem, "build-state-2026-11-15c.md", 61_000, old_age_s)
@@ -147,7 +160,7 @@ def history_linked(tmp_path, old_age_s):
     note(mem, "notes-index.md", 0, 30,
          "- [builder state, 16 Nov](build-state-2026-11-16.md) read it first, "
          "older history in [part c](build-state-2026-11-15c.md) and part b\n")
-    return lambda p: {"build-state-2026-11-16.md": NOW - 120}.get(p.name)
+    return lambda p: {"build-state-2026-11-16.md": NOW - born_ago}.get(p.name)
 
 
 def test_a_note_linked_after_a_lines_first_link_is_rolled(tmp_path):
@@ -156,7 +169,7 @@ def test_a_note_linked_after_a_lines_first_link_is_rolled(tmp_path):
 
 
 def test_a_history_linked_note_still_written_takes_the_first_links_label(tmp_path):
-    birth = history_linked(tmp_path, 10)
+    birth = history_linked(tmp_path, 10, born_ago=HOUR + 10)
     got = mn.large_notes(tmp_path, index_name="notes-index.md", now=NOW, birth=birth)
     assert [(n.path.name, n.label) for n in got] == [("build-state-2026-11-15c.md", "builder state, 16 Nov")]
 
@@ -199,7 +212,7 @@ def test_memory_folders_lists_each_real_folder_once(tmp_path):
     assert mn.memory_folders(tmp_path) == [tmp_path / "-a" / "memory", tmp_path / "-b" / "memory"]
 
 
-def only_a_later_index(tmp_path, old_age_s):
+def only_a_later_index(tmp_path, old_age_s, born_ago=120):
     """A folder whose only index is MEMORY.md, which links the new note first and the old one later on its line."""
     mem = tmp_path / "-p" / "memory"
     note(mem, "project_in_flight_14nov.md", 73_000, old_age_s)
@@ -207,7 +220,7 @@ def only_a_later_index(tmp_path, old_age_s):
     note(mem, "MEMORY.md", 0, 30,
          "- [project_in_flight_16nov.md](project_in_flight_16nov.md), the 14 to 16 Nov history in "
          "[project_in_flight_14nov.md](project_in_flight_14nov.md)\n")
-    return lambda p: {"project_in_flight_16nov.md": NOW - 120}.get(p.name)
+    return lambda p: {"project_in_flight_16nov.md": NOW - born_ago}.get(p.name)
 
 
 def test_a_folder_whose_only_index_is_a_later_name_reads_that_index(tmp_path):
@@ -220,7 +233,7 @@ def test_a_folder_whose_only_index_is_a_later_name_reads_that_index(tmp_path):
 
 
 def test_a_rolled_note_still_written_takes_its_label_from_the_later_index_name(tmp_path):
-    birth = only_a_later_index(tmp_path, 10)
+    birth = only_a_later_index(tmp_path, 10, born_ago=HOUR + 10)
     got = mn.large_notes(tmp_path, index_name=["chat-state-notes.md", "MEMORY.md"], now=NOW, birth=birth)
     assert [(n.path.name, n.label) for n in got] == [("project_in_flight_14nov.md", "project_in_flight_16nov.md")]
 

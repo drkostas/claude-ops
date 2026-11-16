@@ -16,9 +16,11 @@ took its place (the note linked on the line that names it). So was a note the in
 another link on the same line: a line's first link is the current note, and later links on it point
 at its history. So was an unlinked note whose name
 without its date (`build-state` for `build-state-2026-11-01.md`) is a linked note's. A rolled note is
-left out only while it has not been written since its successor was created. One written after that
-is a session still appending to its old note, and it is returned with its successor's label. Where
-the file system gives no creation time (Linux), a rolled note is always left out.
+left out while it has not been written since its successor was created, or was last written within
+ROLL_GRACE_S of that, which is the closing line a roll adds to the old note to point at the new one.
+One written later than that is a session still appending to its old note, and it is returned with its
+successor's label. Where the file system gives no creation time (Linux), a rolled note is always left
+out.
 """
 from __future__ import annotations
 
@@ -34,6 +36,10 @@ PROJECTS = Path.home() / ".claude/projects"
 MIN_BYTES = 60_000
 #: a note written within this many seconds is still being written
 WITHIN_S = 86_400
+#: a rolled note written this soon after its successor was created is still rolled. A roll makes the new
+#: note and then adds a line to the old one that points at it, seconds later. A session that goes on
+#: appending to the old note writes it hours later
+ROLL_GRACE_S = 600
 
 LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+\.md)\)")
 DATED = re.compile(r"-\d{4}-\d{2}-\d{2}.*$")
@@ -146,14 +152,16 @@ def _through_link(folder: Path) -> bool:
 
 def large_notes(projects: Path = PROJECTS, *, min_bytes: int = MIN_BYTES, within_s: float = WITHIN_S,
                 index_name: str | Sequence[str] | None = None, now: float | None = None,
-                birth: Callable[[Path], float | None] = birth_time) -> list[LargeNote]:
+                birth: Callable[[Path], float | None] = birth_time,
+                roll_grace_s: float = ROLL_GRACE_S) -> list[LargeNote]:
     """Every memory note over `min_bytes` written within `within_s` seconds, largest first.
 
     Only sizes and modification times are read, the creation time of a rolled note's successor, and
     the index note when `index_name` names one. `index_name` is a name or a sequence of names, and each
     folder reads the first of them it holds. A note with one of those names is an index and is never
     taken for a rolled note. A folder that cannot be listed is skipped, and a note that disappears
-    while it is read too. `birth` gives a file's creation time (None when unknown)."""
+    while it is read too. `birth` gives a file's creation time (None when unknown). A rolled note last
+    written no later than `roll_grace_s` after its successor was created is still left out."""
     now = time.time() if now is None else now
     wanted = index_names(index_name)
     found: list[LargeNote] = []
@@ -180,8 +188,8 @@ def large_notes(projects: Path = PROJECTS, *, min_bytes: int = MIN_BYTES, within
             nxt = successor(entry.name, index) if wanted and entry.name not in wanted else None
             if nxt is not None:
                 born = birth(folder / nxt)
-                if born is None or st.st_mtime < born:
-                    continue                    # rolled, and not written since
+                if born is None or st.st_mtime <= born + roll_grace_s:
+                    continue                    # rolled, and not written since but for the roll's own line
                 label = index.links.get(nxt)    # still written after the roll: its successor's
             found.append(LargeNote(folder, Path(entry.path), st.st_size, st.st_mtime, label))
     return sorted(found, key=lambda n: -n.size)
