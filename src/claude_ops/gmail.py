@@ -91,6 +91,30 @@ class _Stripper(HTMLParser):
         return "".join(self._text)
 
 
+class _Links(HTMLParser):
+    """Collect each link of an HTML document as its words and its address, in document order. A link
+    with no address, or one that only points inside the page, is left out."""
+
+    def __init__(self):
+        super().__init__()
+        self._open: "dict | None" = None
+        self.found: list[dict] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            href = (dict(attrs).get("href") or "").strip()
+            self._open = {"text": [], "href": href} if href and not href.startswith("#") else None
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._open is not None:
+            self.found.append({"text": " ".join("".join(self._open["text"]).split()), "href": self._open["href"]})
+            self._open = None
+
+    def handle_data(self, data):
+        if self._open is not None:
+            self._open["text"].append(data)
+
+
 def _strip_tags(html: str) -> str:
     """An HTML part reduced to its text, runs of whitespace collapsed to single spaces."""
     stripper = _Stripper()
@@ -146,3 +170,17 @@ class Mailbox(GoogleSession):
             return plain
         html = _first_part(payload, "text/html")
         return _strip_tags(html) if html else ""
+
+    def links(self, message_id: str) -> list[dict]:
+        """The links of the message's HTML part, in order: each `{"text", "href"}`, the words a reader
+        sees and the address they open. A text-only message has none. A sign-in or confirmation mail
+        often puts its one useful address behind a button, which `body` drops with the tags. An address
+        such as a sign-in link is a credential while it lasts, so the caller decides where it goes and
+        keeps it out of its logs."""
+        out = self._get("messages/" + urllib.parse.quote(message_id, safe=""), [("format", "full")])
+        html = _first_part(out.get("payload") or {}, "text/html")
+        if not html:
+            return []
+        parser = _Links()
+        parser.feed(html)
+        return parser.found
