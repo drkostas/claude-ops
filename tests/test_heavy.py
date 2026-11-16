@@ -1244,6 +1244,44 @@ def test_hold_max_wait_gives_up_on_a_holder_with_another_code(tmp_path):
             p.wait()
 
 
+def test_a_give_up_the_caller_runs_after_says_so_and_not_gave_up():
+    """A caller that runs the job anyway after a give-up (`--runs-without gate|any`) is told as one that stopped
+    waiting and runs without the slot, so the log does not read as a failed job. `gate` covers only a give-up on
+    the machine's gate, `any` covers a holder too, and without it the line is the old one."""
+    from claude_ops import heavy as h
+    on_gate = h.GaveUp(True, ["disk"], 60.4, "disk at 9.9% free (needs 10%)")
+    on_holder = h.GaveUp(False, [], 61, "the slot is held by a build")
+    assert h.gave_up_line("CI tests", on_gate) == (
+        "CI tests gave up after 60 s, held by the machine's gate (disk): disk at 9.9% free (needs 10%)")
+    for runs in ("gate", "any"):
+        assert h.gave_up_line("CI tests", on_gate, runs) == (
+            "CI tests stopped waiting after 60 s and runs without the slot, held by the machine's gate (disk): "
+            "disk at 9.9% free (needs 10%)"), runs
+    assert h.gave_up_line("CI tests", on_holder, "gate") == (
+        "CI tests gave up after 61 s, held by another job holding the slot or the turn: the slot is held by a build")
+    assert h.gave_up_line("CI tests", on_holder, "any") == (
+        "CI tests stopped waiting after 61 s and runs without the slot, held by another job holding the slot or "
+        "the turn: the slot is held by a build")
+
+
+def test_hold_runs_without_gate_tells_a_gate_give_up_as_running_without_the_slot(tmp_path):
+    """The flag reaches the line from the command, the exit code stays 3, and a word it does not know is usage."""
+    state = tmp_path / "heavy"
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        r = _hold(state, "short of memory", sleeper.pid, "--max-wait", "1", "--runs-without", "gate",
+                  HEAVY_FAKE_MACHINE="3 2 50")
+        assert r.returncode == 3, (r.returncode, r.stdout, r.stderr)
+        line = [ln for ln in r.stderr.splitlines() if "short of memory stopped waiting after" in ln]
+        assert line and "and runs without the slot, held by the machine's gate (memory)" in line[-1], r.stderr
+        assert "gave up after" not in r.stderr, r.stderr
+        for bad in (["--runs-without", "sometimes"], ["--runs-with", "gate"]):
+            assert _hold(state, "x", sleeper.pid, "--max-wait", "1", *bad).returncode == 2, bad
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
 def test_hold_max_wait_takes_the_slot_when_there_is_room_and_bad_values_are_usage(tmp_path):
     state = tmp_path / "heavy"
     sleeper = subprocess.Popen(["sleep", "60"])

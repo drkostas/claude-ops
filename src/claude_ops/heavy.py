@@ -8,6 +8,7 @@ memory or disk is short.
     claude-ops heavy hold <chat> <what> --pid <pid>   take the slot for a process that already runs
     claude-ops heavy release --pid <pid>              give a held slot back
     claude-ops heavy hold <chat> <what> --pid <pid> --max-wait <s>   the same, but give up after that long
+    claude-ops heavy hold ... --max-wait <s> --runs-without gate|any   the same, for a caller that then runs anyway
     claude-ops heavy status                           the machine, who holds the slot, who goes next
     claude-ops heavy status --json                    the same as data, with each waiter's reason kinds
 
@@ -105,6 +106,10 @@ exits 3 when the machine's gate held it (memory, pressure, swap or disk) or 4 wh
 slot or the turn belonged to other jobs. 0 is the slot taken, 1 the holder's process ended while it waited,
 and 2 a usage error. A caller that cannot wait for ever (a CI runner whose job has a time limit, say) can then
 choose by the code, and run without the slot when the machine, not another job, is what holds it.
+Such a caller says so with `--runs-without gate` (it runs without the slot when the machine's gate held it) or
+`--runs-without any` (it runs without the slot whatever held it). The line then says "stopped waiting after N s
+and runs without the slot", so a reader of the log does not take the job for one that failed. A give-up the
+caller does not run after still says "gave up after N s", and the exit codes are the same either way.
 
 STATUS AS DATA. `status --json` prints what `status` prints as one JSON object. `machine` is the reading the
 gate used (free_gb, swap_gb, disk_free_pct, disk_free_gb, pressure), `short` the kinds of reason and words
@@ -782,6 +787,8 @@ def wait_key(held: list[tuple[str, str]], why: str) -> tuple:
 #: `hold --max-wait` gave up on the machine (the gate: memory, pressure, swap or disk), and on a holder or the turn
 EXIT_GAVE_UP_GATE = 3
 EXIT_GAVE_UP_HOLDER = 4
+#: what `hold --runs-without` takes: the caller runs without the slot after a give-up on the gate, or after any
+RUNS_WITHOUT = ("gate", "any")
 
 
 class GaveUp(Exception):
@@ -792,6 +799,17 @@ class GaveUp(Exception):
     def __init__(self, gate: bool, kinds: list[str], waited: float, why: str):
         super().__init__(why)
         self.gate, self.kinds, self.waited, self.why = gate, kinds, waited, why
+
+
+def gave_up_line(what: str, g: GaveUp, runs_without: str | None = None) -> str:
+    """Pure but for the memory reading a gate on memory adds. The line a `hold --max-wait` that gave up says.
+    With `runs_without` ("gate" or "any") the caller runs the job without the slot after such a give-up, so the
+    line says it stopped waiting and runs without the slot, and does not read as a job that failed."""
+    who = f"the machine's gate ({', '.join(g.kinds)})" if g.gate else "another job holding the slot or the turn"
+    runs = runs_without == "any" or (runs_without == "gate" and g.gate)
+    how = (f"stopped waiting after {g.waited:.0f} s and runs without the slot" if runs
+           else f"gave up after {g.waited:.0f} s")
+    return f"{what} {how}, held by {who}: {g.why}" + (cause_if_memory(g.kinds) if g.gate else "")
 
 
 def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
@@ -1486,7 +1504,7 @@ def status(as_json: bool = False) -> int:
 
 
 USAGE = ("usage: claude-ops heavy <chat> <what> [--max-hold <minutes>] [--notify] [--need-gb <GB>] -- <command...> |"
-         " claude-ops heavy hold <chat> <what> --pid <pid> [--max-wait <seconds>] |"
+         " claude-ops heavy hold <chat> <what> --pid <pid> [--max-wait <seconds> [--runs-without gate|any]] |"
          " claude-ops heavy release --pid <pid> | claude-ops heavy status [--json]")
 
 
@@ -1545,21 +1563,21 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(s, _quit)
     if argv[:1] == ["status"] and argv[1:] in ([], ["--json"]):
         return status(as_json=bool(argv[1:]))
-    if argv[:1] == ["hold"] and len(argv) in (5, 7) and argv[3] == "--pid" and (len(argv) == 5 or argv[5] == "--max-wait"):
+    if (argv[:1] == ["hold"] and len(argv) in (5, 7, 9) and argv[3] == "--pid"
+            and (len(argv) == 5 or argv[5] == "--max-wait") and (len(argv) < 9 or argv[7] == "--runs-without")):
+        runs_without = argv[8] if len(argv) == 9 else None
         try:
             pid = int(argv[4])
-            wait = float(argv[6]) if len(argv) == 7 else None
+            wait = float(argv[6]) if len(argv) >= 7 else None
         except ValueError:
             wait = -1.0
-        if wait is not None and wait < 0:
+        if (wait is not None and wait < 0) or (runs_without is not None and runs_without not in RUNS_WITHOUT):
             print(USAGE, file=sys.stderr)
             return 2
         try:
             return 0 if wait_turn(argv[1], argv[2], pid, *declared_need(), max_wait=wait) else 1
         except GaveUp as g:
-            who = (f"the machine's gate ({', '.join(g.kinds)})" if g.gate else "another job holding the slot or the turn")
-            say(f"{argv[2]} gave up after {g.waited:.0f} s, held by {who}: {g.why}"
-                + (cause_if_memory(g.kinds) if g.gate else ""))
+            say(gave_up_line(argv[2], g, runs_without))
             return EXIT_GAVE_UP_GATE if g.gate else EXIT_GAVE_UP_HOLDER
     if argv[:1] == ["release"] and len(argv) == 3 and argv[1] == "--pid":
         release(int(argv[2]))
