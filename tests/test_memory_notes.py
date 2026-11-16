@@ -137,3 +137,63 @@ def test_stem_drops_the_date_and_what_follows():
 
 def test_a_missing_projects_folder_gives_nothing(tmp_path):
     assert mn.large_notes(tmp_path / "absent", now=NOW) == []
+
+
+def history_linked(tmp_path, old_age_s):
+    """A note rolled into a new one whose index line still links it, after the new note's link."""
+    mem = tmp_path / "-p" / "memory"
+    note(mem, "build-state-2026-11-15c.md", 61_000, old_age_s)
+    note(mem, "build-state-2026-11-16.md", 4_000, 30)
+    note(mem, "notes-index.md", 0, 30,
+         "- [builder state, 16 Nov](build-state-2026-11-16.md) read it first, "
+         "older history in [part c](build-state-2026-11-15c.md) and part b\n")
+    return lambda p: {"build-state-2026-11-16.md": NOW - 120}.get(p.name)
+
+
+def test_a_note_linked_after_a_lines_first_link_is_rolled(tmp_path):
+    birth = history_linked(tmp_path, 600)
+    assert mn.large_notes(tmp_path, index_name="notes-index.md", now=NOW, birth=birth) == []
+
+
+def test_a_history_linked_note_still_written_takes_the_first_links_label(tmp_path):
+    birth = history_linked(tmp_path, 10)
+    got = mn.large_notes(tmp_path, index_name="notes-index.md", now=NOW, birth=birth)
+    assert [(n.path.name, n.label) for n in got] == [("build-state-2026-11-15c.md", "builder state, 16 Nov")]
+
+
+def test_the_first_link_of_a_line_is_current_and_later_ones_are_history():
+    index = mn.Index({"new.md": "state", "old.md": "part c"},
+                     [("- [state](new.md), older in [part c](old.md)", ["new.md", "old.md"])])
+    assert mn.successor("new.md", index) is None
+    assert mn.successor("old.md", index) == "new.md"
+
+
+def test_a_folder_reached_through_links_reports_a_note_once(tmp_path):
+    projects = tmp_path / "projects"
+    mem = projects / "-home-a-proj" / "memory"
+    note(mem, "build-state-2026-11-15.md", 70_000, 60)
+    (projects / "-home-a-proj-worktree").mkdir()
+    (projects / "-home-a-proj-worktree" / "memory").symlink_to(mem)
+    (projects / "-home-a-proj-copy").symlink_to(projects / "-home-a-proj")
+    got = mn.large_notes(projects, now=NOW)
+    assert [(n.path.name, n.folder) for n in got] == [("build-state-2026-11-15.md", mem)]
+
+
+def test_a_shared_folder_outside_the_projects_is_reported_once_under_its_first_link(tmp_path):
+    shared = tmp_path / "shared-memory"
+    note(shared, "build-state-2026-11-15.md", 70_000, 60)
+    projects = tmp_path / "projects"
+    for name in ("-b", "-a"):
+        (projects / name).mkdir(parents=True)
+        (projects / name / "memory").symlink_to(shared)
+    got = mn.large_notes(projects, now=NOW)
+    assert [(n.path.name, n.folder) for n in got] == [("build-state-2026-11-15.md", projects / "-a" / "memory")]
+
+
+def test_memory_folders_lists_each_real_folder_once(tmp_path):
+    (tmp_path / "-a" / "memory").mkdir(parents=True)
+    (tmp_path / "-b" / "memory").mkdir(parents=True)
+    (tmp_path / "-c").mkdir()
+    (tmp_path / "-c" / "memory").symlink_to(tmp_path / "-a" / "memory")
+    (tmp_path / "-d").mkdir()                     # a project with no memory folder
+    assert mn.memory_folders(tmp_path) == [tmp_path / "-a" / "memory", tmp_path / "-b" / "memory"]
