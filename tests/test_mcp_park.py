@@ -110,3 +110,54 @@ def test_cli_lists_parks_and_keeps(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out) == {"configured": ["a"], "parked": ["b", "c"]}
     assert mcp_park.main(base + ["unpark", "b"]) == 0
     assert sorted(mcp_park.configured(cfg)) == ["a", "b"]
+
+
+def test_set_command_points_a_parked_server_at_another_command_and_keeps_its_keys(tmp_path):
+    cfg, prk = _files(tmp_path, {"a": _def("a")}, parked={"b": _def("b"), "c": _def("c")})
+    before = cfg.read_bytes()
+    assert mcp_park.set_command("b", "/opt/b/bin/b", ["--tools", "x"], config_path=cfg, parked_path=prk) == ["parked"]
+    assert mcp_park.parked(prk) == {"b": {**_def("b"), "command": "/opt/b/bin/b", "args": ["--tools", "x"]},
+                                    "c": _def("c")}
+    assert stat.S_IMODE(os.stat(prk).st_mode) == 0o600   # definitions hold keys
+    assert cfg.read_bytes() == before                    # the configuration is not touched
+    stamp = prk.stat().st_mtime_ns
+    assert mcp_park.set_command("b", "/opt/b/bin/b", ["--tools", "x"], config_path=cfg, parked_path=prk) == []
+    assert prk.stat().st_mtime_ns == stamp               # the same command again writes nothing
+
+
+def test_set_command_changes_a_configured_server_in_place_with_a_backup(tmp_path):
+    cfg, prk = _files(tmp_path, {"a": _def("a"), "b": _def("b")}, parked={"a": _def("a")})
+    bak = tmp_path / "claude.json.bak"
+    assert mcp_park.set_command("a", "a-server", [], config_path=cfg, parked_path=prk, backup=bak) == [
+        "configured", "parked"]                          # both files held a definition, so both change
+    data = json.loads(cfg.read_text())
+    assert data["theme"] == "dark" and data["mcpServers"]["b"] == _def("b")
+    assert data["mcpServers"]["a"] == {**_def("a"), "command": "a-server", "args": []}
+    assert mcp_park.parked(prk)["a"] == {**_def("a"), "command": "a-server", "args": []}
+    assert json.loads(bak.read_text())["mcpServers"]["a"] == _def("a")
+
+
+def test_set_command_refuses_an_unknown_server_and_an_empty_command(tmp_path):
+    cfg, prk = _files(tmp_path, {"a": _def("a")})
+    with pytest.raises(KeyError):
+        mcp_park.set_command("nope", "x", config_path=cfg, parked_path=prk)
+    with pytest.raises(ValueError):
+        mcp_park.set_command("a", "", config_path=cfg, parked_path=prk)
+    assert not prk.exists() and mcp_park.configured(cfg) == {"a": _def("a")}
+
+
+def test_cli_command_takes_the_new_command_after_a_double_dash(tmp_path, capsys):
+    cfg, prk = _files(tmp_path, {"a": _def("a")}, parked={"b": _def("b")})
+    base = ["--config", str(cfg), "--parked", str(prk), "--no-backup"]
+    assert mcp_park.main(base + ["command", "b", "--", "/opt/b/bin/b", "--tools", "x", "y"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"server": "b", "command": ["/opt/b/bin/b", "--tools", "x", "y"], "changed": ["parked"],
+                   "backup": None}
+    assert mcp_park.parked(prk)["b"] == {**_def("b"), "command": "/opt/b/bin/b", "args": ["--tools", "x", "y"]}
+    assert mcp_park.main(base + ["command", "nope", "--", "x"]) == 1
+    assert "no server named 'nope'" in capsys.readouterr().err
+    for wrong in (["command", "b"], ["command", "b", "--"], ["command", "--", "x"], ["park", "a", "--", "x"]):
+        with pytest.raises(SystemExit) as e:
+            mcp_park.main(base + wrong)
+        assert e.value.code == 2, wrong
+    assert mcp_park.parked(prk)["b"]["args"] == ["--tools", "x", "y"] and list(mcp_park.configured(cfg)) == ["a"]

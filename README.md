@@ -322,6 +322,7 @@ is left alone, since its client may still be starting.
 claude-ops mcp-park list                       # configured and parked servers
 claude-ops mcp-park keep github context7 tavily   # park every configured server but these
 claude-ops mcp-park unpark playwright          # put one back for every chat
+claude-ops mcp-park command docs -- /opt/tools/bin/docs-server --stdio   # same keys, another command
 ```
 
 Claude Code starts every MCP server `~/.claude.json` names, in every session, so with many sessions
@@ -330,6 +331,9 @@ command, arguments and keys) to `~/.claude/mcp-parked.json`, where no session st
 A session that needs a parked server can be given it alone with `--mcp-config <file>`, built from
 `mcp_park.definitions()`. Passed without `--strict-mcp-config` (`chat.claude_command(...,
 mcp_strict=False)`), the file joins the configured servers, and plugin servers and connectors still load.
+`mcp-park command` changes only a server's command and arguments, wherever its definition is kept,
+so a server started through a launcher that resolves its package at every start (uvx, npx) can be
+moved to an installed copy with its keys left as they are.
 
 Running sessions rewrite `~/.claude.json` every minute or two, so it is changed with
 `config.update_json`. The file is read whole, rebuilt from what was read, written beside it and
