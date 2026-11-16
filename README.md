@@ -168,7 +168,9 @@ python-version), and `python3` in the commands' own environment must say that ve
 `--lock` is a command that takes a lock, prints `held` and keeps it until its standard input closes, so the
 lock is let go even when pr-gate is killed. Every command holds the write end of that input too, so a command
 still running after pr-gate was killed keeps the lock until it ends, and a command that leaves a daemon behind
-holding that descriptor keeps the lock for as long as the daemon runs. The lock command gets the environment
+holding that descriptor keeps the lock for as long as the daemon runs. That holds only for a killed pr-gate.
+When pr-gate ends by itself it closes its end, gives the lock command 30 seconds to end and then sends it SIGTERM,
+so the lock is let go then, whatever still holds the descriptor. The lock command gets the environment
 without the `--env-file` values. `--canary` is one short command timed against the fastest of
 its last ten green times, and a canary more than four times slower (at least a minute) stops the gate,
 because the machine cannot carry the suite now (exit 3). Each test command has `--budget` minutes, from the
