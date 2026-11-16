@@ -253,6 +253,17 @@ def test_mutate_refuses_a_baseline_that_fails_and_a_run_without_copy(tmp_path):
     assert mutate.main([str(root), "--run", run, "--caught", "0", "--function", "lib.py:grade"]) == 2
 
 
+def test_mutate_refuses_a_run_that_needs_a_shell(tmp_path, capsys):
+    root = project(tmp_path, 'lib.grade(50) == "pass" and lib.grade(49) == "fail"')
+    check = f"{sys.executable} {{copy}}/check.py {{copy}}"
+    for run in (f"cd {{copy}} && {check}", f"{check} > out.txt", f"{check}; echo done", f"{check} 2>&1"):
+        assert mutate.main([str(root), "--run", run, "--function", "lib.py:grade"]) == 2, run
+        assert "bash -c" in capsys.readouterr().err
+    assert mutate.needs_shell(["python3", "-m", "pytest", "-k", "a and b"]) is None
+    assert mutate.main([str(root), "--run", f"bash -c 'cd {{copy}} && {check}'",
+                        "--function", "lib.py:grade"]) == 0, "the same command through bash runs the test"
+
+
 PLAN = """# Plan
 
 - [ ] **Step 1: Write the module** (Write `{dir}/m.py`)

@@ -235,7 +235,8 @@ claude-ops pr-changes --repo owner/name --text "fix spawn_helpers"     # which o
   from a JSON file the project keeps. It reads every commit, as a pull request scanner does.
 - `mutate` changes a function on purpose (negated tests, moved boundaries, removed calls, None
   returns) in a copy of the worktree, runs the command there, and lists every change the tests let
-  through.
+  through. `--run` is run with no shell, so a command that needs one (`cd`, `&&`, a redirect) is
+  refused, and goes in `bash -c "..."` instead.
 - `restack <base> <worktree>...` rebuilds a stack of branches on a new base, bottom first, moving every
   commit of each branch's own, settling add-only conflicts with `union`, and stops at the first one
   that needs a person. `--upstream COMMIT` moves only the commits after COMMIT for a bottom branch that
