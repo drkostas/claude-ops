@@ -8,6 +8,8 @@ from their size and modification time alone. The notes themselves are never open
 A folder may keep an index note whose lines link each session's current note, for example
 `- [build state, 15 Nov](build-state-2026-11-15.md)`. When `index_name` is given, a large note is
 returned with the link text of the line that links it, so a caller can tell whose it is.
+`index_name` may be one name or several. Each folder's index is the first of them that the folder
+holds, so folders that keep their index under different names are read in one pass.
 
 A note the index does not link but still names was rolled away: its history was kept and a new note
 took its place (the note linked on the line that names it). So was a note the index links only after
@@ -23,7 +25,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +75,23 @@ def read_index(path: Path) -> Index:
             links.setdefault(os.path.basename(target), label.strip())
         lines.append((line, [os.path.basename(t) for _l, t in found]))
     return Index(links, lines)
+
+
+def index_names(index_name: str | Sequence[str] | None) -> tuple[str, ...]:
+    """The index names asked for, in order: one name, several, or none. Empty names are dropped."""
+    if index_name is None:
+        return ()
+    found = (index_name,) if isinstance(index_name, str) else tuple(index_name)
+    return tuple(n for n in found if n)
+
+
+def folder_index(folder: Path, wanted: Sequence[str]) -> Index:
+    """The index of `folder`: the first of `wanted` that is a file there, read. None of them gives an
+    empty index."""
+    for name in wanted:
+        if (folder / name).is_file():
+            return read_index(folder / name)
+    return Index({}, [])
 
 
 def names(text: str, name: str) -> bool:
@@ -126,21 +145,24 @@ def _through_link(folder: Path) -> bool:
 
 
 def large_notes(projects: Path = PROJECTS, *, min_bytes: int = MIN_BYTES, within_s: float = WITHIN_S,
-                index_name: str | None = None, now: float | None = None,
+                index_name: str | Sequence[str] | None = None, now: float | None = None,
                 birth: Callable[[Path], float | None] = birth_time) -> list[LargeNote]:
     """Every memory note over `min_bytes` written within `within_s` seconds, largest first.
 
     Only sizes and modification times are read, the creation time of a rolled note's successor, and
-    the index note when `index_name` names one. A folder that cannot be listed is skipped, and a note
-    that disappears while it is read too. `birth` gives a file's creation time (None when unknown)."""
+    the index note when `index_name` names one. `index_name` is a name or a sequence of names, and each
+    folder reads the first of them it holds. A note with one of those names is an index and is never
+    taken for a rolled note. A folder that cannot be listed is skipped, and a note that disappears
+    while it is read too. `birth` gives a file's creation time (None when unknown)."""
     now = time.time() if now is None else now
+    wanted = index_names(index_name)
     found: list[LargeNote] = []
     try:
         folders = memory_folders(projects)
     except OSError:
         return []
     for folder in folders:
-        index = read_index(folder / index_name) if index_name else Index({}, [])
+        index = folder_index(folder, wanted)
         try:
             entries = list(os.scandir(folder))
         except OSError:
@@ -155,7 +177,7 @@ def large_notes(projects: Path = PROJECTS, *, min_bytes: int = MIN_BYTES, within
             if st.st_size <= min_bytes or now - st.st_mtime > within_s:
                 continue
             label = index.links.get(entry.name)
-            nxt = successor(entry.name, index) if index_name and entry.name != index_name else None
+            nxt = successor(entry.name, index) if wanted and entry.name not in wanted else None
             if nxt is not None:
                 born = birth(folder / nxt)
                 if born is None or st.st_mtime < born:
