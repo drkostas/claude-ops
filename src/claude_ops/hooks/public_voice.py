@@ -61,6 +61,10 @@ no change here. Matching ignores case. `message` is added to every refusal.
 allow list, one per line, for a CI check that reads the same lists from a secret. The configuration
 is `--config`, else `CLAUDE_OPS_PUBLIC_VOICE_CONFIG`, else `~/.config/claude-ops/public-voice.json`.
 On anything unexpected the call goes through: a broken hook must never stop work.
+
+A refusal for text read from a file the command names says the file was read as it is before the
+command runs, so a command that rewrites the file and sends it in the same call is refused again for
+the old text (`commandline.read_note`).
 """
 from __future__ import annotations
 
@@ -74,7 +78,7 @@ import time
 
 from .commandline import (
     GIT_TIMEOUT_S, PATH_WORD, READ_LIMIT, commit_plan, commit_repos, expand, git_invocations, hidden_commit, push_plans,
-    push_url, pushed, recorded, steps, unescape, writes,
+    push_url, pushed, read_note, recorded, steps, unescape, writes,
 )
 
 DEFAULT_CONFIG = "~/.config/claude-ops/public-voice.json"
@@ -260,14 +264,20 @@ def is_public(slug: str | None, cfg: Config) -> bool:
 
 def _read(path: str, written: dict | None = None) -> str:
     """A file's text: what an earlier command on the same line writes into it, else what it holds."""
+    return _read_from(path, written)[0]
+
+
+def _read_from(path: str, written: dict | None = None) -> tuple[str, str | None]:
+    """(a file's text, the path when that text is what the file holds now, else None). The text is
+    what an earlier command on the same line writes into it when the line shows it, else the file's."""
     path = os.path.normpath(path)
     if written and path in written:
-        return written[path]
+        return written[path], None
     try:
         with open(path, errors="replace") as f:
-            return f.read(READ_LIMIT)
+            return f.read(READ_LIMIT), path
     except OSError:
-        return ""
+        return "", None
 
 
 def _message_texts(args: list[str], here: str, stdin: str | None = None,
@@ -275,10 +285,16 @@ def _message_texts(args: list[str], here: str, stdin: str | None = None,
     """The message texts of a `git commit`, `tag`, `merge` or `notes`: -m (also bundled, -am, and
     attached, -mtext), --message, --message=, --trailer, and -F/--file, which is a file (written
     earlier on the line, or on disk) or, as `-`, the here-document given on stdin."""
-    def file_text(name: str) -> str:
+    return [text for text, _source in _message_sources(args, here, stdin, written)]
+
+
+def _message_sources(args: list[str], here: str, stdin: str | None = None,
+                     written: dict | None = None) -> list[tuple[str, str | None]]:
+    """`_message_texts` with each text's file: the path when the text is what a file holds now."""
+    def file_text(name: str) -> tuple[str, str | None]:
         if name == "-":
-            return stdin or ""
-        return _read(os.path.join(here, expand(name)), written)
+            return stdin or "", None
+        return _read_from(os.path.join(here, expand(name)), written)
 
     out = []
     i = 0
@@ -288,10 +304,10 @@ def _message_texts(args: list[str], here: str, stdin: str | None = None,
         if a == "--":
             break
         if a in ("-m", "--message", "--trailer") and nxt is not None:
-            out.append(nxt)
+            out.append((nxt, None))
             i += 1
         elif a.startswith(("--message=", "--trailer=")):
-            out.append(a.split("=", 1)[1])
+            out.append((a.split("=", 1)[1], None))
         elif a in GIT_FILE_FLAGS and nxt is not None:
             out.append(file_text(nxt))
             i += 1
@@ -306,7 +322,7 @@ def _message_texts(args: list[str], here: str, stdin: str | None = None,
                     else:
                         value = a[k + 1:]
                     if value is not None:
-                        out.append(value if letter == "m" else file_text(value))
+                        out.append((value, None) if letter == "m" else file_text(value))
                     break
                 if letter in "CctSu":           # an option whose value follows: no message here
                     break
@@ -324,6 +340,13 @@ def _gh_api(words: list[str], here: str, written: dict, heredoc: str | None = No
     """The repository a `gh api` call writes to (from its `repos/OWNER/REPO/...` path) and the text
     it sends, or (None, []) for a read or a call with no repository in its path. `--input -` sends
     the command's here-document."""
+    slug, sources = _gh_api_sources(words, here, written, heredoc)
+    return slug, [text for text, _source in sources]
+
+
+def _gh_api_sources(words: list[str], here: str, written: dict,
+                    heredoc: str | None = None) -> tuple[str | None, list[tuple[str, str | None]]]:
+    """`_gh_api` with each text's file: the path when the text is what a file holds now."""
     method, slug, texts = None, None, []
     i = 2
     while i < len(words):
@@ -335,11 +358,11 @@ def _gh_api(words: list[str], here: str, written: dict, heredoc: str | None = No
             method = a.split("=", 1)[1].upper()
         elif a in GH_API_FIELDS and nxt is not None:
             value = nxt.split("=", 1)[1] if "=" in nxt else ""
-            texts.append(_read(os.path.join(here, expand(value[1:])), written)
-                         if a in ("-F", "--field") and value.startswith("@") else value)
+            texts.append(_read_from(os.path.join(here, expand(value[1:])), written)
+                         if a in ("-F", "--field") and value.startswith("@") else (value, None))
             i += 1
         elif a == "--input" and nxt is not None:
-            texts.append((heredoc or "") if nxt == "-" else _read(os.path.join(here, expand(nxt)), written))
+            texts.append((heredoc or "", None) if nxt == "-" else _read_from(os.path.join(here, expand(nxt)), written))
             i += 1
         elif not a.startswith("-") and slug is None:
             m = re.match(r"/?repos/([^/\s]+)/([^/?#\s]+)", a)
@@ -389,22 +412,34 @@ def _gh_target(words: list[str], here: str, env: dict | None = None, repo: str |
     return here
 
 
+def _gh_file(name: str, cmd: dict, here: str, written: dict) -> tuple[str, str | None]:
+    """A gh text file's text and source, as `_read_from` gives them; `-` is the here-document."""
+    return (cmd["heredoc"] or "", None) if name == "-" else _read_from(os.path.join(here, expand(name)), written)
+
+
 def published(command: str, cwd: str) -> list[tuple[str, str, str]]:
     """(where, target, text) for every message a git or gh command on the line would publish.
     The target is a folder, or `slug:owner/repo` when the command names its repository."""
+    return [(where, target, text) for where, target, text, _source in published_from(command, cwd)]
+
+
+def published_from(command: str, cwd: str) -> list[tuple[str, str, str, str | None]]:
+    """`published` with each text's file: the path when the text is what a file the command names
+    holds now (a body, notes, message or input file), else None (the text is in the command, or is
+    what an earlier command on the line writes into the file)."""
     written = dict(writes(command, cwd, edits=False))     # a whole file, not an edit's new text
     found = []
     for inv in git_invocations(command, cwd):
         if inv["sub"] in MESSAGE_SUBCOMMANDS:
-            for text in _message_texts(inv["args"], inv["dir"], inv.get("stdin"), written):
-                found.append((f"the {inv['sub']} message", inv["dir"], _with_cat(text, inv["dir"], written)))
+            for text, source in _message_sources(inv["args"], inv["dir"], inv.get("stdin"), written):
+                found.append((f"the {inv['sub']} message", inv["dir"], _with_cat(text, inv["dir"], written), source))
     for cmd, here in steps(command, cwd):
         words, repo = _gh_words(cmd["words"])
         if os.path.basename(words[0]) != "gh" or len(words) < 2:
             continue
         if words[1] == "api":
-            slug, texts = _gh_api(words, here, written, cmd.get("heredoc"))
-            found += [("the gh api call", "slug:" + slug, t) for t in texts] if slug else []
+            slug, sources = _gh_api_sources(words, here, written, cmd.get("heredoc"))
+            found += [("the gh api call", "slug:" + slug, t, s) for t, s in sources] if slug else []
             continue
         if len(words) < 3 or words[2] not in GH_WRITES.get(words[1], ()):
             continue
@@ -414,16 +449,13 @@ def published(command: str, cwd: str) -> list[tuple[str, str, str]]:
         for i, a in enumerate(words):
             nxt = words[i + 1] if i + 1 < len(words) else None
             if a in flags and nxt is not None:
-                found.append((where, target, nxt))
+                found.append((where, target, nxt, None))
             elif a in GH_FILE_FLAGS and nxt is not None:
-                found.append((where, target, (cmd["heredoc"] or "") if nxt == "-"
-                               else _read(os.path.join(here, expand(nxt)), written)))
+                found.append((where, target, *_gh_file(nxt, cmd, here, written)))
             elif "=" in a and a.split("=", 1)[0] in flags:
-                found.append((where, target, a.split("=", 1)[1]))
+                found.append((where, target, a.split("=", 1)[1], None))
             elif "=" in a and a.split("=", 1)[0] in GH_FILE_FLAGS:
-                name = a.split("=", 1)[1]
-                found.append((where, target, (cmd["heredoc"] or "") if name == "-"
-                              else _read(os.path.join(here, expand(name)), written)))
+                found.append((where, target, *_gh_file(a.split("=", 1)[1], cmd, here, written)))
     return found
 
 
@@ -617,6 +649,17 @@ def _command_hit(command: str, cwd: str, cfg: Config) -> str | None:
 
 def check(payload: dict, cfg: Config) -> str | None:
     """Why this tool call is refused, or None."""
+    return review(payload, cfg)[0]
+
+
+def review(payload: dict, cfg: Config) -> tuple[str | None, str]:
+    """(why this tool call is refused, or None, and what to do about a text read from a file the
+    command names, or "")."""
+    why = _why(payload, cfg)
+    return (why[0], why[1]) if isinstance(why, tuple) else (why, "")
+
+
+def _why(payload: dict, cfg: Config) -> str | tuple[str, str] | None:
     if not cfg.terms and not cfg.terms_except_personal and not cfg.term_files:
         return None
     tool = payload.get("tool_name", "")
@@ -624,10 +667,10 @@ def check(payload: dict, cfg: Config) -> str | None:
     cwd = payload.get("cwd") or os.getcwd()
     if tool == "Bash":
         cmd = str(ti.get("command", ""))
-        for where, target, text in published(cmd, cwd):
+        for where, target, text, source in published_from(cmd, cwd):
             hit = _hit([text], _slug(target), cfg, known_public=target.startswith("public:"))
             if hit:
-                return f"{hit!r} in {where}"
+                return f"{hit!r} in {where}", (read_note(source, cmd, cwd) if source else "")
         for path, text in writes(cmd, cwd):
             hit = _hit([text], slug_of(os.path.dirname(path)), cfg, path)
             if hit:
@@ -677,14 +720,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         payload = json.load(sys.stdin)
-        why = check(payload, cfg)
+        why, note = review(payload, cfg)
     except Exception:  # noqa: BLE001 - a broken hook must never stop work
         return 0
     if why:
         tail = f" {cfg.message}" if cfg.message else ""
+        todo = f"Rewrite it for a reader outside the private projects. {note}." if note else \
+            "Rewrite it for a reader outside the private projects and run it again."
         print(f"Blocked: {why} would go into a public repository, and that term is on the list of "
-              f"words kept out of public repositories. Rewrite it for a reader outside the private "
-              f"projects and run it again.{tail}", file=sys.stderr)
+              f"words kept out of public repositories. {todo}{tail}", file=sys.stderr)
         return 2
     return 0
 

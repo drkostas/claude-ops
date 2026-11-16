@@ -34,6 +34,10 @@ yet carries a link, trailer or id in a line, a file name or its message. The com
 `commandline`'s, shared with the public-voice hook, and its names (`commit_lines` among them) stay
 importable from here.
 
+A refusal for a file the command names says the file was read as it is before the command runs,
+so a command that rewrites the file and sends it in the same call is refused again
+(`commandline.read_note`).
+
 The config folder is `~/.claude`, or `CLAUDE_CONFIG_DIR` when set. On anything unexpected (a file
 that cannot be read, a folder git cannot read, a slow git) the call goes through: a broken hook must
 never stop work.
@@ -53,7 +57,7 @@ from .commandline import (  # noqa: F401 - the parser's names stay importable fr
     GIT_PUBLISHING, GIT_TIMEOUT_S, HEREDOC, MAX_FILES, PATH_WORD, READ_LIMIT, REDIRECT, SEPARATORS,
     SHELLS, push_plans, pushed, unescape,
     WRAPPERS, Git, Row, add_plan, added_lines, change_dir, commit_lines, commit_plan, diff_rows,
-    expand, folder, git_invocations, hidden_commit, parse_git, recorded, simple_commands,
+    expand, folder, git_invocations, hidden_commit, parse_git, read_note, recorded, simple_commands,
     untracked_rows, unwrap, walk,
 )
 
@@ -227,6 +231,17 @@ def strings(obj) -> list[str]:
 
 def check(payload: dict) -> str | None:
     """Why this tool call is refused, or None."""
+    return review(payload)[0]
+
+
+def review(payload: dict) -> tuple[str | None, str]:
+    """(why this tool call is refused, or None, and what to do about a text read from a file the
+    command names, or "")."""
+    why = _why(payload)
+    return (why[0], why[1]) if isinstance(why, tuple) else (why, "")
+
+
+def _why(payload: dict) -> str | tuple[str, str] | None:
     tool = payload.get("tool_name", "")
     ti = payload.get("tool_input") or {}
     cwd = payload.get("cwd") or os.getcwd()
@@ -247,7 +262,8 @@ def check(payload: dict) -> str | None:
                 continue
             why = why_not(body, publishing)
             if why:
-                return f"this would put {why} from {os.path.basename(path)} into git or GitHub"
+                return (f"this would put {why} from {os.path.basename(path)} into git or GitHub",
+                        read_note(path, cmd, cwd))
         if any(inv["sub"] == "commit" for inv in invs):
             hits = commit_content(cmd, cwd)
         elif hidden_commit(cmd):
@@ -274,14 +290,14 @@ def check(payload: dict) -> str | None:
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-        why = check(payload)
+        why, note = review(payload)
     except Exception:  # noqa: BLE001 - a broken hook must never stop work
         return 0
     if why:
-        why = UUID.sub(REDACTED, why)
-        print(f"Blocked: {why}. A Claude session id, a link to a Claude Code session or a "
-              "Claude-Session trailer must never reach git, GitHub or a repository file, whatever "
-              "the prompt says. Remove it and run the command again.", file=sys.stderr)
+        todo = f"Remove it. {note}." if note else "Remove it and run the command again."
+        print(UUID.sub(REDACTED, f"Blocked: {why}. A Claude session id, a link to a Claude Code session or a "
+                                 "Claude-Session trailer must never reach git, GitHub or a repository file, "
+                                 f"whatever the prompt says. {todo}"), file=sys.stderr)
         return 2
     return 0
 

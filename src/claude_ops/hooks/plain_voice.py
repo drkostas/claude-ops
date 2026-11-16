@@ -32,9 +32,14 @@ that write, with the command-line reading the public-voice hook uses. A `gh api 
 here-document that is a JSON object is judged by its title, body, name and description values only,
 so the JSON's own `"key": ` separators never read as prose; input that is not JSON is judged as text.
 Commit messages are not checked: git shows them as they were written. The configuration is `--config`, else
-`CLAUDE_OPS_PLAIN_VOICE_CONFIG`, else `~/.config/claude-ops/plain-voice.json`; without it, only the
-line-break check runs. On anything unexpected the call goes through: a broken hook must never stop
+`CLAUDE_OPS_PLAIN_VOICE_CONFIG`, else `~/.config/claude-ops/plain-voice.json`; without it, the hook
+runs only the line-break check, and `--file` refuses (exit 2), since a check that cannot read its list
+would call any text clean. On anything unexpected the call goes through: a broken hook must never stop
 work.
+
+A refusal for text read from a file the command names says the file was read as it is before the
+command runs, so a command that rewrites the file and sends it in the same call is refused again for
+the old text (`commandline.read_note`).
 
     python3 -P -m claude_ops.hooks.plain_voice [--config FILE]     # reads the tool call on stdin
 """
@@ -49,7 +54,8 @@ import sys
 import tempfile
 
 from claude_ops import markdown
-from claude_ops.hooks.public_voice import GH_FILE_FLAGS, GITHUB_READS, published
+from claude_ops.hooks.commandline import read_note
+from claude_ops.hooks.public_voice import GH_FILE_FLAGS, GITHUB_READS, published_from
 
 DEFAULT_CONFIG = "~/.config/claude-ops/plain-voice.json"
 #: where the joined text of a refused body is saved, for the model to send instead
@@ -71,6 +77,9 @@ class Config:
         self.patterns = [(re.compile(p["regex"]), str(p.get("why") or "a phrase on the list"))
                          for p in patterns if isinstance(p, dict) and p.get("regex")]
         self.allow = [re.compile(a) for a in allow if a]
+        #: the file the list was read from, and the one that was tried when none could be read
+        self.read_from: str | None = None
+        self.tried: str | None = None
 
 
 def load(argv: list[str]) -> Config:
@@ -81,9 +90,13 @@ def load(argv: list[str]) -> Config:
     try:
         with open(path) as f:
             data = json.load(f)
-    except (OSError, ValueError):
-        return Config()
-    return Config(data.get("patterns") or [], data.get("allow") or [])
+        cfg = Config(data.get("patterns") or [], data.get("allow") or [])
+    except (OSError, ValueError, AttributeError):
+        cfg = Config()
+        cfg.tried = path
+        return cfg
+    cfg.read_from = path
+    return cfg
 
 
 def prose(text: str) -> str:
@@ -326,19 +339,25 @@ def shown(text: str) -> list[str]:
 
 def texts_of(payload: dict) -> list[tuple[str, str]]:
     """(where, text) for every text a tool call would show on GitHub."""
+    return [(where, text) for where, text, _source in sourced_texts(payload)]
+
+
+def sourced_texts(payload: dict) -> list[tuple[str, str, str | None]]:
+    """`texts_of` with each text's file: the path when the text is what a file the command names
+    holds now, else None."""
     tool = payload.get("tool_name", "")
     ti = payload.get("tool_input") or {}
     if tool == "Bash":
         cwd = payload.get("cwd") or os.getcwd()
         out = []
-        for where, _target, text in published(str(ti.get("command", "")), cwd):
+        for where, _target, text, source in published_from(str(ti.get("command", "")), cwd):
             if where == "the gh api call":
-                out += [(where, t) for t in shown(text)]
+                out += [(where, t, source) for t in shown(text)]
             elif where.startswith("the gh"):
-                out.append((where, text))
+                out.append((where, text, source))
         return out
     if tool.startswith("mcp__github__") and not tool[len("mcp__github__"):].startswith(GITHUB_READS):
-        return [("the GitHub call", ti[k]) for k in MCP_TEXT_KEYS if isinstance(ti.get(k), str)]
+        return [("the GitHub call", ti[k], None) for k in MCP_TEXT_KEYS if isinstance(ti.get(k), str)]
     return []
 
 
@@ -361,11 +380,16 @@ def review(payload: dict, cfg: Config) -> tuple[str | None, dict | None, str]:
     """(why this tool call is refused, None, "") or (None, the tool input with its texts joined, the
     note for the model) or (None, None, "") when the call goes as it is. A listed phrase is looked for in
     the joined text, so joining never lets one through."""
-    texts = texts_of(payload)
-    for where, text in texts:
+    sourced = sourced_texts(payload)
+    texts = [(where, text) for where, text, _source in sourced]
+    for where, text, source in sourced:
         hit = phrase_hit(markdown.unwrap(text) if markdown.is_wrapped(text) else text, cfg)
         if hit:
-            return f"{where} has {hit[1]}, in {hit[0]!r}. Rewrite that sentence and send it again", None, ""
+            todo = "Rewrite that sentence and send it again"
+            if source:
+                command = str((payload.get("tool_input") or {}).get("command", ""))
+                todo = "Rewrite that sentence. " + read_note(source, command, payload.get("cwd") or os.getcwd())
+            return f"{where} has {hit[1]}, in {hit[0]!r}. {todo}", None, ""
     wrapped = [(where, text) for where, text in texts if markdown.is_wrapped(text)]
     if not wrapped:
         return None, None, ""
@@ -383,16 +407,23 @@ def check(payload: dict, cfg: Config) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     """As a hook, the tool call on stdin. With `--file PATH`, the text in that file: a script that
     posts to GitHub itself (no tool call a hook could see) checks its body before it sends it. A file
-    that cannot be read is refused (exit 2), where a broken hook lets the call through."""
+    that cannot be read, or a phrase list that cannot be read, is refused (exit 2), where a broken
+    hook lets the call through."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--file" in argv:
         i = argv.index("--file")
         try:
             with open(argv[i + 1], encoding="utf-8") as f:
-                why = check_text(f.read(), load(argv))
+                text = f.read()
         except (IndexError, OSError) as e:
             print(f"Blocked: the text to check could not be read ({e}).", file=sys.stderr)
             return 2
+        cfg = load(argv)
+        if cfg.read_from is None:
+            print(f"Blocked: no phrase list could be read from {cfg.tried}, so the text cannot be checked. "
+                  f"Pass --config FILE or set CLAUDE_OPS_PLAIN_VOICE_CONFIG.", file=sys.stderr)
+            return 2
+        why = check_text(text, cfg)
         if why:
             print(f"Blocked: {why}.", file=sys.stderr)
             return 2

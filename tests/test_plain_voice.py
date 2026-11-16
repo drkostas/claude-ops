@@ -172,3 +172,40 @@ def test_a_file_is_checked_with_file_and_an_unreadable_one_is_refused(tmp_path, 
     assert pv.main(["--config", str(cfg), "--file", str(bad)]) == 2 and "an em-dash" in capsys.readouterr().err
     assert pv.main(["--file", str(tmp_path / "missing.md")]) == 2 and "could not be read" in capsys.readouterr().err
     assert pv.check_text(WRAPPED, pv.Config(), "the body").startswith("the body has a paragraph broken")
+
+
+def test_a_phrase_in_a_file_the_command_names_says_the_file_is_read_before_the_command_runs(tmp_path):
+    cfg = pv.Config([{"regex": r"\w: ", "why": "a colon in prose"}])
+    (tmp_path / "body.md").write_text("The fix: it works.\n")
+    say = lambda command: pv.check(bash(command, tmp_path), cfg)  # noqa: E731
+    for command in ("gh pr create --title T --body-file body.md", "gh release create v1 --notes-file=body.md",
+                    "gh api repos/someone/demo/issues/3/comments -F body=@body.md"):
+        why = say(command)
+        assert "a colon in prose" in why and "'The fix: it works.'" in why, command
+        assert ("Rewrite that sentence. That text was read from body.md as it is now, before the command runs. "
+                "Change body.md in a call of its own, then send the command again") in why, command
+    # the edit and the send in one call: the hook reads the file before the edit, and says so
+    for edit in ("sed -i '' 's/fix: it/fix, it/' body.md", "python3 fix.py > body.md"):
+        why = say(f"{edit} && gh pr create --title T --body-file body.md")
+        assert "This command also writes body.md, but the check reads body.md as it is now" in why, edit
+    # text in the command, or a file the line writes whole before the call, is not read from a file
+    assert say("gh pr create --title T --body 'The fix: it works.'").endswith("Rewrite that sentence and send it again")
+    why = say("cat > body.md <<'EOF'\nThe fix: still.\nEOF\ngh pr create --title T --body-file body.md")
+    assert "'The fix: still.'" in why and "read from" not in why
+
+
+def test_file_mode_refuses_when_no_phrase_list_can_be_read(tmp_path, monkeypatch, capsys):
+    good = tmp_path / "good.md"
+    good.write_text("Title\n\nOne paragraph on one line.\n")
+    missing = tmp_path / "missing.json"
+    monkeypatch.setenv("CLAUDE_OPS_PLAIN_VOICE_CONFIG", str(missing))
+    assert pv.main(["--file", str(good)]) == 2
+    err = capsys.readouterr().err
+    assert "no phrase list could be read" in err and str(missing) in err
+    broken = tmp_path / "broken.json"
+    for text in ("not json", "[1, 2]"):
+        broken.write_text(text)
+        assert pv.main(["--config", str(broken), "--file", str(good)]) == 2 and str(broken) in capsys.readouterr().err
+    # the hook itself still lets a call through without a list
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(bash("gh pr comment 1 --body 'One: two.'", tmp_path))))
+    assert pv.main([]) == 0

@@ -1,4 +1,6 @@
 """Reading a command line: here-document bodies are data, not shell words."""
+import os
+
 from claude_ops.hooks import commandline
 
 
@@ -24,3 +26,28 @@ def test_every_kind_of_heredoc_and_the_newlines_stay():
 def test_a_line_with_no_heredoc_is_unchanged():
     for line in ("open -a Safari", "echo 'a << b'", "git log --oneline -3 && open https://example.org", ""):
         assert commandline.without_heredoc_bodies(line) == line
+
+
+def test_written_paths_names_every_file_the_line_writes_or_edits(tmp_path):
+    def got(line):
+        return {os.path.relpath(p, tmp_path) for p in commandline.written_paths(line, str(tmp_path))}
+    assert got("python3 fix.py > a.md && gh pr create --body-file a.md") == {"a.md"}
+    assert got("echo x | tee -a b.md c.md") == {"b.md", "c.md"}
+    assert got("sed -i '' 's/one/two/' d.md") == {"d.md"}
+    assert got("perl -pi -e 's/one/two/' e.md") == {"e.md"}
+    assert got("cat <<'EOF' > f.md\nx\nEOF") == {"f.md"}
+    assert got("mkdir -p sub && cd sub && printf x >> g.md") == {"sub/g.md"}
+    assert got("echo x 2> err.txt; echo y > /dev/null; sed 's/a/b/' h.md; cat i.md") == set()
+
+
+def test_read_note_says_the_file_is_read_before_the_command_runs(tmp_path):
+    body = str(tmp_path / "body.md")
+    note = commandline.read_note(body, "gh pr create --title t --body-file body.md", str(tmp_path))
+    assert note == ("That text was read from body.md as it is now, before the command runs. Change body.md "
+                    "in a call of its own, then send the command again")
+    note = commandline.read_note(body, "sed -i '' 's/a: b/a, b/' body.md && gh pr create --body-file body.md",
+                                 str(tmp_path))
+    assert note == ("This command also writes body.md, but the check reads body.md as it is now, before the "
+                    "command runs. Write body.md in a call of its own, then send the command again")
+    elsewhere = str(tmp_path / "sub")
+    assert f"read from {body} as it is now" in commandline.read_note(body, "git commit -F ../body.md", elsewhere)

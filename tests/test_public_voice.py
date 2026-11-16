@@ -561,3 +561,29 @@ def test_a_single_term_written_without_its_list(tmp_path):
     (tmp_path / "c.json").write_text(json.dumps({"terms": "zorblax", "allow": "zorblax-public"}))
     c = pv.load(str(tmp_path / "c.json"))
     assert c.terms == ["zorblax"] and c.allow == ["zorblax-public"]
+
+
+def test_a_term_in_a_file_the_command_names_says_the_file_is_read_before_the_command_runs(cfg, public, monkeypatch,
+                                                                                          capsys):
+    (public / "body.md").write_text("built for quuxcorp\n")
+    (public / "msg.txt").write_text("subject\n\nbody naming quuxcorp\n")
+    for command, where in (("gh pr create --title t --body-file body.md", "the gh pr text"),
+                           ("gh api repos/example-owner/thing/issues/3/comments -F body=@body.md", "the gh api call"),
+                           ("git commit -F msg.txt", "the commit message")):
+        why, note = pv.review(bash(command, public), cfg)
+        assert why == f"'quuxcorp' in {where}", command
+        assert note.startswith("That text was read from ") and "in a call of its own" in note, command
+    _, note = pv.review(bash("sed -i '' 's/subject/better subject/' msg.txt && git commit -F msg.txt", public), cfg)
+    assert note.startswith("This command also writes msg.txt, but the check reads msg.txt as it is now")
+    # text in the command, or a file the line writes whole before the call, carries no note
+    assert pv.review(bash("gh pr create --title t --body 'for zorblax'", public), cfg) == \
+        ("'zorblax' in the gh pr text", "")
+    assert pv.review(bash("cat > body.md <<'EOF'\nfor zorblax\nEOF\ngh pr create --title t --body-file body.md",
+                          public), cfg) == ("'zorblax' in the gh pr text", "")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(bash("gh pr create --title t --body-file body.md",
+                                                                   public))))
+    assert pv.main(["--config", cfg.path]) == 2
+    err = capsys.readouterr().err
+    assert ("Rewrite it for a reader outside the private projects. That text was read from body.md as it is now, "
+            "before the command runs. Change body.md in a call of its own, then send the command again. "
+            "Use invented examples.") in err
