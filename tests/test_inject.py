@@ -203,6 +203,40 @@ def test_press_sends_one_escape_to_a_tmux_session(tmp_path):
         shutil.rmtree(short, ignore_errors=True)
 
 
+def test_press_paste_end_sends_the_end_marker_alone(tmp_path):
+    """PasteEnd types the bracketed-paste end marker and nothing else: no Enter, no text."""
+    import os
+    import shutil
+    import tempfile
+    import time
+    if not shutil.which("tmux"):
+        pytest.skip("no tmux")
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}   # a private server, as above
+    short = tempfile.mkdtemp(prefix="co-", dir="/tmp")
+    env["TMUX_TMPDIR"] = short
+    out = tmp_path / "key.bin"
+    subprocess.run(["tmux", "-u", "new-session", "-d", "-s", "claude-k",
+                    f"stty raw -echo; head -c 7 > {out}"], check=True, env=env)
+    try:
+        for _ in range(50):
+            now = subprocess.run(["tmux", "display-message", "-p", "-t", "claude-k", "#{pane_current_command}"],
+                                 capture_output=True, text=True, env=env).stdout.strip()
+            if now == "head":
+                break
+            time.sleep(0.1)
+        ok, why = inject.press("claude-k", "PasteEnd", env=env)
+        assert ok, why
+        subprocess.run(["tmux", "send-keys", "-t", "claude-k", "-l", "z"], env=env)   # marks the end
+        for _ in range(50):
+            if out.exists() and out.stat().st_size >= 7:
+                break
+            time.sleep(0.1)
+        assert out.read_bytes() == b"\x1b[201~z"
+    finally:
+        subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
+        shutil.rmtree(short, ignore_errors=True)
+
+
 def test_press_sends_only_the_keys_it_names():
     with pytest.raises(ValueError):
         inject.press("claude-k", "C-c")

@@ -805,7 +805,32 @@ def empty_prompt(screen: str | None) -> tuple[bool, str]:
         return False, "Claude's input line is not on its screen"
     if prompts[-1] != "❯":
         return False, TYPED
+    if paste_open(screen):
+        return False, PASTE_OPEN
     return True, "its input line is empty"
+
+
+#: what Claude Code writes under its input box while a long paste is in the input line
+PASTE_HINT = "paste again to expand"
+#: empty_prompt's reason for a paste whose end marker has not arrived
+PASTE_OPEN = "a paste is still open in its input line"
+
+
+def paste_open(screen: str | None) -> bool:
+    """Is Claude Code still reading a paste whose end marker never arrived?
+
+    The input line then reads empty, while the hint under the box ("paste again to expand") says a
+    paste is there. Every key that follows is read as part of the paste, so an Enter becomes a newline
+    in it and nothing is sent, and a second paste or a typed command joins the first. One end marker
+    (`inject.press(..., "PasteEnd")`) closes it. The same hint under a stand-in ("[Pasted text #1 +16
+    lines]") is a paste that ended and waits for its Enter, which `held_paste` reads."""
+    if not screen:
+        return False
+    lines = [ln.rstrip() for ln in screen.splitlines() if ln.strip()][-8:]
+    at = [i for i, ln in enumerate(lines) if ln.strip().startswith("❯") and not OPTION.match(ln.strip())]
+    if not at or lines[at[-1]].strip() != "❯":
+        return False
+    return any(PASTE_HINT in ln for ln in lines[at[-1] + 1:])
 
 
 #: the stand-in Claude Code shows in its input line for a long paste it has not sent yet: the
