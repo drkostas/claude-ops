@@ -971,21 +971,51 @@ def test_heavy_hook(monkeypatch):
 # The stand-in here is a python child that calls setsid under a bash job that waits for it. It gives up
 # the caller's output pipes at once, so a child that outlives the job cannot hold the test's run until its
 # own sleep ends (which reads as ended).
+#: the child: a session of its own, its pid in the pidfile, then a wait (seconds, or "orphan": until its parent has
+#: ended, noted in <pidfile>.orphaned), then `gb` taken
 _OWN_SESSION = ("import os, signal, sys, time\n"
+                "parent = os.getppid()\n"
                 "if sys.argv[2] == 'deaf':\n    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                 "os.setsid()\n"
                 "n = os.open(os.devnull, os.O_WRONLY); os.dup2(n, 1); os.dup2(n, 2)\n"
-                "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(float(sys.argv[4]))\n"
+                "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                "if sys.argv[4] == 'orphan':\n"
+                "    end = time.time() + 60\n"
+                "    while os.getppid() == parent and time.time() < end:\n        time.sleep(0.05)\n"
+                "    open(sys.argv[1] + '.orphaned', 'w').write(str(os.getppid()))\n"
+                "else:\n    time.sleep(float(sys.argv[4]))\n"
                 "b = bytearray(int(float(sys.argv[3]) * 1024 ** 3)); b[::4096] = b'x' * len(b[::4096])\n"
                 "time.sleep(60)")
+
+#: the child's parent in the job's group: it returns once heavy has written two samples (HEAVY_DIR/taking) after
+#: the child wrote its pidfile, so heavy has seen the child in a sample while this parent lived. The first sample
+#: after the pidfile may have read the process table before it, the second cannot. A fixed sleep here was too
+#: short on a loaded machine, where the child's start or the sampler lagged past it.
+_SAMPLED = ("import glob, json, os, sys, time\n"
+            "pidfile, end = sys.argv[1], time.time() + 60\n"
+            "def last():\n"
+            "    ats = [0.0]\n"
+            "    for f in glob.glob(os.path.join(os.environ['HEAVY_DIR'], 'taking', '*.json')):\n"
+            "        try:\n            ats.append(json.load(open(f))['at'])\n"
+            "        except (OSError, ValueError, KeyError):\n            pass\n"
+            "    return max(ats)\n"
+            "while not (os.path.exists(pidfile) and open(pidfile).read().strip()) and time.time() < end:\n"
+            "    time.sleep(0.05)\n"
+            "since = time.time()\n"
+            "for _ in range(2):\n"
+            "    while last() <= since and time.time() < end:\n        time.sleep(0.05)\n"
+            "    since = last()\n")
+
+#: a job whose child's parent in the group ends once heavy has sampled the child (_SAMPLED), while the job runs on
+_PARENT_ENDS = '( {child} & "$5" -c "$6" "$1" ); sleep 60'
 
 
 def _job_with_own_session_child(pidfile, deaf="hears", gb="0", wait_s="0", shape="{child} & wait"):
     """bash -c that starts the setsid child (which waits `wait_s` before it takes `gb`) in the shape given,
-    as argv for a job. The default shape waits for the child."""
+    as argv for a job. The default shape waits for the child. A shape may run _SAMPLED as "$5" -c "$6"."""
     child = '"$5" -c "$0" "$1" "$2" "$3" "$4"'
     return ["bash", "-c", shape.format(child=child), _OWN_SESSION, str(pidfile), deaf, gb, wait_s,
-            sys.executable]
+            sys.executable, _SAMPLED]
 
 
 def _pid_in(pidfile, timeout=20.0):
@@ -1080,15 +1110,18 @@ def test_the_memory_cap_counts_and_ends_a_child_in_a_session_of_its_own(tmp_path
 def test_a_child_whose_parent_in_the_group_ended_is_still_ended_with_the_job(tmp_path):
     """A child in a session of its own, seen in a sample while its parent in the job's group lived, is ended
     at --max-hold after that parent has gone. By then it is the init process's child, and no walk from the
-    group finds it."""
+    group finds it. The parent lives until heavy has sampled the child (_SAMPLED), and --max-hold comes well
+    after, so a loaded machine still runs the case the test is about."""
     pidfile = tmp_path / "child.pid"
-    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "worker build", "--max-hold", "0.05",
-                        "--", *_job_with_own_session_child(pidfile, shape="( {child} & sleep 1 ); sleep 60")],
+    r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "worker build", "--max-hold", "0.25",
+                        "--", *_job_with_own_session_child(pidfile, wait_s="orphan", shape=_PARENT_ENDS)],
                        capture_output=True, text=True, timeout=90,
                        env=_heavy_env(tmp_path / "heavy", HEAVY_STOP_GRACE="1"))
     stray = _pid_in(pidfile, timeout=1)
     try:
         assert r.returncode == 124 and "ENDED worker build" in r.stderr, r.stdout + r.stderr
+        assert (tmp_path / "child.pid.orphaned").exists(), \
+            "the child's parent in the group still ran at --max-hold, so this run did not test a child whose parent ended"
         assert _gone(stray), f"the child whose parent had ended outlived the job: {stray}"
     finally:
         _kill(stray)
@@ -1096,18 +1129,19 @@ def test_a_child_whose_parent_in_the_group_ended_is_still_ended_with_the_job(tmp
 
 def test_the_cap_counts_a_child_that_grew_after_its_parent_in_the_group_ended(tmp_path):
     """The child is seen small while its parent lives, its parent ends, and then it takes 0.4 GB. The cap
-    of 0.2 GB still counts it and ends the job, child and all."""
+    of 0.2 GB still counts it and ends the job, child and all. The parent lives until heavy has sampled the
+    child (_SAMPLED), and the child grows only once it is orphaned, whatever the machine's load."""
     if sys.platform != "darwin":        # the cap reads proc_pid_rusage
         return
     pidfile = tmp_path / "child.pid"
     r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "worker build", "--max-hold", "1", "--",
-                        *_job_with_own_session_child(pidfile, gb="0.4", wait_s="2",
-                                                     shape="( {child} & sleep 1 ); sleep 60")],
+                        *_job_with_own_session_child(pidfile, gb="0.4", wait_s="orphan", shape=_PARENT_ENDS)],
                        capture_output=True, text=True, timeout=120,
                        env=_heavy_env(tmp_path / "heavy", HEAVY_MAX_GB="0.2", HEAVY_STOP_GRACE="2"))
     stray = _pid_in(pidfile, timeout=1)
     try:
         assert r.returncode == 137 and "over the 0.2 GB cap" in r.stderr, r.stdout + r.stderr
+        assert (tmp_path / "child.pid.orphaned").exists(), "the child grew before its parent in the group ended"
         assert _gone(stray), f"the child outlived the cap: {stray}"
     finally:
         _kill(stray)
