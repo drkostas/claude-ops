@@ -118,7 +118,9 @@ each waiter in the order it goes next, and `failing` the jobs failing the same w
 when only the turn holds it, else its reason `kinds`, the gate's `words`, `held_s` and `most_free_gb`.
 
 A call made inside a heavy job runs at once, inside the outer job's slot and memory cap: the job is
-given HEAVY_HELD, and a caller whose ancestor holds the slot (a step of a CI job) counts too. A CI
+given HEAVY_HELD, and a caller whose ancestor holds the slot (a step of a CI job) counts too. The job is
+also given HEAVY_CHAT and HEAVY_WHAT, the two names it was queued under, so a job that writes a file for
+its caller can say whose it is (two callers that queue the same kind of job each wait for their own). A CI
 runner can hold the slot for a job from its job-started hook (`hold ... --pid <worker>`) to its
 job-completed hook (`release`), and a worker that dies frees it.
 
@@ -1245,6 +1247,13 @@ def queues_itself(cmd: list[str], names: list[str] | None = None) -> str | None:
     return None
 
 
+def job_env(chat: str, what: str) -> dict[str, str]:
+    """The job's environment: the caller's own, by design, plus HEAVY_HELD (this process, so a call the job makes
+    to the queue knows it already holds the slot) and HEAVY_CHAT and HEAVY_WHAT (the names it was queued under,
+    so the job can tell its caller's files from another caller's)."""
+    return {**os.environ, "HEAVY_HELD": str(os.getpid()), "HEAVY_CHAT": chat, "HEAVY_WHAT": what}
+
+
 def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         notify_chat: bool = False, need_gb: str | None = None) -> int:
     """Run `cmd` as a heavy job: wait for the turn and for room, run it under the memory cap, and say what it
@@ -1276,7 +1285,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
     last = [""]
     if notify_chat:
         # one stream through this process, so the job's last line can be told
-        job = subprocess.Popen(cmd, env={**os.environ, "HEAVY_HELD": str(os.getpid())},
+        job = subprocess.Popen(cmd, env=job_env(chat, what),
                                start_new_session=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, bufsize=1)
         import threading   # noqa: PLC0415
@@ -1289,7 +1298,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                     last[0] = line
         threading.Thread(target=relay, daemon=True).start()
     else:
-        job = subprocess.Popen(cmd, env={**os.environ, "HEAVY_HELD": str(os.getpid())},
+        job = subprocess.Popen(cmd, env=job_env(chat, what),
                                start_new_session=True)
 
     # the job's processes in groups of their own, kept from each sample and each stop: once their parent
