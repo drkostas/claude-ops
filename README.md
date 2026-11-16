@@ -119,6 +119,33 @@ else, a source or workflow file in the change, a bump that cannot be read, a lar
 with the reason, before any waiting. In Python, `dependency_bump.review(title, body, files, author, up_to=)` is the
 same reading, and `merge.pull_request(number, repo)` reads a pull request with the fields it needs.
 
+## See a pull request's workflow run through to a deploy
+
+```bash
+claude-ops ci-run 123456789 --pr 12 --budget 75                         # wait, then merge
+claude-ops ci-run 123456789 --pr 12 --repo owner/name --budget 75 --rerun-starved 1 \
+    --gate ./room-for-a-suite.sh --serving ./what-is-deployed.sh --deploy-budget 20
+claude-ops ci-run 123456789 --pr 12 --budget 75 --no-merge             # wait and judge only
+```
+
+It waits for one workflow run of a pull request on a deadline from the clock (the budget plus the
+time the run has already taken), never after a count of looks. When the run finishes it reads the
+shape of each job. A job that failed with no steps never started, because the runner lost its
+worker before the first step, and `--rerun-starved N` allows that many new attempts. A job that
+failed with steps failed in its own code and is never run again, and the command names its failed
+steps. A run that holds a cancelled job takes the full `gh run rerun`, since `--failed` refuses it,
+and a new attempt counts as started only when the run's attempt number goes up, because a re-run
+prints nothing when it works. `--gate` is a command that exits 0 when there is room for the job, and
+it must pass twice, `--gate-gap` seconds apart (45), before a new attempt is spent.
+
+When every job passed, the pull request is merged as `claude-ops merge` merges it, pinned to the head
+the run was on. `--serving` is a command that prints what the service runs (an image tag, a version
+endpoint), and the command waits until that output holds the merge commit, as a hexadecimal word of
+at least seven characters. Exit codes: 0 done, 2 a deadline passed, 3 a job failed in its own code or
+no re-run is allowed, 4 gh refused something or a re-run did not start, 5 the pull request is not
+open or the run is not on its head, 7 the service did not show the merge commit in time, 8 the head
+moved while it waited.
+
 ## Find general code in a private project
 
 A private project built over public packages tends to grow general code of its own, because that is
