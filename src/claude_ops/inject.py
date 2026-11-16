@@ -200,22 +200,29 @@ def input_age(name: str, *, now: float | None = None, env: Mapping[str, str] | N
     return max(0.0, (time.time() if now is None else now) - max(times))
 
 
-#: the keys `press` sends, by their tmux names
-KEYS = ("Escape", "Enter")
+#: the keys `press` sends, by their tmux names, and PasteEnd, the bracketed-paste end marker
+KEYS = ("Escape", "Enter", "PasteEnd")
+#: what PasteEnd types: the sequence a terminal sends at the end of a bracketed paste
+PASTE_END = "\x1b[201~"
 
 
 def press(target: str, key: str, *, transport: str = "tmux",
           env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     """Press one key in a tmux session: Escape, to close a menu without choosing anything in it
     (`update.rc_menu`), or Enter, to send a paste of your own that the session still holds in its
-    input line (`update.held_paste`). Nothing is typed and nothing is logged, since a key carries no
-    text. Look at the screen first: in a session at work Escape stops its turn, and Enter sends
+    input line (`update.held_paste`), or PasteEnd, to close a bracketed paste the session is still
+    inside. A paste whose end marker never arrived keeps the session reading every later key as part
+    of the paste, so an Enter becomes a newline in it and nothing is sent. One end marker closes it,
+    and the input, with any Enter pressed meanwhile, is taken as usual. Outside a paste Claude Code
+    ignores the marker: nothing is typed and nothing is sent. Nothing is logged, since a key carries
+    no text. Look at the screen first: in a session at work Escape stops its turn, and Enter sends
     whatever the input line holds."""
     if key not in KEYS:
         raise ValueError(f"press sends {', '.join(KEYS)}, not {key!r}")
     if transport != "tmux":
         raise ValueError(f"press reaches tmux sessions only, not {transport}")
-    r = subprocess.run([TMUX, "-u", "send-keys", "-t", target, key], capture_output=True, text=True, env=env)
+    keys = ["-l", PASTE_END] if key == "PasteEnd" else [key]
+    r = subprocess.run([TMUX, "-u", "send-keys", "-t", target, *keys], capture_output=True, text=True, env=env)
     return r.returncode == 0, r.stderr.strip()[:300]
 
 

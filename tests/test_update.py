@@ -246,6 +246,22 @@ def test_several_pastes_held_in_the_input_line_are_seen_in_order():
     assert cu.held_pastes("───\n❯ \n───") is None and cu.held_pastes(None) is None
     assert cu.held_pastes("Pick one\n❯ 1. [Pasted text #3 +5 lines]\nEnter to select") is None
 
+def test_a_paste_still_open_is_not_an_empty_input_line():
+    # a paste whose end marker has not arrived: the input line reads empty, and the hint under the box
+    # belongs to the paste being read, so a paste or a typed command now would join it
+    open_paste = ("  line 15 of the notes\n  line 16 of the notes\n" + "─" * 40 + "\n❯\xa0\n" + "─" * 40
+                  + "\n  paste again to expand")
+    assert cu.paste_open(open_paste)
+    assert cu.empty_prompt(open_paste) == (False, cu.PASTE_OPEN)
+    # the same hint under a stand-in is a paste that ended and waits for its Enter (held_paste)
+    ended = "───\n❯ [Pasted text #1 +16 lines]\n───\n  paste again to expand"
+    assert not cu.paste_open(ended) and cu.empty_prompt(ended) == (False, cu.TYPED)
+    # an empty line with the usual footer, the hint only in the conversation above, and no screen
+    assert not cu.paste_open("hello\n❯ \n───\n  ⏵⏵ bypass permissions on")
+    assert not cu.paste_open("⏺ it said paste again to expand\n───\n❯ \n───\n  ⏵⏵ bypass permissions on")
+    assert not cu.paste_open(None) and not cu.paste_open("")
+
+
 #: the menu a session opens for /remote-control while its Remote Control is on (the link is invented)
 RC_MENU_SCREEN = """⏺ Done, the tests pass.
 
