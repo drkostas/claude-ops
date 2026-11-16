@@ -41,9 +41,10 @@ def world(tmp_path, monkeypatch):
     git(tmp_path, "clone", "-q", origin, checkout)
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
-    py = fakebin / "python3"
-    py.write_text("#!/bin/sh\necho \"${FAKE_PYTHON:-3.11}\"\n")
-    py.chmod(0o755)
+    for name in ("python3", "python"):                  # both: a machine may have its own `python` on PATH
+        py = fakebin / name
+        py.write_text("#!/bin/sh\necho \"${FAKE_PYTHON:-3.11}\"\n")
+        py.chmod(0o755)
     monkeypatch.setenv("PATH", f"{os.pathsep.join(['/usr/bin', '/bin'])}")
     return {"tmp": tmp_path, "checkout": checkout, "sha": sha, "bin": fakebin, "home": tmp_path / "home",
             "work": work}
@@ -125,6 +126,15 @@ def test_the_python_the_workflow_names_must_be_the_commands_python(world, monkey
     monkeypatch.setenv("FAKE_PYTHON", "3.12")
     code, report, said = run(world, python_from=".github/workflows/ci.yml", tests=["true"])
     assert code == pg.SETUP and "3.11" in report["why"] and "python3 3.12" in report["why"]
+    (world["bin"] / "python").unlink()                  # a `python` elsewhere on PATH is checked too
+    monkeypatch.setenv("FAKE_PYTHON", "3.11")
+    other = world["tmp"] / "other-bin"
+    other.mkdir()
+    (other / "python").write_text("#!/bin/sh\necho 3.12\n")
+    (other / "python").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{other}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    code, report, said = run(world, python_from=".github/workflows/ci.yml", tests=["true"])
+    assert code == pg.SETUP and "python 3.12" in report["why"], report["why"]
     assert report["steps"] == [] and trees(world) == []
     assert pg.workflow_python(world["work"] / ".github" / "workflows" / "ci.yml") == "3.11"
 
