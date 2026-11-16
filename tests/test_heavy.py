@@ -699,6 +699,10 @@ def test_heavy_queue(monkeypatch):
     rc, out = heavy("t", "outer", "--", "bash", "-c", "echo held=$HEAVY_HELD", timeout=30)
     check(rc == 0 and any(l.startswith("held=") and l[5:].isdigit() for l in out.splitlines()),
           f"a job is told the slot is held for it (HEAVY_HELD): {out.strip()[-80:]!r}")
+    rc, out = heavy("chat-b", "an emulator", "--", "bash", "-c", 'echo "names=$HEAVY_CHAT|$HEAVY_WHAT"', timeout=30)
+    check(rc == 0 and "names=chat-b|an emulator" in out.splitlines(),
+          f"and the names it was queued under (HEAVY_CHAT, HEAVY_WHAT), so it can say whose its files are: "
+          f"{out.strip()[-80:]!r}")
     rc, out = heavy("t", "outer", "--", sys.executable, "-m", "claude_ops.heavy", "t", "inner", "--", "bash", "-c",
                     "echo inner-ran", timeout=30)
     check(rc == 0 and "inner-ran" in out and "inside t: outer" in out,
