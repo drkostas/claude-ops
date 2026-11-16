@@ -146,6 +146,24 @@ no re-run is allowed, 4 gh refused something or a re-run did not start, 5 the pu
 open or the run is not on its head, 7 the service did not show the merge commit in time, 8 the head
 moved while it waited.
 
+## Steps of a self-hosted runner's jobs that ran far too long
+
+```bash
+claude-ops runner-diag ~/actions-runner/_diag                     # jobs of the last 6 hours, as JSON
+claude-ops runner-diag ~/actions-runner/_diag --hours 24 --factor 2 --margin 600
+```
+
+A self-hosted runner writes one Worker log per job in its `_diag` folder, with the job's repository,
+workflow, name and run id, a line as each step starts, and each finished step's result and times. A
+step that runs far longer than in the job's last successful run is often the machine being slow, not
+the change being tested, and the run's page does not say so. A timeout then reads as a failing test.
+`runner-diag` reads the Worker logs written in the last hours, finds each job's last successful run
+among the older logs (same repository, workflow and job name), and names the steps that took more
+than `--factor` times as long there (2) and at least `--margin` seconds more (600). A step still
+running counts by the time it has run so far, and once its log has been silent for two minutes with
+no job result (the worker ended mid-step) it counts only until the log's last write.
+`runner_diag.read`, `last_green` and `slower` are the parts.
+
 ## Find general code in a private project
 
 A private project built over public packages tends to grow general code of its own, because that is
