@@ -14,10 +14,17 @@ gh prints for them; a caller may name more), never any bot: every GitHub App wit
 is a bot too. Every changed file is a lockfile or a dependency manifest (LOCKFILES, MANIFESTS,
 `requirements*.txt`). Every bump the title or body names ("bump X from A to B", "Updates `X` from
 A to B") moves at most by the level asked, and, when the diff is given, every package a manifest or a
-lockfile moves is one the text names, moves to the version the text names and within the level, and
-keeps the same registry. A package the diff adds or removes, moves without the text naming it (a
-transitive dependency across a major), lands on a version the text does not name, is pointed at
-another registry host, or is newly marked to run an install script, is refused.
+lockfile moves is either one the text names (moving to the version the text names, within the level,
+from the same registry) or a co-move a named package pulls in. A co-move the text does not name is
+read from the updated package's own lockfile entry, which lists its dependencies and the versions it
+pins them to. It is allowed only when a named package's entry pins it to exactly the version it lands
+on, an exact version and not a range, it moves within the level, and it keeps the same registry. That
+pin is read where a lockfile carries it, npm's package-lock.json and npm-shrinkwrap.json, whose
+entries hold a dependencies map. A lockfile format that carries no such pin gives a co-move no
+evidence, so it stays refused, never allowed by a shared name between a package and a scope of the
+same spelling. A package the diff adds or removes, moves with neither the text naming it nor a pin (a
+transitive dependency across a major), lands on a version neither the text nor a pin names, is
+pointed at another registry host, or is newly marked to run an install script, is refused.
 The formats read are npm's (package.json, package-lock.json, npm-shrinkwrap.json), yarn.lock, Python's
 (pyproject.toml, requirements*.txt, uv.lock, poetry.lock, pdm.lock), Cargo's, go.mod and composer's;
 a lockfile in another format contributes nothing, so for it the text is the only check. A version is
@@ -218,6 +225,18 @@ def clean_version(spec: str) -> str:
     return re.split(r"[\s,]", s, maxsplit=1)[0] if s else s
 
 
+#: the sub-blocks of an npm lockfile entry that pin the versions a package pulls in
+DEP_SECTIONS = frozenset({"dependencies", "optionalDependencies", "peerDependencies"})
+
+
+def _is_exact_version(spec: str) -> bool:
+    """Whether a pin names one exact version, a full major.minor.patch with an optional prerelease or
+    build ("16.4.5", "16.4.5-rc.1"). A shorter number is an npm X-range, not exact ("16" means 16.x.x
+    and "16.4" means 16.4.x), and matters because _canon drops trailing zeros, so "16.4" would read as
+    equal to a landing of 16.4.0. A caret, tilde, comparator or wildcard is a range too."""
+    return bool(re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", (spec or "").strip()))
+
+
 def moves(diff: str) -> tuple[Move, ...]:
     """Every package a manifest or lockfile moves, adds or removes in a unified diff (`gh pr diff`),
     for the formats _kind reads. Pure; a file in another format contributes nothing."""
@@ -363,14 +382,81 @@ def _install_hazard(diff: str) -> str | None:
     return None
 
 
+def _pinned_comoves(diff: str, named: set[str]) -> dict[str, list[tuple[str, str]]]:
+    """For each package a named package pins in its own npm-lockfile entry, the (namer, spec) pairs
+    the diff adds. A co-move is expected only when one of its pins is an exact version equal to where
+    it lands. Reads the dependencies, optionalDependencies and peerDependencies maps of a
+    package-lock.json or npm-shrinkwrap.json entry. A format without such a map yields nothing, so a
+    co-move there carries no pin and stays refused. `section` is dropped at every hunk boundary but
+    the enclosing entry `current` is carried across, so a pin counts under the entry whose header the
+    diff last showed, even when its map sits in a later hunk. That is sound because an npm entry's
+    pins change only when its version does, and the version line follows the entry's header, so the
+    header of any entry whose pins move is shown in the diff before them."""
+    pins: dict[str, list[tuple[str, str]]] = {}
+    file = kind = current = section = None
+    for line in diff.splitlines():
+        m = _DIFF_FILE.match(line)
+        if m:
+            file, kind, current, section = m.group("b"), _kind(m.group("b")), None, None
+            continue
+        if not file or kind != "json-lock" or not line:
+            continue
+        if line.startswith("@@"):
+            section = None
+            continue
+        if line.startswith(_SKIP):
+            continue
+        m = _JSON_OBJ.match(line)
+        if m:
+            key = m.group("key")
+            if key in DEP_SECTIONS:
+                section = key
+            elif "node_modules/" in key:
+                current, section = key.rsplit("node_modules/", 1)[-1], None
+            else:
+                section = None
+                if key in ("", "packages"):
+                    current = None
+            continue
+        m = _JSON_NAME.match(line)
+        if m:
+            current, section = m.group("name"), None
+            continue
+        if section in DEP_SECTIONS and current and current.lower() in named and line[:1] == "+":
+            m = _JSON_PAIR.match(line)
+            if m and m.group("name") not in _STRUCTURAL and _SPEC.match(m.group("ver")):
+                pins.setdefault(m.group("name").lower(), []).append((current, m.group("ver")))
+    return pins
+
+
+def _comove_refusal(mv: Move, old: str, new: str, pins: dict[str, list[tuple[str, str]]]) -> str | None:
+    """Why a co-moved package the text does not name is refused, or None when an updated package's
+    own entry pins it to exactly the version it lands on (an exact version, not a range)."""
+    specs = pins.get(mv.name.lower(), [])
+    if any(_is_exact_version(s) and _canon(s) == _canon(new) for _, s in specs):
+        return None
+    exact = [(namer, s) for namer, s in specs if _is_exact_version(s)]
+    if exact:
+        where = " or ".join(dict.fromkeys(s for _, s in exact))
+        return f"the diff moves {mv.name} to {new} in {mv.file}, but {exact[0][0]} pins it to {where}"
+    ranged = [(namer, s) for namer, s in specs if not _is_exact_version(s)]
+    if ranged:
+        where = " or ".join(dict.fromkeys(s for _, s in ranged))
+        return (f"the diff moves {mv.name} to {new} in {mv.file}, but {ranged[0][0]} pins it with the "
+                f"range {where} and not an exact version")
+    return (f"the diff moves {mv.name} from {old} to {new} in {mv.file}, which the title and body "
+            f"do not name")
+
+
 def _diff_verdict(found: tuple[Bump, ...], diff: str, up_to: str) -> str | None:
-    """Why the diff refuses the update, or None when every package it moves is named, moves to the
-    version the text names and within the level, from the same registry, and the diff adds no install
-    script."""
+    """Why the diff refuses the update, or None when every package it moves is named or a pinned
+    co-move, moves to the version named or pinned and within the level, from the same registry, and
+    the diff adds no install script."""
     named = {b.name.lower() for b in found}
     named_new: dict[str, set] = {}
     for b in found:
         named_new.setdefault(b.name.lower(), set()).add(_canon(b.new))
+    pins = _pinned_comoves(diff, named)
     for mv in moves(diff):
         old = clean_version(mv.old) if mv.old is not None else None
         new = clean_version(mv.new) if mv.new is not None else None
@@ -381,8 +467,15 @@ def _diff_verdict(found: tuple[Bump, ...], diff: str, up_to: str) -> str | None:
         if mv.new is None:
             return f"the diff removes {mv.name} from {mv.file}"
         if mv.name.lower() not in named:
-            return (f"the diff moves {mv.name} from {old} to {new} in {mv.file}, which the title and body "
-                    f"do not name")
+            why = _comove_refusal(mv, old, new, pins)
+            if why:
+                return why
+            lv = level(old, new)
+            if lv is None:
+                return f"the move of {mv.name} from {old} to {new} in {mv.file} cannot be read"
+            if LEVELS.index(lv) > LEVELS.index(up_to):
+                return f"{lv} move in {mv.file}: {mv.name} {old} to {new} (allowed up to {up_to})"
+            continue
         lv = level(old, new)
         if lv is None:
             return f"the move of {mv.name} from {old} to {new} in {mv.file} cannot be read"
