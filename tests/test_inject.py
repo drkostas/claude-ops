@@ -381,3 +381,40 @@ def test_inject_reads_the_screen_and_sends_under_one_hold(tmp_path, monkeypatch)
                       screen=lambda t, m: read.append(m) or EMPTY(t, m),
                       send=lambda m, t, e: sent.append(m) or (True, ""))
     assert r["result"] == "sent" and read == ["S3"] and sent == ["S3"]
+
+
+def test_another_thread_of_the_same_process_waits_for_the_line():
+    """A hold nests only in the thread that took it. A second thread sending to the same chat waits
+    until the first lets go, then gets the line, and gives up when the wait runs out first."""
+    import threading
+    import time as _t
+    first_in, release = threading.Event(), threading.Event()
+    got = {}
+
+    def first():
+        with inject.input_lock("claude-a", wait=1) as held:
+            got["first"] = held
+            first_in.set()
+            release.wait(5)
+
+    t1 = threading.Thread(target=first)
+    t1.start()
+    assert first_in.wait(5)
+    with inject.input_lock("claude-a", wait=0.2) as held:
+        assert held is False, "a second thread does not pass through the first thread's hold"
+
+    def second():
+        start = _t.monotonic()
+        with inject.input_lock("claude-a", wait=5) as held:
+            got["second"] = (held, _t.monotonic() - start)
+
+    t2 = threading.Thread(target=second)
+    t2.start()
+    _t.sleep(0.4)
+    assert "second" not in got, "the second thread is still waiting while the first holds the line"
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    assert got["first"] is True
+    held, waited = got["second"]
+    assert held is True and waited >= 0.3

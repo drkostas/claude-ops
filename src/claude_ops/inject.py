@@ -167,7 +167,8 @@ def resolve(target: str, live: dict, transport: str) -> str:
     return ""
 
 
-_held: dict[str, tuple[int, int]] = {}
+#: the holds this process has, by (thread, target): a hold nests only inside the thread that took it
+_held: dict[tuple[int, str], tuple[int, int]] = {}
 _held_guard = threading.Lock()
 
 
@@ -185,8 +186,10 @@ def input_lock(target: str, *, wait: float | None = None) -> Iterator[bool]:
     around the screen check as well, so the line you found empty is still empty when you paste: a
     second sender queued behind the lock pastes after the first message's Enter, when the chat is
     already at work. The lock is an `flock` on a file under LOCKS, so it ends with the process that
-    held it, and it may be taken again inside the same process (nested holds count)."""
-    key = target
+    held it. The thread that holds it may take it again (nested holds count). Another thread of the same
+process opens its own descriptor, and an flock on a second open file conflicts with the first even
+inside one process, so that thread waits like any other sender."""
+    key = (threading.get_ident(), target)
     with _held_guard:
         if key in _held:
             fd, n = _held[key]
