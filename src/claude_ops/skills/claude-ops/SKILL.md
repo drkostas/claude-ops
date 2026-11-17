@@ -488,7 +488,8 @@ When a chat waits for a pull request's workflow run before merging it, it runs `
 <run> --pr <number> --budget <minutes>` instead of writing its own loop. It waits on a deadline, re-runs
 only a job its runner lost before the first step (`--rerun-starved N`, after `--gate` passed twice),
 never a job that failed in its own code, merges pinned to the run's head, and with `--serving` waits
-until what the service runs holds the merge commit. Read its exit code: 0 done, 2 a deadline passed,
+until what the service runs holds the merge commit (only where every merge deploys, since a deploy job a
+`paths` filter skips never shows it and the run ends with 7). Read its exit code: 0 done, 2 a deadline passed,
 3 a real failure or no re-run left, 4 a refusal or a re-run that did not start, 5 not open or not on
 the head, 7 not deployed in time, 8 the head moved.
 

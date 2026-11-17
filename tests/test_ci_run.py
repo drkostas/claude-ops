@@ -294,3 +294,14 @@ def test_a_gate_that_stays_shut_spends_no_run():
                          budget_s=600)
     assert code == 2 and "gate stayed shut" in why and "wants 6" in why
     assert gh.reruns == [] and any("the gate holds the re-run" in s for s in said)
+
+
+def test_the_merge_is_said_once():
+    clock = Clock()
+    code, why, said = go(FakeGh({1: [GREEN]}, clock=clock), clock)
+    assert code == 0 and why.startswith("merged ") and not any(s.startswith("merged ") for s in said)
+
+    clock = Clock()
+    code, why, said = go(FakeGh({1: [GREEN]}, clock=clock), clock, serving="./deployed.sh",
+                         sh=lambda c: (0, f"image registry/app:{MERGED[:8]}"))
+    assert code == 0 and [s for s in said if s.startswith("merged ")] == [f"merged {HEAD[:12]} as {MERGED[:12]} (merge)"]

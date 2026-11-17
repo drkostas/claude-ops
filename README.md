@@ -141,7 +141,8 @@ it must pass twice, `--gate-gap` seconds apart (45), before a new attempt is spe
 When every job passed, the pull request is merged as `claude-ops merge` merges it, pinned to the head
 the run was on. `--serving` is a command that prints what the service runs (an image tag, a version
 endpoint), and the command waits until that output holds the merge commit, as a hexadecimal word of
-at least seven characters. Exit codes: 0 done, 2 a deadline passed, 3 a job failed in its own code or
+at least seven characters. Give it only where every merge deploys: a workflow that skips its deploy job
+when no deployed file changed never shows the merge commit, so the run ends with 7. Exit codes: 0 done, 2 a deadline passed, 3 a job failed in its own code or
 no re-run is allowed, 4 gh refused something or a re-run did not start, 5 the pull request is not
 open or the run is not on its head, 7 the service did not show the merge commit in time, 8 the head
 moved while it waited.
