@@ -951,6 +951,16 @@ def test_an_expired_login_is_a_login_stop_and_nothing_else_is(tmp_path):
     assert cu.stopped_on_login_error(None) is None
 
 
+def test_a_login_error_older_than_since_is_no_answer(tmp_path):
+    login = _write(tmp_path / "l.jsonl", {"type": "user"}, _err("Login expired · Please run /login",
+                                                              error="authentication_failed"))
+    utc = dt.timezone.utc
+    assert cu.stopped_on_login_error(login, since=dt.datetime(2026, 10, 16, 19, 0, tzinfo=utc)) is None, \
+        "the session restarted after the error and read its login afresh"
+    assert cu.stopped_on_login_error(login, since=dt.datetime(2026, 10, 16, 18, 0, tzinfo=utc))["uuid"] == "E1"
+    assert cu.stopped_on_login_error(login, since=None)["uuid"] == "E1"
+
+
 def test_a_403_from_a_gateway_is_not_a_lost_login(tmp_path):
     # Claude Code files a 403 under authentication_failed and prefixes "Please run /login" even when
     # the 403 came from a proxy in front of the API (an HTML challenge page, a dropped socket), not

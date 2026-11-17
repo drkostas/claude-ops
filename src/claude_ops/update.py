@@ -1458,16 +1458,31 @@ def stopped_on_api_error(path: Path | None, scan: int = 2000) -> dict | None:
     return err
 
 
-def stopped_on_login_error(path: Path | None, scan: int = 2000) -> dict | None:
+def stopped_on_login_error(path: Path | None, scan: int = 2000, *,
+                           since: dt.datetime | None = None) -> dict | None:
     """The login error a conversation stopped on ("Login expired · Please run /login"), or None.
 
     A session whose login expired or was revoked ends every turn this way and answers nothing until
     it is signed in again, and a running session does not read a login put back after it signed
     itself out: it needs a restart. Answers newest_api_error's record when its kind is
     authentication_failed, except a 403 from in front of the API (gateway_refused), which passes by
-    itself. login_lost reads the same from a screen; this needs no terminal."""
+    itself. login_lost reads the same from a screen; this needs no terminal.
+
+    A restart resumes the same conversation, so its old login error stays in the transcript for ever
+    when nothing newer was said. `since` (a timezone-aware time, such as when the session's process
+    started) makes an error recorded before it no answer: the session has read the login afresh
+    since. An error whose time cannot be read counts, because it cannot be shown to be old."""
     err = newest_api_error(path, scan)
-    return err if err and err["error"] == "authentication_failed" and not gateway_refused(err) else None
+    if not err or err["error"] != "authentication_failed" or gateway_refused(err):
+        return None
+    if since is not None:
+        try:
+            at = dt.datetime.fromisoformat(str(err.get("at")).replace("Z", "+00:00"))
+        except ValueError:
+            return err
+        if at.tzinfo is not None and at < since:
+            return None
+    return err
 
 
 def continue_after_error(err: dict | None, answered: str | None, told: int, *,
