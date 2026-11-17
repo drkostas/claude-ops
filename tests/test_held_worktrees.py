@@ -101,6 +101,65 @@ def test_main_refuses_with_its_signature_and_fails_open(place, monkeypatch, caps
     assert os.path.isdir(holders)
 
 
+@pytest.mark.parametrize("command", [
+    "git commit -m 'a fix on top'",
+    "git commit -am 'a fix on top'",
+    "git commit --amend --no-edit",
+    "git rebase origin/main",
+])
+def test_with_commits_refused_a_plain_commit_is_refused_like_a_rewrite(place, command):
+    held_wt, free_wt, holders, proc = place
+    why = hw.check({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(held_wt)},
+                   hw.held(str(holders)), commits="refuse")
+    assert why and str(proc.pid) in why and str(held_wt) in why
+    assert hw.check({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(free_wt)},
+                    hw.held(str(holders)), commits="refuse") is None
+
+
+@pytest.mark.parametrize("command", ["git status", "git log --oneline -3", "git fetch origin", "git stash list"])
+def test_with_commits_refused_reads_still_go_through(place, command):
+    held_wt, _free, holders, _proc = place
+    assert hw.check({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(held_wt)},
+                    hw.held(str(holders)), commits="refuse") is None
+
+
+def test_the_commits_setting_from_flags_and_from_a_file(tmp_path, monkeypatch):
+    assert hw.options(["--holders", "/x/h"]) == ("/x/h", "", "allow")
+    assert hw.options(["--holders", "/x/h", "--commits", "refuse"]) == ("/x/h", "", "refuse")
+    f = tmp_path / "held.json"
+    for value, want in (("refuse", "refuse"), (" Refuse ", "refuse"), ("allow", "allow"), ("never", "allow"),
+                        (None, "allow")):
+        f.write_text(json.dumps({"holders": "/y/h", "message": "ship again", "commits": value}))
+        assert hw.options(["--config", str(f)]) == ("/y/h", "ship again", want)
+        assert hw.config(["--config", str(f)]) == ("/y/h", "ship again")
+    f.write_text(json.dumps({"holders": "/y/h", "commits": "refuse"}))
+    assert hw.options(["--config", str(f), "--commits", "allow"]) == ("/y/h", "", "allow")
+    f.write_text(json.dumps(["not", "an", "object"]))
+    assert hw.options(["--config", str(f)]) == (None, "", "allow")
+    monkeypatch.setenv("CLAUDE_OPS_HELD_WORKTREES_CONFIG", str(tmp_path / "missing.json"))
+    assert hw.options([]) == (None, "", "allow")
+
+
+def test_main_with_commits_refused_leaves_out_the_commit_on_top_sentence(place, monkeypatch, capsys):
+    held_wt, _free, holders, proc = place
+    f = held_wt.parent / "held.json"
+    f.write_text(json.dumps({"holders": str(holders), "message": "Stop the ship first.", "commits": "refuse"}))
+    for command in ("git commit -m 'a fix on top'", "git rebase main"):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(held_wt)})))
+        assert hw.main(["--config", str(f)]) == 2
+        err = capsys.readouterr().err
+        assert err.startswith("Blocked:") and str(proc.pid) in err and "Stop the ship first." in err
+        assert hw.COMMIT_ON_TOP not in err and "stays on the branch" not in err
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "git commit -m 'a fix on top'"}, "cwd": str(held_wt)})))
+    assert hw.main(["--holders", str(holders)]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": "git rebase main"}, "cwd": str(held_wt)})))
+    assert hw.main(["--holders", str(holders)]) == 2
+    assert hw.COMMIT_ON_TOP in capsys.readouterr().err
+
+
 def started_of(pid):
     return subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
 
