@@ -48,7 +48,8 @@ A JOB MAY SAY WHAT IT NEEDS. The gate's HEAVY_MIN_FREE_GB (6) is room for a job 
 small job waited behind it on a machine with plenty of room for that job. A job that knows its size
 declares it with --need-gb <GB> or HEAVY_NEED_GB, held between NEED_FLOOR_GB (0.5) and HEAVY_MAX_GB, and
 the gate then asks that much free memory instead. A job that declares nothing asks HEAVY_MIN_FREE_GB as
-before. A declaration is not taken on trust. Each job is sampled as it runs, and a peak more than
+before, and when memory holds it, its first waiting line about memory and its hour note say how to declare
+a need, with the peak of the last run of its name that exited 0. A declaration is not taken on trust. Each job is sampled as it runs, and a peak more than
 NEED_SLACK (a quarter) over the need is one line, and it is kept for that job name in HEAVY_DIR/peaks.
 The next run of that name asks the larger of its need and that peak, until a run stays within its need
 again. Declared needs add up against free memory as every job does: a waiter beside a job past its turn
@@ -475,13 +476,42 @@ def judge_need(chat: str, what: str, need: float | None, peak: float) -> str | N
     return None
 
 
+#: what a job held for memory that declared no need is told. It asks MIN_FREE_GB, the amount for a job nobody
+#: measured, which a small job may not see free for hours on a busy machine
+NEED_HINT = ("A job that needs less memory can say so with --need-gb <GB> or HEAVY_NEED_GB, and then waits only "
+             "until that much is free")
+
+
+def need_words(last_gb: float | None = None) -> str:
+    """Pure. NEED_HINT, and with `last_gb` (last_peak) the peak of the last run of the same name that exited 0."""
+    if last_gb is None:
+        return NEED_HINT
+    return NEED_HINT + f" (its last run under this name that exited 0 peaked at {last_gb:g} GB)"
+
+
+def last_peak(what: str, records: list[dict] | None = None) -> float | None:
+    """The peak, in GB, of the newest run of `what` that exited 0 among `records` (done_jobs() when not given),
+    or None when there is no such run with a peak above 0. A failed run is left out, since it may have ended
+    before it took what it needs."""
+    runs = [r for r in (done_jobs() if records is None else records) if str(r.get("what")) == what]
+    for r in sorted(runs, key=lambda r: float(r["end"]), reverse=True):
+        try:
+            rc, peak = int(r.get("rc", 1)), float(r.get("peak_gb") or 0)
+        except (TypeError, ValueError):
+            continue
+        if rc == 0 and peak > 0:
+            return peak
+    return None
+
+
 def held_note(why: str, kinds: set[str], minutes: float, most_free: float, ask_gb: float | None = None,
-              declared: tuple[str, str] | None = None, cause: str = "") -> str:
+              declared: tuple[str, str] | None = None, cause: str = "", last_gb: float | None = None) -> str:
     """What a waiter says once its gate has held it for OWN_LIMIT_NOTE_MIN: for how long, what holds it in the
     gate's own words, whether that is a limit set in the job's own environment or the machine, and what would
     let it start. `ask_gb` is the free memory the job asks (MIN_FREE_GB when not given), and `declared` is
     where its declared need came from and its words, ("--need-gb", "--need-gb 2") say, when it declared one:
-    its memory limit is then that need and not HEAVY_MIN_FREE_GB. `cause` (cause_if_memory) follows the gate's words."""
+    its memory limit is then that need and not HEAVY_MIN_FREE_GB. `cause` (cause_if_memory) follows the gate's words.
+    A job held for memory with no declared need is told how to declare one (need_words, with `last_gb`)."""
     own: list[tuple[str, str]] = []
     for k in sorted(kinds):
         if k == "memory" and declared:
@@ -499,7 +529,10 @@ def held_note(why: str, kinds: set[str], minutes: float, most_free: float, ask_g
         return note + f". Lower {' or '.join(name for name, _words in own)} to what the job needs, or stop the job"
     needs = {"memory": "free memory", "pressure": "free memory", "swap": "free disk", "disk": "free disk"}
     room = " and ".join(dict.fromkeys(needs[k] for k in sorted(kinds) if k in needs)) or "room"
-    return note + f". It starts when the machine has more {room}, or stop the job"
+    note += f". It starts when the machine has more {room}, or stop the job"
+    if "memory" in kinds and not declared:
+        note += ". " + need_words(last_gb)
+    return note
 
 
 def alive(pid: int) -> bool:
@@ -838,6 +871,16 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
     # the most memory it saw free, says them once after OWN_LIMIT_NOTE_MIN, and status shows them
     # beside it. A moment with room starts the count again.
     held_since, most_free, noted, kinds = None, 0.0, False, set()
+    # A job with no declared need that memory holds is told how to declare one (need_words), once in its waiting
+    # lines and again in its held note, with the peak of the last run of its name that exited 0, read when first said.
+    hinted = False
+    last: list[float | None] = []
+
+    def peak() -> float | None:
+        if not last:
+            last.append(last_peak(what))
+        return last[0]
+
     try:
         while True:
             if not alive(holder_pid):
@@ -860,7 +903,8 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
                 kinds |= {kind for kind, _words in held}
                 mins = (time.time() - held_since) / 60
                 if mins >= OWN_LIMIT_NOTE_MIN and not noted:
-                    say(held_note(why, kinds, mins, most_free, ask, declared, cause_if_memory(kinds)))
+                    say(held_note(why, kinds, mins, most_free, ask, declared, cause_if_memory(kinds),
+                                  peak() if need is None and "memory" in kinds else None))
                     noted = True
             else:
                 held_since, most_free, noted, kinds = None, 0.0, False, set()
@@ -905,7 +949,12 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
             key = wait_key(held, why)
             if key != said:
                 # a new waiting line about memory names what holds it (read only then: top takes a second)
-                say(f"waiting, {why}{cause_if_memory(kind for kind, _words in held)}")
+                held_kinds = {kind for kind, _words in held}
+                line = f"waiting, {why}{cause_if_memory(held_kinds)}"
+                if need is None and "memory" in held_kinds and not hinted:
+                    line += ". " + need_words(peak())
+                    hinted = True
+                say(line)
                 said = key
             time.sleep(POLL if max_wait is None else max(0.0, min(POLL, began + max_wait - time.time())))
     finally:
