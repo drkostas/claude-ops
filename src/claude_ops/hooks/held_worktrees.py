@@ -203,7 +203,8 @@ def check(payload: dict, folders: dict[str, int], holders: str | None = None,
             live = [p for p in holding(holders).get(hit[0], [hit[1]]) if same_process(holders, p, started)]
             hit = (hit[0], live[0]) if live else None
         if hit:
-            return (f"`git {inv['sub']}{' --amend' if inv['sub'] == 'commit' else ''}` in {hit[0]}, "
+            amend = inv["sub"] == "commit" and "--amend" in inv["args"]
+            return (f"`git {inv['sub']}{' --amend' if amend else ''}` in {hit[0]}, "
                     f"which process {hit[1]} holds")
     return None
 
