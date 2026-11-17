@@ -116,6 +116,20 @@ def test_with_commits_refused_a_plain_commit_is_refused_like_a_rewrite(place, co
                     hw.held(str(holders)), commits="refuse") is None
 
 
+@pytest.mark.parametrize("command, named", [
+    ("git commit -m 'a fix on top'", "`git commit` in"),
+    ("git commit -am 'a fix on top'", "`git commit` in"),
+    ("git commit --dry-run -m 'a fix on top'", "`git commit` in"),
+    ("git commit --amend --no-edit", "`git commit --amend` in"),
+    ("git rebase origin/main", "`git rebase` in"),
+])
+def test_a_refusal_names_the_command_as_it_was_given(place, command, named):
+    held_wt, _free, holders, _proc = place
+    why = hw.check({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(held_wt)},
+                   hw.held(str(holders)), commits="refuse")
+    assert why.startswith(named)
+
+
 @pytest.mark.parametrize("command", ["git status", "git log --oneline -3", "git fetch origin", "git stash list"])
 def test_with_commits_refused_reads_still_go_through(place, command):
     held_wt, _free, holders, _proc = place
