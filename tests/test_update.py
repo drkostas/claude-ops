@@ -961,6 +961,33 @@ def test_a_login_error_older_than_since_is_no_answer(tmp_path):
     assert cu.stopped_on_login_error(login, since=None)["uuid"] == "E1"
 
 
+def test_remote_control_active_after_a_lost_login_means_signed_in_again(tmp_path):
+    ended = "Login reached its time limit · Please run /login"
+    active = {"type": "system", "subtype": "bridge_status", "uuid": "S1",
+              "content": "/remote-control is active · Continue here, on your phone, or at https://example.org/x"}
+    stopped = _write(tmp_path / "s.jsonl", {"type": "user"}, _err(ended, error="authentication_failed"))
+    assert cu.stopped_on_login_error(stopped)["text"] == ended
+    # the bridge started after the error, so the login works again and the session only had no new turn
+    back = _write(tmp_path / "b.jsonl", {"type": "user"}, _err(ended, error="authentication_failed"),
+                  {"type": "system", "subtype": "local_command", "content": "<command-name>/remote-control"},
+                  active)
+    assert cu.stopped_on_login_error(back) is None
+    # an active bridge from before the error does not clear it
+    before = _write(tmp_path / "e.jsonl", active, {"type": "user"}, _err(ended, error="authentication_failed"))
+    assert cu.stopped_on_login_error(before)["text"] == ended
+    # a lost bridge after the error does not clear it either
+    gone = _write(tmp_path / "g.jsonl", _err(ended, error="authentication_failed"),
+                  {"type": "system", "content": "Remote Control disconnected"})
+    assert cu.stopped_on_login_error(gone) is not None
+    # with no uuid on the error its place is unknown, so an active record cannot clear it
+    nouuid = _err(ended, error="authentication_failed")
+    nouuid.pop("uuid")
+    blind = _write(tmp_path / "n.jsonl", active, {"type": "user"}, nouuid)
+    assert cu.stopped_on_login_error(blind)["text"] == ended
+    after = _write(tmp_path / "m.jsonl", {"type": "user"}, nouuid, active)
+    assert cu.stopped_on_login_error(after)["text"] == ended
+
+
 def test_a_403_from_a_gateway_is_not_a_lost_login(tmp_path):
     # Claude Code files a 403 under authentication_failed and prefixes "Please run /login" even when
     # the 403 came from a proxy in front of the API (an HTML challenge page, a dropped socket), not
@@ -1230,6 +1257,10 @@ def test_login_lost_is_the_login_not_every_remote_control_drop():
     assert cu.login_lost("⏺ Unknown command: /remote-control\n❯ \n") is None
     # back on a working login, the loss above is history
     assert cu.login_lost(LOGGED_OUT + RC_BACK + "❯ \n") is None
+    # newer Claude Code versions word the same stop differently
+    ended = "⏺ Login reached its time limit · Please run /login"
+    assert cu.login_lost(ended + "\n❯ \n") == ended and cu.signed_out(ended + "\n❯ \n") == ended
+    assert cu.login_lost(ended + "\n" + RC_BACK + "❯ \n") is None
     assert cu.login_lost("all fine\n❯ \n") is None and cu.login_lost(None) is None
 
 
