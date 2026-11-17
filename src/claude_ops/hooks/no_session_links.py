@@ -57,7 +57,7 @@ from .commandline import (  # noqa: F401 - the parser's names stay importable fr
     GIT_PUBLISHING, GIT_TIMEOUT_S, HEREDOC, MAX_FILES, PATH_WORD, READ_LIMIT, REDIRECT, SEPARATORS,
     SHELLS, push_plans, pushed, unescape,
     WRAPPERS, Git, Row, add_plan, added_lines, change_dir, commit_lines, commit_plan, diff_rows,
-    expand, folder, git_invocations, hidden_commit, parse_git, read_note, recorded, simple_commands,
+    expand, folder, git_invocations, hidden_commit_dirs, parse_git, read_note, recorded, simple_commands,
     untracked_rows, unwrap, walk,
 )
 
@@ -266,12 +266,11 @@ def _why(payload: dict) -> str | tuple[str, str] | None:
                         read_note(path, cmd, cwd))
         if any(inv["sub"] == "commit" for inv in invs):
             hits = commit_content(cmd, cwd)
-        elif hidden_commit(cmd):
-            # the words do not show the commit (a quote in a comment, a wrapper program, a shell
-            # given a string), so what is staged and what -a would take are scanned anyway
-            hits = commit_content("git commit -a", cwd)
         else:
-            hits = []
+            # the words do not show the commit (a quote in a comment, a wrapper program, a shell
+            # given a string), so what is staged and what -a would take in the folder it runs in
+            # are scanned anyway
+            hits = [h for here in hidden_commit_dirs(cmd, cwd) for h in commit_content("git commit -a", here)]
         if hits:
             why, path, line = hits[0]
             where = UUID.sub(REDACTED, f"{path}:{line}" if line else path)

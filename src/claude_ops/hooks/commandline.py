@@ -61,6 +61,9 @@ WRAPPER_PROGRAMS = {
 }
 WRAPPERS = {"command", "exec", "nohup", "time", "builtin", "{", "}",
             "if", "elif", "then", "else", "while", "until", "do", "!"}
+#: rtk's subcommands that run the command after them unfiltered (`bypass` since rtk 1.1, `proxy`
+#: before it and still accepted)
+RTK_PASS_THROUGH = {"proxy", "bypass"}
 
 #: how long one git call may take, how much of a diff or a file is read, and how many files one
 #: `git add` is followed into
@@ -229,7 +232,7 @@ def unwrap(words: list[str]) -> list[str]:
             while i < len(words) and words[i].startswith("-"):
                 i += 2 if words[i] in ("-u", "--unset", "-C", "--chdir") else 1
         elif w == "rtk":
-            i += 2 if words[i + 1:i + 2] == ["proxy"] else 1
+            i += 2 if words[i + 1:i + 2] and words[i + 1] in RTK_PASS_THROUGH else 1
         elif os.path.basename(w) in WRAPPER_PROGRAMS:
             with_value, plain = WRAPPER_PROGRAMS[os.path.basename(w)]
             i += 1
@@ -1034,14 +1037,24 @@ def hidden_commit(command: str) -> bool:
     if not cmds:
         m = GIT_PUBLISHING.search(command)
         return bool(m and m.group(1) == "commit")
-    for words in cmds:
-        words = unwrap(words)
-        if not words:
-            continue
-        prog = os.path.basename(words[0])
-        rest = words[1:]
-        if prog != "git" and any(os.path.basename(w) == "git" for w in rest) and "commit" in rest:
-            return True
-        if prog in SHELLS and any(GIT_PUBLISHING.search(w) and "commit" in w for w in rest):
-            return True
-    return False
+    return any(_hides_commit(unwrap(words)) for words in cmds)
+
+
+def hidden_commit_dirs(command: str, cwd: str) -> list[str]:
+    """The folders the hidden commits of the line run in (see hidden_commit), each once: the folder
+    a `cd` earlier on the line left the shell in, or `cwd` when the line cannot be read as words."""
+    if not simple_commands(command):
+        return [cwd] if hidden_commit(command) else []
+    return list(dict.fromkeys(here for cmd, here in steps(command, cwd) if _hides_commit(cmd["words"])))
+
+
+def _hides_commit(words: list[str]) -> bool:
+    """Does this simple command, its wrappers already taken off, run a `git commit` its words do not
+    show (git behind a program that runs it, or a shell given a string)?"""
+    if not words:
+        return False
+    prog = os.path.basename(words[0])
+    rest = words[1:]
+    if prog != "git" and any(os.path.basename(w) == "git" for w in rest) and "commit" in rest:
+        return True
+    return prog in SHELLS and any(GIT_PUBLISHING.search(w) and "commit" in w for w in rest)

@@ -334,6 +334,17 @@ def test_the_repository_is_found_through_C_and_cd(repo, tmp_path, monkeypatch):
     assert nsl.check(bash("git -C ~/repo commit -m ok", tmp_path)) == expected
 
 
+def test_a_hidden_commit_is_scanned_in_the_folder_the_line_moved_to(repo, tmp_path):
+    (repo / "a.txt").write_text("one\n" + LINK + "\nthree\n")
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    git(clean, "init", "-q")
+    expected = "this commit would record a link to a Claude Code session in a.txt:2"
+    assert nsl.check(bash(f"cd {repo} && bash -c 'git commit -am ok'", clean)) == expected
+    assert nsl.check(bash(f"cd {repo} && rtk bypass git commit -am ok", clean)) == expected
+    assert nsl.check(bash(f"cd {clean} && bash -c 'git commit -am ok'", repo)) is None
+
+
 def test_outside_a_repository_or_in_a_missing_folder_the_call_goes_through(tmp_path):
     (tmp_path / "x.txt").write_text(LINK + "\n")
     assert nsl.check(bash("git commit -m ok", tmp_path)) is None

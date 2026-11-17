@@ -441,6 +441,26 @@ def test_wrappers_and_comments(cfg, public):
     assert pv.check(bash("git commit -qm ok  # don't forget\ngit status", public), cfg) is None
 
 
+def test_a_commit_behind_rtk_bypass_is_read_in_the_folder_the_line_moved_to(cfg, public, private):
+    # `rtk bypass` (named `rtk proxy` before rtk 1.1) runs the git after it unfiltered, so that commit
+    # is read like any other, in the repository the leading cd names, not the session's folder
+    assert pv.check(bash("rtk bypass git commit -m zorblax", public), cfg) == "'zorblax' in the commit message"
+    assert pv.check(bash(f"cd {private} && git add a.txt && rtk bypass git commit -m zorblax", public), cfg) is None
+    assert pv.check(bash(f"cd {public} && git add a.txt && rtk bypass git commit -m zorblax", private), cfg) == \
+        "'zorblax' in the commit message"
+
+
+def test_a_hidden_commit_is_read_in_the_folder_the_line_moved_to(cfg, public, private):
+    assert pv.check(bash(f"cd {private} && bash -c 'git commit -m zorblax'", public), cfg) is None
+    assert pv.check(bash(f"cd {public} && bash -c 'git commit -m zorblax'", private), cfg).startswith(
+        "'zorblax' in the command, which publishes to a public repository")
+    (public / "a.txt").write_text("one\ntwo\nzorblax\n")
+    (private / "a.txt").write_text("one\ntwo\nzorblax\n")
+    assert pv.check(bash(f"cd {private} && sh -c 'git commit -qam ok'", public), cfg) is None
+    assert pv.check(bash(f"cd {public} && sh -c 'git commit -qam ok'", private), cfg) == \
+        "'zorblax' in a.txt:3, which this commit would record"
+
+
 def test_the_command_is_read_when_a_part_of_it_cannot_be(cfg, public):
     got = pv.check(bash('MSG="for zorblax"; git commit -m "$MSG"', public), cfg)
     assert got.startswith("'zorblax' in the command, which publishes to a public repository")
