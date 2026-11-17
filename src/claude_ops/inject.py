@@ -15,20 +15,27 @@ next prompt counts as empty) answers "not-ready" and sends nothing, so a watcher
 
 Every attempt is written to an append-only log BEFORE sending, and the delivery result after, as a
 second line with the same correlation id. A crash in between leaves an attempt with no result,
-which is honest. This is a record, not a lock: anything running as your user can type into a
+which is honest. The log is a record, not a lock: anything running as your user can type into a
 terminal without going through here.
+
+Senders that do go through here take turns on each chat's input line (`input_lock`). A paste and its
+Enter are two steps, and a second sender's paste landing between them joins the first message: a
+`/compact` pasted there arrived as plain words at the end of another message, and nothing compacted.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +45,10 @@ NOT_READY = 5
 LOG = Path(os.environ.get("CLAUDE_OPS_INJECT_LOG", Path.home() / ".local" / "state" / "claude-ops" / "inject.jsonl"))
 TMUX = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
 OSASCRIPT = "/usr/bin/osascript"
+#: one lock file per chat, shared by every process that sends through this module
+LOCKS = Path(os.environ.get("CLAUDE_OPS_INPUT_LOCKS", Path.home() / ".local" / "state" / "claude-ops" / "input-locks"))
+#: how long a send waits for another sender to finish with the same chat before it gives up
+LOCK_WAIT = 30.0
 
 # The text is an argument, never part of the script, so quotes and backslashes need no escaping.
 #
@@ -156,11 +167,89 @@ def resolve(target: str, live: dict, transport: str) -> str:
     return ""
 
 
+#: the holds this process has, by (thread, target): a hold nests only inside the thread that took it
+_held: dict[tuple[int, str], tuple[int, int]] = {}
+_held_guard = threading.Lock()
+
+
+def _lock_path(target: str) -> Path:
+    return LOCKS / (re.sub(r"[^A-Za-z0-9_.-]", "_", target) or "_")
+
+
+@contextmanager
+def input_lock(target: str, *, wait: float | None = None) -> Iterator[bool]:
+    """Hold one chat's input line while you read its screen and send, so no other sender types into
+    it in between. Yields True once held, or False when another process still held it after `wait`
+    seconds (LOCK_WAIT by default); with False, send nothing and try again later.
+
+    `send_tmux` and `send_iterm` take it themselves around the paste and its Enter. Take it yourself
+    around the screen check as well, so the line you found empty is still empty when you paste: a
+    second sender queued behind the lock pastes after the first message's Enter, when the chat is
+    already at work. The lock is an `flock` on a file under LOCKS, so it ends with the process that
+    held it. The thread that holds it may take it again (nested holds count). Another thread of the same
+process opens its own descriptor, and an flock on a second open file conflicts with the first even
+inside one process, so that thread waits like any other sender."""
+    key = (threading.get_ident(), target)
+    with _held_guard:
+        if key in _held:
+            fd, n = _held[key]
+            _held[key] = (fd, n + 1)
+            nested = True
+        else:
+            nested = False
+    if nested:
+        try:
+            yield True
+        finally:
+            with _held_guard:
+                fd, n = _held[key]
+                _held[key] = (fd, n - 1)
+        return
+    path = _lock_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + (LOCK_WAIT if wait is None else wait)
+    got = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+        if not got:
+            yield False
+            return
+        with _held_guard:
+            _held[key] = (fd, 1)
+        try:
+            yield True
+        finally:
+            with _held_guard:
+                _held.pop(key, None)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+HELD = "another sender is still typing into this chat"
+
+
 def bracketed(text: str) -> str:
     return f"\x1b[200~{text}\x1b[201~" if "\n" in text else text
 
 
 def send_iterm(session_id: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
+    with input_lock(session_id) as held:
+        if not held:
+            return False, HELD
+        return _send_iterm(session_id, text, enter, env=env)
+
+
+def _send_iterm(session_id: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     r = subprocess.run([OSASCRIPT, "-", session_id, bracketed(text), "1" if enter else "0"],
                        input=ITERM_SEND, capture_output=True, text=True, env=env)
     ok = r.returncode == 0 and r.stdout.strip() == "sent"
@@ -168,6 +257,13 @@ def send_iterm(session_id: str, text: str, enter: bool, *, env: Mapping[str, str
 
 
 def send_tmux(name: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
+    with input_lock(name) as held:
+        if not held:
+            return False, HELD
+        return _send_tmux(name, text, enter, env=env)
+
+
+def _send_tmux(name: str, text: str, enter: bool, *, env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     buf = f"claude-ops-{uuid.uuid4().hex[:10]}"
     # load-buffer reads the text from stdin: set-buffer takes it as one command argument, and tmux
     # refuses a command longer than about 16 KB ("command too long"), so a long message never arrived
@@ -243,25 +339,30 @@ def inject(target: str, text: str, *, transport: str = "iterm", enter: bool = Tr
         return {"result": "no-session", "target": target, "open": sorted(v.get("name", k) for k, v in live.items())}
     if not force and not looks_like_claude(transport, live[matched]):
         return {"result": "not-claude", "target": target, "session": live[matched]}
-    if not force:
-        from . import update  # noqa: PLC0415 - update imports this module
-        read = screen or (lambda t, m: update.screen_of(t, m, env=env))
-        ok, why = update.empty_prompt(read(transport, matched))
-        if not ok:
-            return {"result": "not-ready", "target": target, "session": matched, "why": why}
-    corr = uuid.uuid4().hex
-    entry = {"at": datetime.now(timezone.utc).isoformat(), "correlation": corr, "event": "attempt",
-             "transport": transport, "target": target, "session": matched, "name": live[matched].get("name"),
-             "bytes": len(text.encode()), "sha256": hashlib.sha256(text.encode()).hexdigest(), "enter": enter,
-             "caller_pid": os.getpid(), "caller_ppid": os.getppid()}
-    if keep_text:
-        entry["text"] = text
-    _log(entry, log)
-    if send is None:
-        base = send_iterm if transport == "iterm" else send_tmux
-        send = lambda m, t, e: base(m, t, e, env=env)
-    ok, detail = send(matched, text, enter)
-    _log({"at": datetime.now(timezone.utc).isoformat(), "correlation": corr, "event": "delivered" if ok else "failed",
-          "detail": detail}, log)
-    return {"result": "sent" if ok else "failed", "session": matched, "name": live[matched].get("name"),
-            "correlation": corr, "detail": detail}
+    # the screen check and the send happen under one hold of the chat's input line, so the empty line
+    # read here is still empty when the paste arrives
+    with input_lock(matched) as held:
+        if not held:
+            return {"result": "not-ready", "target": target, "session": matched, "why": HELD}
+        if not force:
+            from . import update  # noqa: PLC0415 - update imports this module
+            read = screen or (lambda t, m: update.screen_of(t, m, env=env))
+            ok, why = update.empty_prompt(read(transport, matched))
+            if not ok:
+                return {"result": "not-ready", "target": target, "session": matched, "why": why}
+        corr = uuid.uuid4().hex
+        entry = {"at": datetime.now(timezone.utc).isoformat(), "correlation": corr, "event": "attempt",
+                 "transport": transport, "target": target, "session": matched, "name": live[matched].get("name"),
+                 "bytes": len(text.encode()), "sha256": hashlib.sha256(text.encode()).hexdigest(), "enter": enter,
+                 "caller_pid": os.getpid(), "caller_ppid": os.getppid()}
+        if keep_text:
+            entry["text"] = text
+        _log(entry, log)
+        if send is None:
+            base = send_iterm if transport == "iterm" else send_tmux
+            send = lambda m, t, e: base(m, t, e, env=env)
+        ok, detail = send(matched, text, enter)
+        _log({"at": datetime.now(timezone.utc).isoformat(), "correlation": corr, "event": "delivered" if ok else "failed",
+              "detail": detail}, log)
+        return {"result": "sent" if ok else "failed", "session": matched, "name": live[matched].get("name"),
+                "correlation": corr, "detail": detail}
