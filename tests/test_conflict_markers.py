@@ -155,6 +155,17 @@ def test_a_hidden_commit_reads_the_folder_the_line_moved_to(repo, tmp_path):
     assert cm.check(bash(f"cd {clean} && bash -c 'git commit -m x'", repo)) is None
 
 
+def test_a_cd_inside_a_shell_string_counts_and_a_doubt_reads_both(repo, tmp_path):
+    conflicted(repo)
+    git(repo, "add", "a.txt")
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    git(clean, "init", "-q")
+    assert "a.txt:2" in cm.check(bash(f"cd {clean} && bash -c 'cd {repo} && git commit -m x'", clean))
+    assert cm.check(bash(f"cd {repo} && bash -c 'cd {clean} && git commit -m x'", repo)) is None
+    assert "a.txt:2" in cm.check(bash(f"cd {clean} && bash -c \"git commit -m 'x\"", repo))
+
+
 def test_other_tools_and_a_broken_payload_go_through(repo):
     assert cm.check({"tool_name": "Write", "tool_input": {"file_path": str(repo / "a.txt"), "content": OURS},
                      "cwd": str(repo)}) is None

@@ -461,6 +461,25 @@ def test_a_hidden_commit_is_read_in_the_folder_the_line_moved_to(cfg, public, pr
         "'zorblax' in a.txt:3, which this commit would record"
 
 
+def test_a_cd_inside_a_shell_string_counts(cfg, public, private):
+    # the string's own steps are read from the folder the outer cd left, so its cd decides
+    assert pv.check(bash(f"cd {private} && bash -c 'cd {public} && git commit -m zorblax'", private), cfg) \
+        is not None
+    assert pv.check(bash(f"cd {public} && bash -c 'cd {private} && git commit -m zorblax'", public), cfg) is None
+    assert pv.check(bash(f"cd {private} && sh -lc 'cd {public}; git commit -m zorblax'", private), cfg) is not None
+    (public / "a.txt").write_text("one\ntwo\nzorblax\n")
+    assert pv.check(bash(f"cd {private} && bash -c 'cd {public} && git commit -qam ok'", private), cfg) == \
+        "'zorblax' in a.txt:3, which this commit would record"
+
+
+def test_a_shell_string_that_cannot_be_read_is_read_in_both_folders(cfg, public, private):
+    # an unclosed quote inside the string: the commit may run where the outer cd left the shell or
+    # where the line started, so a term in a public one of the two is refused
+    assert pv.check(bash(f"cd {private} && bash -c \"git commit -m 'zorblax\"", public), cfg) is not None
+    assert pv.check(bash(f"cd {public} && bash -c \"git commit -m 'zorblax\"", private), cfg) is not None
+    assert pv.check(bash(f"cd {private} && bash -c \"git commit -m 'zorblax\"", private), cfg) is None
+
+
 def test_the_command_is_read_when_a_part_of_it_cannot_be(cfg, public):
     got = pv.check(bash('MSG="for zorblax"; git commit -m "$MSG"', public), cfg)
     assert got.startswith("'zorblax' in the command, which publishes to a public repository")

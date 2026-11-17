@@ -1040,12 +1040,41 @@ def hidden_commit(command: str) -> bool:
     return any(_hides_commit(unwrap(words)) for words in cmds)
 
 
-def hidden_commit_dirs(command: str, cwd: str) -> list[str]:
+def hidden_commit_dirs(command: str, cwd: str, start: str | None = None) -> list[str]:
     """The folders the hidden commits of the line run in (see hidden_commit), each once: the folder
-    a `cd` earlier on the line left the shell in, or `cwd` when the line cannot be read as words."""
+    a `cd` earlier on the line left the shell in. A shell given a string (`bash -c`, `sh -c`, `eval`)
+    is read from that folder, so a `cd` inside the string counts too. A line or a string that cannot
+    be read as words gives both the folder it runs in and `start` (the folder the whole line starts
+    in, `cwd` by default), so a doubt is read in each place the commit may be."""
+    start = start or cwd
     if not simple_commands(command):
-        return [cwd] if hidden_commit(command) else []
-    return list(dict.fromkeys(here for cmd, here in steps(command, cwd) if _hides_commit(cmd["words"])))
+        return list(dict.fromkeys([cwd, start])) if hidden_commit(command) else []
+    dirs: list[str] = []
+    for cmd, here in steps(command, cwd):
+        words = cmd["words"]
+        if not _hides_commit(words):
+            continue
+        inner = shell_string(words)
+        if inner is None:
+            dirs.append(here)
+            continue
+        found = [inv["dir"] for inv in git_invocations(inner, here) if inv["sub"] == "commit"]
+        found += hidden_commit_dirs(inner, here, start)
+        dirs += found or [here]
+    return list(dict.fromkeys(dirs))
+
+
+def shell_string(words: list[str]) -> str | None:
+    """The command line a shell runs from a string (`bash -c '<line>'`, `sh -lc '<line>'`,
+    `eval <words>`), or None when these words give it none."""
+    prog = os.path.basename(words[0]) if words else ""
+    if prog == "eval":
+        return " ".join(words[1:])
+    if prog in ("bash", "sh", "zsh", "dash", "ksh"):
+        for i, w in enumerate(words[1:-1], 1):
+            if w.startswith("-") and not w.startswith("--") and "c" in w[1:]:
+                return words[i + 1]
+    return None
 
 
 def _hides_commit(words: list[str]) -> bool:
