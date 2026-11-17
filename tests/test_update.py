@@ -1043,6 +1043,13 @@ def test_a_question_is_unreachable_only_when_signed_out_and_nobody_is_there():
     assert not cu.question_unreachable(ASKING_SCREEN, 3600), "a phone still reaches it"
 
 
+def test_a_signed_out_screen_with_no_question_open_is_not_an_unreachable_question():
+    assert not cu.question_unreachable(LOGGED_OUT + "❯ ", 3600), "nothing is asked, so nothing is stuck"
+    assert not cu.question_unreachable(RC_GONE + "❯ ", 3600)
+    assert cu.question_unreachable(LOGGED_OUT + ASKING_SCREEN, 3600), "an open question is still found"
+    assert not cu.question_unreachable("work\n❯ ", 3600), "a good login stays false"
+
+
 def test_ready_lets_an_unreachable_question_go_and_nothing_else(tmp_path, monkeypatch):
     projects, _ = _chat_dir(tmp_path)
     monkeypatch.setattr(cu, "last_activity", lambda p: ago(900))
