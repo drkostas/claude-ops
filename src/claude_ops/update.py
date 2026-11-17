@@ -894,8 +894,8 @@ def held_pastes(screen: str | None) -> list[int] | None:
 #: what a session's screen says when it lost its login, or its Remote Control with it: how such
 #: a line starts, after the bullet Claude Code draws. The same words further in a line are a
 #: conversation about the outage, or a command that searched for them, and do not count
-SIGNED_OUT = ("Login expired", "Remote Control disconnected", "Unknown command: /remote-control",
-              "/remote-control requires a claude.ai subscription")
+SIGNED_OUT = ("Login expired", "Login reached its time limit", "Remote Control disconnected",
+              "Unknown command: /remote-control", "/remote-control requires a claude.ai subscription")
 #: what it says when Remote Control is on again
 RC_ACTIVE = ("/remote-control is active",)
 #: the menu a session opens when it is sent /remote-control while its Remote Control is already on:
@@ -940,7 +940,10 @@ def signed_out(screen: str | None) -> str | None:
 #: among SIGNED_OUT, the lines that say the login itself stopped working. Remote Control can be lost
 #: while the login still works (the signed-in account changed on the machine, a network drop), and
 #: such a session still works on what it is sent
-LOGIN_LOST = ("Login expired", "OAuth token unavailable")
+LOGIN_LOST = ("Login expired", "Login reached its time limit", "OAuth token unavailable")
+#: of those, the words that start the line a session answers every message with once its login is
+#: gone (newer Claude Code versions say "Login reached its time limit · Please run /login")
+LOGIN_ENDED = LOGIN_LOST[:2]
 
 
 def login_lost(screen: str | None) -> str | None:
@@ -955,7 +958,7 @@ def login_lost(screen: str | None) -> str | None:
         text = _LEAD.sub("", line)
         if text.startswith(RC_ACTIVE):
             return None
-        if text.startswith(SIGNED_OUT) and (text.startswith(LOGIN_LOST[0]) or LOGIN_LOST[1] in text):
+        if text.startswith(SIGNED_OUT) and (text.startswith(LOGIN_ENDED) or LOGIN_LOST[-1] in text):
             return " ".join(line.split())
     return None
 
@@ -1471,7 +1474,12 @@ def stopped_on_login_error(path: Path | None, scan: int = 2000, *,
     A restart resumes the same conversation, so its old login error stays in the transcript for ever
     when nothing newer was said. `since` (a timezone-aware time, such as when the session's process
     started) makes an error recorded before it no answer: the session has read the login afresh
-    since. An error whose time cannot be read counts, because it cannot be shown to be old."""
+    since. An error whose time cannot be read counts, because it cannot be shown to be old.
+
+    None too when a system record after the error says Remote Control is active again: the bridge
+    starts only on a working login, so the session was signed in again (a restart, or /remote-control
+    after the login was put back) and only has had no new turn since. Such a session takes messages,
+    and reading it as signed out holds them and raises a lost login nobody can clear."""
     err = newest_api_error(path, scan)
     if not err or err["error"] != "authentication_failed" or gateway_refused(err):
         return None
@@ -1479,10 +1487,35 @@ def stopped_on_login_error(path: Path | None, scan: int = 2000, *,
         try:
             at = dt.datetime.fromisoformat(str(err.get("at")).replace("Z", "+00:00"))
         except ValueError:
-            return err
-        if at.tzinfo is not None and at < since:
+            at = None
+        if at is not None and at.tzinfo is not None and at < since:
             return None
-    return err
+    return None if _rc_active_after(path, err.get("uuid"), scan) else err
+
+
+def _rc_active_after(path: Path | None, uuid: str | None, scan: int) -> bool:
+    """Whether a system record newer than the record `uuid` says Remote Control is active. False when
+    `uuid` is empty: without it the error's place in the transcript is unknown, and an active record
+    from before the error must not clear it."""
+    if not uuid:
+        return False
+    try:
+        for n, line in enumerate(_lines_from_end(Path(path))):
+            if n >= scan:
+                return False
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if d.get("uuid") == uuid:
+                return False
+            if d.get("type") == "system" and str(d.get("content") or "").startswith(RC_ACTIVE):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def continue_after_error(err: dict | None, answered: str | None, told: int, *,
