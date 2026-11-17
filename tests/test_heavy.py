@@ -299,9 +299,36 @@ def test_a_declared_need_is_held_between_its_floor_and_the_cap_and_the_gate_asks
                        ("--need-gb", "--need-gb 1"))
     assert ("That is this job's own limit (--need-gb 1)" in note and "against the 1 GB it asks for" in note
             and "Lower --need-gb to what the job needs" in note), note
+    assert "--need-gb <GB>" not in note, "a job that declared its need is not told to declare one"
     monkeypatch.setenv("HEAVY_MIN_FREE_GB", "16")
     note = h.held_note("only 9 GB of memory free (needs 16)", {"memory"}, 61, 9, 16, None)
     assert "That is this job's own limit (HEAVY_MIN_FREE_GB=16)" in note and "HEAVY_NEED_GB" not in note, note
+    monkeypatch.delenv("HEAVY_MIN_FREE_GB")
+    note = h.held_note("only 5.2 GB of memory free (needs 6)", {"memory"}, 61, 5.8, 6.0, None)
+    assert note.endswith(". It starts when the machine has more free memory, or stop the job. A job that needs less "
+                         "memory can say so with --need-gb <GB> or HEAVY_NEED_GB, and then waits only until that much "
+                         "is free"), note
+    note = h.held_note("only 5.2 GB of memory free (needs 6)", {"memory"}, 61, 5.8, 6.0, None, "", 0.05)
+    assert note.endswith("and then waits only until that much is free (its last run under this name that exited 0 "
+                         "peaked at 0.05 GB)"), note
+    note = h.held_note("swap 19 GB used", {"swap"}, 61, 20, None, None)
+    assert "--need-gb" not in note, "and a job the machine's disk holds is told nothing about memory"
+
+
+def test_last_peak_is_the_newest_run_of_that_name_that_exited_0(monkeypatch, tmp_path):
+    """A job held for memory with no declared need is told the peak of the last run of its name that exited 0,
+    so it can declare that much."""
+    h = _fresh(monkeypatch, tmp_path)
+    runs = [{"what": "merge", "rc": 0, "peak_gb": 0.05, "end": 100.0},
+            {"what": "merge", "rc": 0, "peak_gb": 0.07, "end": 200.0},
+            {"what": "merge", "rc": 1, "peak_gb": 0.01, "end": 300.0},
+            {"what": "merge", "rc": 0, "peak_gb": 0, "end": 400.0},
+            {"what": "build", "rc": 0, "peak_gb": 5.0, "end": 500.0}]
+    assert h.last_peak("merge", runs) == 0.07, "a failed run and a run with no peak read are left out"
+    assert h.last_peak("build", runs) == 5.0
+    assert h.last_peak("never ran", runs) is None
+    assert h.last_peak("merge", [{"what": "merge", "rc": "x", "peak_gb": 1, "end": 1.0}]) is None
+    assert h.need_words() == h.NEED_HINT and h.need_words(0.07).endswith("peaked at 0.07 GB)")
 
 
 def test_a_peak_over_the_declared_need_is_said_and_the_next_run_of_that_name_waits_for_it(monkeypatch, tmp_path):
@@ -1255,11 +1282,37 @@ def test_hold_max_wait_gives_up_on_the_gate_and_withdraws_its_ask(tmp_path):
         gave = [ln for ln in r.stderr.splitlines() if "gave up after" in ln][-1]
         assert gave.endswith("; the biggest process is bigapp (pid 4242) at 3.2 GB, and 2.5 GB is wired"), gave
         waiting = [ln for ln in r.stderr.splitlines() if "heavy: waiting, " in ln]
-        assert waiting and waiting[0].endswith("; the biggest process is bigapp (pid 4242) at 3.2 GB, and 2.5 GB is wired"), \
-            r.stderr
+        assert waiting and waiting[0].endswith("; the biggest process is bigapp (pid 4242) at 3.2 GB, and 2.5 GB is "
+                                               "wired. A job that needs less memory can say so with --need-gb <GB> or "
+                                               "HEAVY_NEED_GB, and then waits only until that much is free"), r.stderr
         assert not list((state / "queue").glob("*.json")), "its ticket goes with it"
         events = [ln.split()[0] for ln in told.read_text().splitlines()]
         assert events == ["asked", "withdrawn"], events
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_a_job_memory_holds_with_no_declared_need_is_told_how_to_declare_one_once(tmp_path):
+    """The first waiting line about memory of a job that declared no need says how to declare one, with the peak
+    of the last run of its name that exited 0. A job that declared its need is not told."""
+    state = tmp_path / "heavy"
+    (state / "done").mkdir(parents=True)
+    for pid, rc, peak, end in ((11, 0, 0.05, 100.0), (12, 1, 0.01, 200.0)):
+        (state / "done" / f"{pid}.json").write_text(json.dumps(
+            {"chat": "t-chat", "what": "short of memory", "rc": rc, "peak_gb": peak, "minutes": 1.0, "end": end}))
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        r = _hold(state, "short of memory", sleeper.pid, "--max-wait", "1", HEAVY_FAKE_MACHINE="3 2 50")
+        assert r.returncode == 3, (r.returncode, r.stderr)
+        waiting = [ln for ln in r.stderr.splitlines() if "heavy: waiting, " in ln]
+        assert waiting and waiting[0].endswith("and then waits only until that much is free (its last run under "
+                                               "this name that exited 0 peaked at 0.05 GB)"), r.stderr
+        assert r.stderr.count("--need-gb <GB>") == 1, r.stderr
+        r = _hold(state, "short of memory", sleeper.pid, "--max-wait", "1", HEAVY_FAKE_MACHINE="0.6 2 50",
+                  HEAVY_NEED_GB="1")
+        assert r.returncode == 3 and "only 0.6 GB of memory free (needs 1)" in r.stderr, (r.returncode, r.stderr)
+        assert "--need-gb <GB>" not in r.stderr, r.stderr
     finally:
         sleeper.kill()
         sleeper.wait()
