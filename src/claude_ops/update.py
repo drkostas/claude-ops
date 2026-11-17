@@ -963,8 +963,9 @@ def login_lost(screen: str | None) -> str | None:
 def question_unreachable(screen: str | None, seconds_since_input: float | None, *,
                          away_s: float = AWAY_S) -> bool:
     """A question on a session's screen that nobody can answer: its screen says it lost its login
-    or its Remote Control (`signed_out`), so no phone reaches it, and nobody has used this computer
-    for `away_s`. Waiting for an answer then waits for ever, and only a restart into the same
+    or its Remote Control (`signed_out`), so no phone reaches it, a question is open on it
+    (`empty_prompt` says it is asking), and nobody has used this computer for `away_s`. A signed-out
+    screen with no question open is not one. Waiting for an answer then waits for ever, and only a restart into the same
     conversation brings Remote Control back. Unknown input time means somebody may be there.
 
     A restart through the open dialog loses what was asked. Claude Code writes a tool call to the
@@ -974,7 +975,10 @@ def question_unreachable(screen: str | None, seconds_since_input: float | None, 
     and restart after that."""
     if seconds_since_input is None or seconds_since_input < away_s:
         return False
-    return signed_out(screen) is not None
+    if signed_out(screen) is None:
+        return False
+    # a signed-out screen with no question open has nothing to lose or to move, so it is not one
+    return empty_prompt(screen)[1] == ASKING
 
 
 #: what a session's screen says while it compacts: a spinner glyph, these words, the seconds so far
