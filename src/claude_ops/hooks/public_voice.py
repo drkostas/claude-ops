@@ -77,8 +77,8 @@ import tempfile
 import time
 
 from .commandline import (
-    GIT_TIMEOUT_S, PATH_WORD, READ_LIMIT, commit_plan, commit_repos, expand, git_invocations, hidden_commit, push_plans,
-    push_url, pushed, read_note, recorded, steps, unescape, writes,
+    GIT_TIMEOUT_S, PATH_WORD, READ_LIMIT, commit_plan, commit_repos, expand, git_invocations, hidden_commit,
+    hidden_commit_dirs, push_plans, push_url, pushed, read_note, recorded, steps, unescape, writes,
 )
 
 DEFAULT_CONFIG = "~/.config/claude-ops/public-voice.json"
@@ -461,8 +461,8 @@ def published_from(command: str, cwd: str) -> list[tuple[str, str, str, str | No
 
 def publish_targets(command: str, cwd: str) -> list[str]:
     """Every repository the line publishes text to (a folder, or `slug:owner/repo`): git commands
-    that record a message, gh commands that write, and the current folder when a commit hides
-    behind a shell given a string."""
+    that record a message, gh commands that write, and the folder a commit runs in when it hides
+    behind a shell given a string (the folder a `cd` earlier on the line left the shell in)."""
     targets = [inv["dir"] for inv in git_invocations(command, cwd) if inv["sub"] in MESSAGE_SUBCOMMANDS]
     for cmd, here in steps(command, cwd):
         words, repo = _gh_words(cmd["words"])
@@ -474,8 +474,7 @@ def publish_targets(command: str, cwd: str) -> list[str]:
                 targets.append("slug:" + slug)
         elif len(words) >= 3 and words[2] in GH_WRITES.get(words[1], ()):
             targets.append(_gh_target(words, here, cmd.get("env"), repo))
-    if hidden_commit(command):
-        targets.append(cwd)
+    targets += hidden_commit_dirs(command, cwd)
     return list(dict.fromkeys(targets))
 
 
@@ -536,15 +535,15 @@ def _hit(texts: list[str], slug: str | None, cfg: Config, path: str | None = Non
 
 def _commit_hit(command: str, cwd: str, cfg: Config) -> str | None:
     """A term in what a `git commit` on this line would record into a public repository."""
-    tops = commit_repos(command, cwd)
-    if not tops and hidden_commit(command):
+    reads = {top: (command, cwd) for top in commit_repos(command, cwd)}
+    if not reads and hidden_commit(command):
         # the words do not show the commit (a shell given a string), so what is staged and what -a
-        # would take in this folder are read anyway
-        command = "git commit -a"
-        tops = commit_repos(command, cwd)
+        # would take in the folder it runs in are read anyway
+        reads = {top: ("git commit -a", here) for here in hidden_commit_dirs(command, cwd)
+                 for top in commit_repos("git commit -a", here)}
     widest = cfg.terms_for(personal=False)
-    for top in tops:
-        rows, paths = recorded(command, cwd, top)
+    for top, (read, here) in sorted(reads.items()):
+        rows, paths = recorded(read, here, top)
         # a recorded line, seen through UTF-16 (a NUL beside each letter), and each file name
         items = [(p, n, t.replace("\x00", "")) for p, n, t in rows] + [(p, 0, p) for p in paths]
         if not any(offending(t, widest, cfg.allow) for _, _, t in items):

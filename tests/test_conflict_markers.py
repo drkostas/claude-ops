@@ -145,6 +145,16 @@ def test_a_hidden_commit_reads_what_is_staged(repo):
     assert "a.txt:2" in cm.check(bash("nice git commit -m x", repo))
 
 
+def test_a_hidden_commit_reads_the_folder_the_line_moved_to(repo, tmp_path):
+    conflicted(repo)
+    git(repo, "add", "a.txt")
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    git(clean, "init", "-q")
+    assert "a.txt:2" in cm.check(bash(f"cd {repo} && bash -c 'git commit -m x'", clean))
+    assert cm.check(bash(f"cd {clean} && bash -c 'git commit -m x'", repo)) is None
+
+
 def test_other_tools_and_a_broken_payload_go_through(repo):
     assert cm.check({"tool_name": "Write", "tool_input": {"file_path": str(repo / "a.txt"), "content": OURS},
                      "cwd": str(repo)}) is None

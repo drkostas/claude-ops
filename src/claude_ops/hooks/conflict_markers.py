@@ -36,7 +36,7 @@ import re
 import sys
 
 from .commandline import (
-    Git, Row, add_plan, diff_rows, git_invocations, hidden_commit, recorded, untracked_rows,
+    Git, Row, add_plan, diff_rows, git_invocations, hidden_commit_dirs, recorded, untracked_rows,
 )
 
 #: a conflict marker line, as git writes it: the three of every conflict, and diff3's base marker
@@ -75,10 +75,11 @@ def would_record(command: str, cwd: str) -> list[Row]:
             rows.update(marker_rows(diff_rows(Git(inv["dir"], inv["globals"]), "--cached")))
     if any(inv["sub"] == "commit" for inv in invs):
         rows.update(marker_rows(recorded(command, cwd)[0]))
-    elif hidden_commit(command):
+    else:
         # the words do not show the commit (a quote in a comment, a wrapper program, a shell given a
-        # string), so what is staged and what -a would take are read anyway
-        rows.update(marker_rows(recorded("git commit -a", cwd)[0]))
+        # string), so what is staged and what -a would take in the folder it runs in are read anyway
+        for here in hidden_commit_dirs(command, cwd):
+            rows.update(marker_rows(recorded("git commit -a", here)[0]))
     return sorted(rows)
 
 
