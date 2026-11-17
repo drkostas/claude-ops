@@ -302,10 +302,10 @@ def see_through(run: str, pr: str, repo: str | None = None, *, budget_s: float, 
                                                     expect_head=pr_head, gh=gh, sleep=sleep, clock=clock)
     if code != 0:
         return code, said
-    w.say(said)
     sha = merge._merge_sha(pr, repo, gh)
     if not serving:
-        return 0, said
+        return 0, said          # the result line says it, so it is not said twice
+    w.say(said)                 # the deploy wait can be long, so the merge is said before it
     if not sha:
         return 4, "merged, but the merge commit could not be read, so the deploy cannot be checked"
     ok, why = w.serving(serving, sha, deploy_budget_s)
@@ -327,7 +327,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-merge", action="store_true", help="stop when every job passed")
     ap.add_argument("--method", choices=merge.METHODS, default="merge")
     ap.add_argument("--merge-timeout", type=float, default=30, help="minutes the merge waits for checks")
-    ap.add_argument("--serving", help="a command that prints what the service runs")
+    ap.add_argument("--serving", help="a command that prints what the service runs; only where every merge deploys, "
+                                      "since a skipped deploy job never shows the merge commit and ends with 7")
     ap.add_argument("--deploy-budget", type=float, default=20, help="minutes to wait for the deploy")
     ap.add_argument("--poll", type=float, default=POLL_S, help="seconds between looks")
     a = ap.parse_args(argv)
