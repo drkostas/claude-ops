@@ -274,3 +274,110 @@ def test_input_age_is_unknown_without_an_attached_client_or_an_answer():
     assert inject.input_age("claude-x", now=1.0, run=lambda cmd, **kw: _Ran(0, "")) is None
     assert inject.input_age("claude-x", now=1.0, run=lambda cmd, **kw: _Ran(1, "")) is None
     assert inject.input_age("claude-x", now=1.0, run=lambda cmd, **kw: _Ran(0, "garbage\n")) is None
+
+
+# ------------------------------------------------------------------ one sender at a time per chat
+
+_HOLDER = """
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("held", flush=True)
+time.sleep(float(sys.argv[2]))
+"""
+
+
+def _hold_elsewhere(target, seconds):
+    """Another process holding `target`'s input lock for `seconds`; returns once it holds it."""
+    import sys
+    path = inject._lock_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    p = subprocess.Popen([sys.executable, "-c", _HOLDER, str(path), str(seconds)], stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "held"
+    return p
+
+
+def test_input_lock_waits_for_another_process_then_gives_up():
+    other = _hold_elsewhere("claude-a", 5)
+    try:
+        with inject.input_lock("claude-a", wait=0.2) as held:
+            assert held is False
+        with inject.input_lock("claude-b", wait=0.2) as held:   # another chat is not held
+            assert held is True
+    finally:
+        other.kill()
+        other.wait()
+    with inject.input_lock("claude-a", wait=1) as held:   # the lock ends with the process that held it
+        assert held is True
+
+
+def test_input_lock_is_taken_again_inside_one_process():
+    with inject.input_lock("claude-a", wait=0) as outer:
+        with inject.input_lock("claude-a", wait=0) as inner:
+            assert outer and inner
+        # still held after the inner hold ends: another process cannot take it
+        import sys
+        r = subprocess.run([sys.executable, "-c", "import fcntl,os,sys;fd=os.open(sys.argv[1],os.O_RDWR);"
+                            "fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)", str(inject._lock_path("claude-a"))],
+                           capture_output=True)
+        assert r.returncode != 0
+    import sys
+    r = subprocess.run([sys.executable, "-c", "import fcntl,os,sys;fd=os.open(sys.argv[1],os.O_RDWR);"
+                        "fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)", str(inject._lock_path("claude-a"))],
+                       capture_output=True)
+    assert r.returncode == 0
+
+
+def test_a_paste_and_its_enter_are_never_split_by_another_sender(monkeypatch):
+    """A sender queued behind the lock types only after the other's Enter. Without the lock a
+    /compact was pasted between a message and its Enter, and arrived as words at its end."""
+    import time as _t
+    ran = []
+
+    def fake_run(cmd, **kw):
+        ran.append((_t.monotonic(), cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(inject.subprocess, "run", fake_run)
+    monkeypatch.setattr(inject.time, "sleep", lambda s: None)
+    other = _hold_elsewhere("claude-a", 0.6)
+    started = _t.monotonic()
+    ok, why = inject.send_tmux("claude-a", "/compact", True)
+    other.wait()
+    assert ok, why
+    assert ran and ran[0][0] - started >= 0.4, "the paste waited for the other sender"
+
+
+def test_a_send_that_cannot_get_the_line_types_nothing(monkeypatch):
+    ran = []
+    monkeypatch.setattr(inject.subprocess, "run", lambda cmd, **kw: ran.append(cmd))
+    monkeypatch.setattr(inject, "LOCK_WAIT", 0.2)
+    other = _hold_elsewhere("claude-a", 5)
+    try:
+        assert inject.send_tmux("claude-a", "hello", True) == (False, inject.HELD)
+        assert inject.send_iterm("claude-a", "hello", True) == (False, inject.HELD)
+    finally:
+        other.kill()
+        other.wait()
+    assert ran == []
+
+
+def test_inject_reads_the_screen_and_sends_under_one_hold(tmp_path, monkeypatch):
+    """While another sender holds the line, inject neither reads the screen nor sends: it answers
+    not-ready, so a watcher tries again."""
+    monkeypatch.setattr(inject, "LOCK_WAIT", 0.2)
+    read, sent = [], []
+    other = _hold_elsewhere("S3", 5)
+    try:
+        r = inject.inject("S3", "hi", sessions=lambda: ITERM, log=tmp_path / "log.jsonl",
+                          screen=lambda t, m: read.append(m) or EMPTY(t, m),
+                          send=lambda m, t, e: sent.append(m) or (True, ""))
+    finally:
+        other.kill()
+        other.wait()
+    assert r["result"] == "not-ready" and r["why"] == inject.HELD
+    assert read == [] and sent == []
+    r = inject.inject("S3", "hi", sessions=lambda: ITERM, log=tmp_path / "log.jsonl",
+                      screen=lambda t, m: read.append(m) or EMPTY(t, m),
+                      send=lambda m, t, e: sent.append(m) or (True, ""))
+    assert r["result"] == "sent" and read == ["S3"] and sent == ["S3"]

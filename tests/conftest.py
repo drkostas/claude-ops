@@ -28,6 +28,17 @@ def _no_real_tmux():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_input_locks(monkeypatch, tmp_path):
+    """No test takes a chat's input lock on the machine running the suite: every test has its own
+    lock folder, through `inject.LOCKS` here and CLAUDE_OPS_INPUT_LOCKS for a process it starts."""
+    from claude_ops import inject
+
+    locks = tmp_path / "input-locks"
+    monkeypatch.setenv("CLAUDE_OPS_INPUT_LOCKS", str(locks))
+    monkeypatch.setattr(inject, "LOCKS", locks)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_meter_store(monkeypatch, tmp_path):
     """No test opens the meter's store of the person running the suite. `meter.connect()` with no path opens
     ~/.local/state/claude-ops/meter.sqlite3, and opening an older store changes its format and makes it read every
