@@ -593,6 +593,10 @@ iterm.close_empty_window(window_id)                          # "closed", "asked"
   lost. It fits `claude_human.desktops.frame_window(..., fallback=...)`.
 - An answer that could not be read is `None`, never "no windows".
 
+## Look at a web app's pages before and after a change
+
+Before saying a change to a web app's pages works, look at the pages it touched: `claude-ops look <base> <path>... --out <folder>` (it needs `claude-ops[look]` and `python -m playwright install chromium`). Run it once on the old code and once on the new, then `claude-ops look sheet <old>/report.json <new>/report.json --out <folder>` and read each sheet yourself. Read the findings too (`cut_off`, `overlap`, `off_screen`, `empty`, `dead_tap`, `offered_again`), and say which pages and buttons `report.json` left out, so a short look never reads as a full one. A tap never sends the server a request other than GET, because `look` answers those itself, in a context of its own per load that also covers popups, with service workers blocked and WebSockets opened against nothing. A page that acts over a WebSocket is not covered, and a GET does reach the server, so run it only against a copy of the app and its data, never the real one. Mark a button that is meant to stay after its tap with an attribute and pass `--again '[that-attribute]'`.
+
 ## Say what a deploy brought
 
 When something you run moves a checkout to a new commit (a deploy, an update of a tool), tell the person which pull requests arrived, not the two hashes: `claude-ops changelog <old> <new> --repo <checkout>`. It walks the first-parent history, so each pull request is one line ("#12 Retry on a timeout"), and a commit pushed straight to the branch is listed by its subject. Take `old` from before the move, never from the remote, or the list is empty.
