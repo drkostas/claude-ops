@@ -5,8 +5,10 @@ and of each button's states. `look` opens each address at a phone's size (390 by
 picture once the page has loaded and one at the end of the page, and checks the page itself for the faults a
 picture shows a person at once.
 
-- `cut_off` is an element whose own text is wider or taller than its box, so part of it is hidden or runs over
-  (the detail says when the box ends it with an ellipsis on purpose).
+- `cut_off` is text that does not fit. It is an element whose own text is wider or taller than its box, a box
+  that hides its overflow and holds text larger than itself (a button of fixed width with a long label inside it),
+  or a tappable element whose text reaches outside its own rectangle. The detail says when the box ends the text
+  with an ellipsis on purpose, and when the text runs over its button.
 - `overlap` is two tappable elements on top of each other.
 - `off_screen` is a tappable element, or an element with text, that reaches past the screen's left or right edge.
 - `empty` is a page with no text and no image.
@@ -14,8 +16,13 @@ picture shows a person at once.
 
 With taps (the default), it then taps each visible button, up to `max_taps` per page, on a fresh load each
 time, and takes a picture after each tap. Every request the page sends with a method other than GET is
-answered by `look` itself and never reaches the server, so a tap runs nothing. A button whose tap sends such
-a request is tapped once for each way of answering it.
+answered by `look` itself and never reaches the server, so a tap runs nothing. Each load has a browser context
+of its own, routed as a whole, so a page the tap opens (a popup, a form with target _blank) is answered the same
+way, and the context and every page in it are closed after the tap. Service workers are blocked, since a request
+a worker handles, or one it starts itself, passes by the routes. A WebSocket is opened against nothing, so its
+messages never reach the server either, and a page that acts over a WebSocket gets no answer (its acts are not
+covered). A GET does reach the server, so point `look` at a copy of the app and its data, never at the real one.
+A button whose tap sends such a request is tapped once for each way of answering it.
 
 - `yes` answers at once with a success.
 - `no` answers at once with a refusal.
@@ -24,7 +31,8 @@ a request is tapped once for each way of answering it.
 
 A tap that sends nothing, stays on the same address and changes nothing on the page is `dead_tap`. A button
 still there, enabled and with the same words after a `yes` is `offered_again`, unless it matches `again`, a
-CSS selector for buttons meant to stay. Each box (an input or a text area) is shown empty and with text, and
+CSS selector for buttons meant to stay. A button whose words at its place differ on a fresh load (the page
+drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a text area) is shown empty and with text, and
 the report lists the buttons enabled in each case, so a button meant to wait for text can be seen both ways.
 
 The report (`report.json` in the output folder) lists each page's pictures, findings, taps and boxes, and the
@@ -142,8 +150,28 @@ CHECKS_JS = r"""
       out.push({kind: 'cut_off', detail: words(el) + (meant ? ' (ends with an ellipsis)' : '')});
     }
   }
+  // a box that hides its overflow and holds text larger than itself (a fixed-width button with a long label in a
+  // span, the way react-native-web draws a Text inside a Pressable)
+  const clips = s => /(hidden|clip)/.test(s.overflowX + ' ' + s.overflowY);
+  const ellipsis = s => s.textOverflow === 'ellipsis' || (s.webkitLineClamp && s.webkitLineClamp !== 'none');
+  for (const el of document.querySelectorAll('body *')) {
+    if (!shown(el) || el.clientWidth === 0) continue;
+    const s = getComputedStyle(el);
+    if (!clips(s) || !(el.innerText || '').trim()) continue;
+    if (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1)
+      out.push({kind: 'cut_off', detail: words(el) + (ellipsis(s) ? ' (ends with an ellipsis)' : '')});
+  }
   const taps = [...document.querySelectorAll(sel)].filter(shown);
   for (const el of taps) if (outside(el)) out.push({kind: 'off_screen', detail: words(el)});
+  // a tappable element that shows its overflow, whose text reaches outside its own rectangle
+  for (const el of taps) {
+    if (clips(getComputedStyle(el)) || !(el.innerText || '').trim()) continue;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const t = range.getBoundingClientRect(), r = el.getBoundingClientRect();
+    if (t.width && (t.left < r.left - 1 || t.right > r.right + 1 || t.top < r.top - 1 || t.bottom > r.bottom + 1))
+      out.push({kind: 'cut_off', detail: words(el) + ' (runs over its button)'});
+  }
   for (let i = 0; i < taps.length; i++) for (let j = i + 1; j < taps.length; j++) {
     const a = taps[i], b = taps[j];
     if (a.contains(b) || b.contains(a)) continue;
@@ -194,7 +222,12 @@ class _Held:
         self.answers, self.mode = answers, mode
         self.sent: list[str] = []
         self.held: list[Any] = []
+        self.sockets: list[str] = []
         self.closing = False
+
+    def socket(self, ws) -> None:
+        """A WebSocket the page opens: never connected to the server, so what the page sends on it goes nowhere."""
+        self.sockets.append(ws.url)
 
     def __call__(self, route, request) -> None:
         if self.closing:
@@ -240,15 +273,26 @@ class _Held:
 
 
 def _close(page, held: _Held) -> None:
+    """End the load: its held requests first, then its context, which closes every page a tap opened in it."""
     held.closing = True
     held.drop()
-    page.close()
+    page.context.close()
 
 
-def _open(context, url: str, held: _Held, *, timeout_s: float, settle_ms: int):
-    page = context.new_page()
-    page.route("**/*", held)
-    page.goto(url, wait_until="load", timeout=timeout_s * 1000)
+def _open(browser, url: str, held: _Held, *, viewport: tuple[int, int], timeout_s: float, settle_ms: int):
+    """A page of its own context, routed as a whole (a popup's first request is not seen by a page's routes), with
+    service workers blocked (a request a worker handles passes by the routes) and WebSockets opened against
+    nothing."""
+    context = browser.new_context(viewport={"width": viewport[0], "height": viewport[1]}, device_scale_factor=2,
+                                  is_mobile=True, has_touch=True, service_workers="block")
+    try:
+        context.route("**/*", held)
+        context.route_web_socket(re.compile(".*"), held.socket)
+        page = context.new_page()
+        page.goto(url, wait_until="load", timeout=timeout_s * 1000)
+    except Exception:
+        context.close()
+        raise
     try:
         page.wait_for_load_state("networkidle", timeout=min(timeout_s, 15) * 1000)
     except Exception:   # noqa: BLE001 a page that keeps a request open never goes idle
@@ -265,10 +309,11 @@ def _add(found: list[dict], new: list[dict], picture: str) -> None:
             found.append({**f, "picture": picture})
 
 
-def look_page(context, base: str, path: str, out: Path, *, answers: Answers, taps: bool = True,
-              boxes: bool = True, max_taps: int = MAX_TAPS, again: str = "", timeout_s: float = TIMEOUT_S,
-              settle_ms: int = SETTLE_MS) -> dict[str, Any]:
-    """Look at one page in an open browser context and write its pictures into `out`."""
+def look_page(browser, base: str, path: str, out: Path, *, answers: Answers, taps: bool = True,
+              boxes: bool = True, max_taps: int = MAX_TAPS, again: str = "", viewport: tuple[int, int] = VIEWPORT,
+              timeout_s: float = TIMEOUT_S, settle_ms: int = SETTLE_MS) -> dict[str, Any]:
+    """Look at one page with an open browser, each load in a context of its own, and write its pictures into
+    `out`."""
     url = base.rstrip("/") + "/" + path.lstrip("/") if not path.startswith("http") else path
     name = slug(path)
     rec: dict[str, Any] = {"path": path, "url": url, "pictures": {}, "findings": [], "taps": [], "boxes": [],
@@ -282,7 +327,7 @@ def look_page(context, base: str, path: str, out: Path, *, answers: Answers, tap
 
     held = _Held(answers, "yes")
     try:
-        page = _open(context, url, held, timeout_s=timeout_s, settle_ms=settle_ms)
+        page = _open(browser, url, held, viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms)
     except Exception as e:   # noqa: BLE001
         rec["findings"].append({"kind": "not_loaded", "detail": str(e).splitlines()[0][:200], "picture": ""})
         return rec
@@ -297,12 +342,12 @@ def look_page(context, base: str, path: str, out: Path, *, answers: Answers, tap
 
     if boxes:
         held = _Held(answers, "yes")
-        page = _open(context, url, held, timeout_s=timeout_s, settle_ms=settle_ms)
+        page = _open(browser, url, held, viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms)
         count = min(page.locator(BOXES).count(), MAX_BOXES)
         _close(page, held)
         for i in range(count):
             held = _Held(answers, "yes")
-            page = _open(context, url, held, timeout_s=timeout_s, settle_ms=settle_ms)
+            page = _open(browser, url, held, viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms)
             box = page.locator(BOXES).nth(i)
             if not box.is_visible():
                 _close(page, held)
@@ -320,18 +365,26 @@ def look_page(context, base: str, path: str, out: Path, *, answers: Answers, tap
         tried = [b for b in buttons if b["enabled"]][:max_taps]
         rec["left_out"] = [b["words"] for b in buttons if b["enabled"]][max_taps:]
         for n, b in enumerate(tried, 1):
-            rec["taps"].append(_tap(context, url, b, n, rec, shot, answers=answers, again=again,
-                                    timeout_s=timeout_s, settle_ms=settle_ms))
+            rec["taps"].append(_tap(browser, url, b, n, rec, shot, answers=answers, again=again,
+                                    viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms))
     return rec
 
 
-def _tap(context, url: str, button: dict, n: int, rec: dict, shot, *, answers: Answers, again: str,
-         timeout_s: float, settle_ms: int) -> dict[str, Any]:
+def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: Answers, again: str,
+         viewport: tuple[int, int], timeout_s: float, settle_ms: int) -> dict[str, Any]:
     tap: dict[str, Any] = {"button": button["words"], "sent": [], "pictures": {}}
     for mode in MODES:
         held = _Held(answers, mode)
-        page = _open(context, url, held, timeout_s=timeout_s, settle_ms=settle_ms)
+        page = _open(browser, url, held, viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms)
         href = page.url
+        now = next((b["words"] for b in page.evaluate(BUTTONS_JS, [TAPPABLE, None]) if b["i"] == button["i"]), None)
+        if now != button["words"]:
+            # the page drew its buttons in another order this time, so this place holds another button, and a
+            # picture filed under this one would show that one
+            tap["skipped"] = (f"the button at its place reads {now!r} on a fresh load" if now is not None
+                              else "the button is gone on a fresh load")
+            _close(page, held)
+            return tap
         before = page.evaluate(STATE_JS, TAPPABLE)
         try:
             page.locator(TAPPABLE).nth(button["i"]).click(timeout=5000)
@@ -379,11 +432,9 @@ def look(base: str, paths: list[str], out: str | Path, *, answers: Answers | Non
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
-            context = browser.new_context(viewport={"width": viewport[0], "height": viewport[1]},
-                                          device_scale_factor=2, is_mobile=True, has_touch=True)
             for path in paths:
-                report["pages"].append(look_page(context, base, path, out, answers=answers, taps=taps,
-                                                 boxes=boxes, max_taps=max_taps, again=again,
+                report["pages"].append(look_page(browser, base, path, out, answers=answers, taps=taps,
+                                                 boxes=boxes, max_taps=max_taps, again=again, viewport=viewport,
                                                  timeout_s=timeout_s, settle_ms=settle_ms))
         finally:
             browser.close()
@@ -439,6 +490,8 @@ def summary(report: dict[str, Any]) -> list[str]:
             kinds[f["kind"]] = kinds.get(f["kind"], 0) + 1
         said = ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) or "no findings"
         left = f", {len(pg['left_out'])} button(s) left out" if pg["left_out"] else ""
+        skipped = sum(1 for t in pg["taps"] if t.get("skipped"))
+        left += f", {skipped} tap(s) skipped (the button moved)" if skipped else ""
         lines.append(f"{pg['path']}: {len(pg['pictures'])} picture(s), {len(pg['taps'])} tap(s), {said}{left}")
     return lines
 

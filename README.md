@@ -212,16 +212,25 @@ claude-ops look sheet /tmp/look-before/report.json /tmp/look/report.json --out /
 A change to a web app is easiest to judge from pictures of the pages it touched, before and after it,
 and of each button's states. `look` opens each page in headless Chromium at a phone's size (390 by 844),
 takes a picture once it has loaded and one at the end of the page, and checks the page for what a
-person sees at once. It reports text cut off by its box (`cut_off`), two tappable elements on top of
+person sees at once. It reports text that does not fit (`cut_off`, which is an element's own text larger than its
+box, a box that hides its overflow and holds text larger than itself, such as a fixed-width button with a
+long label in a span, or a button whose text runs outside its rectangle), two tappable elements on top of
 each other (`overlap`), an element past the screen's edge (`off_screen`, not counting a row that scrolls
 sideways), a page with no text and no image (`empty`) and a page that did not load (`not_loaded`).
 
 It then taps each visible button, up to `--max-taps` per page (8), on a fresh load each time. Every
 request a page sends with a method other than GET is answered by `look` and never reaches the server,
-so a tap runs nothing. A button whose tap sends such a request is tapped once for each answer (`yes` at
+so a tap runs nothing. Each load has a browser context of its own, routed as a whole, so a popup or a
+form with `target=_blank` that a tap opens is answered the same way, and every page it opened is closed
+after the tap. Service workers are blocked, since a request a worker handles, or one it starts itself,
+passes by the routes. A WebSocket is opened against nothing, so a page that acts over a WebSocket is not
+covered (it gets no answer). A GET still reaches the server, so point `look` at a copy of the app and its
+data, never at the real one. A button whose tap sends such a request is tapped once for each answer (`yes` at
 once, `no` with a refusal, `slow` with a picture while the page waits, and `none`), with a picture after
 each. A tap that sends nothing and changes nothing is `dead_tap`, and a button offered again, enabled
 and unchanged, after a `yes` is `offered_again`, unless `--again <selector>` marks it as meant to stay.
+A button whose place holds other words on a fresh load (the page drew its buttons in another order) is
+not tapped, and the report says so, so no picture is filed under the wrong button.
 Each box is shown empty and with text, with the buttons enabled in each case. `--answers` names a JSON
 file with other `yes` and `no` answers and the slow wait (`slow_s`, 5).
 

@@ -24,7 +24,7 @@ claude-ops = "claude_ops.cli:main"
 test = ["pytest>=8", "pyyaml>=5"]
 iterm = ["iterm2>=2.7"]
 yaml = ["pyyaml>=5"]
-look = ["playwright>=1.40"]
+look = ["playwright>=1.48"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

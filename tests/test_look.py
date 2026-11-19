@@ -41,6 +41,35 @@ function draw() {
 }
 draw();
 </script></body>""",
+    # text that does not fit its button: clipped in a span, clipped in a flex row, and running over a visible edge
+    "clip.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<button style="display:block;width:60px;overflow:hidden;white-space:nowrap;margin:10px"><span>Hidden label that is long</span></button>
+<div role=button style="display:flex;width:60px;overflow:hidden;margin:10px"><div style="flex-shrink:0;white-space:nowrap">Flex label hidden away</div></div>
+<div role=button style="display:flex;width:60px;overflow:visible;margin:10px"><div style="flex-shrink:0;white-space:nowrap">Flex label running over</div></div>
+<button style="display:block;margin:10px">Fits</button>
+</body>""",
+    # a form that posts into a new window, and a window opened by script that posts as it loads
+    "popup.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<form method=post action="/act-form" target="_blank"><button>Send form</button></form>
+<button onclick="window.open('/poster.html')">Open poster</button>
+</body>""",
+    "poster.html": """<!doctype html><body>poster<script>fetch('/act-popup', {method: 'POST', body: '{}'})</script></body>""",
+    # a service worker that posts as it installs and forwards the page's posts itself
+    "sw.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<button id=p>Post through worker</button>
+<script>
+if (navigator.serviceWorker) navigator.serviceWorker.register('/sw.js');
+document.getElementById('p').onclick = () => fetch('/act-sw', {method: 'POST', body: '{}'});
+</script></body>""",
+    "sw.js": """self.addEventListener('install', e => { self.skipWaiting();
+  e.waitUntil(fetch('/sw-install', {method: 'POST', body: '{}'}).catch(() => {})); });
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', e => { if (e.request.method === 'POST') e.respondWith(fetch(e.request)); });""",
+    # a page that talks over a WebSocket as it loads and on a tap
+    "ws.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<script>const w = new WebSocket('ws://' + location.host + '/ws'); w.onopen = () => w.send('hi');</script>
+<button onclick="w.readyState === 1 && w.send('tap'); document.body.append('sent')">Socket</button>
+</body>""",
     # Approve stays greyed out until the box holds text
     "box.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
 <input id=t placeholder="Type it, then Approve">
@@ -65,6 +94,7 @@ def site(tmp_path_factory):
     for name, text in PAGES.items():
         (root / name).write_text(text)
     posts: list[str] = []
+    loads = {"moving": 0}
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -74,6 +104,26 @@ def site(tmp_path_factory):
             posts.append(self.path)
             self.send_response(500)
             self.end_headers()
+
+        def do_GET(self):   # noqa: N802
+            if self.path.split("?")[0] == "/ws":
+                posts.append(f"websocket {self.path}")   # a socket that reached the server counts as reaching it
+                self.send_response(404)
+                self.end_headers()
+                return
+            if self.path == "/moving.html":
+                # the first load draws Alpha then Beta, every later load Beta then Alpha
+                loads["moving"] += 1
+                order = ["Alpha", "Beta"] if loads["moving"] == 1 else ["Beta", "Alpha"]
+                body = ("<!doctype html><body>" + "".join(f"<button>{w}</button>" for w in order)
+                        + "</body>").encode()
+                self.send_response(200)
+                self.send_header("content-type", "text/html")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            super().do_GET()
 
         def log_message(self, *a):
             pass
@@ -184,3 +234,36 @@ def test_the_command_writes_the_report(site, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "/empty.html: 2 picture(s), 0 tap(s), empty 1" in out
     assert str(tmp_path / "report.json") in out
+
+
+def test_text_clipped_by_its_button_is_cut_off(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/clip.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
+    cut = [f["detail"] for f in page["findings"] if f["kind"] == "cut_off"]
+    assert any("Hidden label" in d for d in cut), f"a span's long label in a fixed-width button: {cut}"
+    assert any("Flex label hidden away" in d for d in cut), f"a flex row that hides its overflow: {cut}"
+    assert any("Flex label running over" in d and "runs over its button" in d for d in cut), \
+        f"a label that runs over a button that shows its overflow: {cut}"
+    assert not any(d.startswith("Fits") for d in cut), "a button whose label fits is not cut off"
+
+
+@pytest.mark.parametrize("path", ["/popup.html", "/sw.html", "/ws.html"])
+def test_a_popup_a_service_worker_and_a_websocket_never_reach_the_server(site, tmp_path, path):
+    base, posts = site
+    posts.clear()
+    report = look.look(base, [path], tmp_path, boxes=False, settle_ms=300, answers=look.Answers(slow_s=0.5))
+    page = report["pages"][0]
+    assert page["taps"], f"the page's buttons were tapped: {page}"
+    assert posts == [], f"nothing other than a GET reached the server: {posts}"
+    if path == "/popup.html":
+        sent = [u for t in page["taps"] for u in t["sent"]]
+        assert any(u.endswith("/act-form") for u in sent) and any(u.endswith("/act-popup") for u in sent), \
+            f"the popup's posts were answered by look: {sent}"
+
+
+def test_a_button_that_moved_on_a_fresh_load_is_not_tapped(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/moving.html"], tmp_path, boxes=False, settle_ms=100)["pages"][0]
+    assert [t["button"] for t in page["taps"]] == ["Alpha", "Beta"]
+    assert all(t.get("skipped") and not t["pictures"] for t in page["taps"]), page["taps"]
+    assert "2 tap(s) skipped (the button moved)" in look.summary({"pages": [page]})[0]
