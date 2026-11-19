@@ -21,3 +21,15 @@ jobs:
       - run: pytest -q
       - run: claude-ops fork-guard .github/workflows
       - run: bash -n src/claude_ops/rover/harness.sh && bash -n src/claude_ops/rover/netwatchdog.sh
+
+  look:
+    # the look tests open pages in Chromium, which the test job above does not install
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test,look]'
+      - run: python -m playwright install --with-deps chromium
+      - run: pytest -q tests/test_look.py

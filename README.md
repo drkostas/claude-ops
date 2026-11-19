@@ -200,6 +200,35 @@ running counts by the time it has run so far, and once its log has been silent f
 no job result (the worker ended mid-step) it counts only until the log's last write.
 `runner_diag.read`, `last_green` and `slower` are the parts.
 
+## Look at a web app's pages the way a phone shows them
+
+```bash
+pip install 'claude-ops[look]' && python -m playwright install chromium
+claude-ops look http://localhost:8081 /home /items/42 --out /tmp/look      # pictures and report.json
+claude-ops look http://localhost:8081 /home --out /tmp/look --no-taps      # only the load and end pictures
+claude-ops look sheet /tmp/look-before/report.json /tmp/look/report.json --out /tmp/sheets
+```
+
+A change to a web app is easiest to judge from pictures of the pages it touched, before and after it,
+and of each button's states. `look` opens each page in headless Chromium at a phone's size (390 by 844),
+takes a picture once it has loaded and one at the end of the page, and checks the page for what a
+person sees at once. It reports text cut off by its box (`cut_off`), two tappable elements on top of
+each other (`overlap`), an element past the screen's edge (`off_screen`, not counting a row that scrolls
+sideways), a page with no text and no image (`empty`) and a page that did not load (`not_loaded`).
+
+It then taps each visible button, up to `--max-taps` per page (8), on a fresh load each time. Every
+request a page sends with a method other than GET is answered by `look` and never reaches the server,
+so a tap runs nothing. A button whose tap sends such a request is tapped once for each answer (`yes` at
+once, `no` with a refusal, `slow` with a picture while the page waits, and `none`), with a picture after
+each. A tap that sends nothing and changes nothing is `dead_tap`, and a button offered again, enabled
+and unchanged, after a `yes` is `offered_again`, unless `--again <selector>` marks it as meant to stay.
+Each box is shown empty and with text, with the buttons enabled in each case. `--answers` names a JSON
+file with other `yes` and `no` answers and the slow wait (`slow_s`, 5).
+
+`report.json` lists each page's pictures, findings, taps and boxes, and the buttons `--max-taps` left
+out. `look sheet` puts the pictures of the same page from two looks side by side, one picture per page.
+`look.look`, `look.look_page`, `look.sheet` and `look.answers_from` are the parts.
+
 ## Find general code in a private project
 
 A private project built over public packages tends to grow general code of its own, because that is

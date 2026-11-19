@@ -527,6 +527,7 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "pr-gate": ("pr_gate", "run a pull request's checks locally at its own head, under a machine lock, with a canary"),
          "restack": ("restack", "rebuild a stack of branches on a new base, settling add-only conflicts"),
          "detach": ("detach", "start a command in its own session, so it outlives the chat"),
+         "look": ("look", "pictures of web pages at a phone's size, each button's states, and broken layout"),
          "adb-reach": ("adb", "reach an Android device over adb again after a restart undid tcpip"),
          "adb-log": ("adb_log", "cut the adb server's log when it is over a size, while the server runs"),
          "messages": ("messages", "what the person typed into chats, and the conversation around it"),
