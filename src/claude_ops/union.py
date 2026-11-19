@@ -36,6 +36,10 @@ It needs three-way markers (`git -c merge.conflictStyle=diff3 rebase`): without 
 block cannot be told apart from one that changed existing lines, so such a block is refused.
 
     claude-ops union <worktree> [--ordered FILE] [--journal FILE] [--set FILE]   # in a stopped rebase; stages what it settles
+    claude-ops union <conflicted file> [...]                                     # that one file only
+
+A folder below the worktree's top counts as the worktree. A file that holds no conflict, or a path
+no git worktree holds, is refused with exit 2 and one line that says why.
 """
 from __future__ import annotations
 
@@ -223,15 +227,32 @@ def _stage(wt: Path, n: int, f: str, env=None) -> str | None:
     return r.stdout if r.returncode == 0 else None
 
 
+def conflicted(wt: Path, env=None) -> list[str]:
+    """The files git lists as conflicted in `wt`, relative to its top folder."""
+    return subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"],
+                          capture_output=True, text=True, check=True, env=env).stdout.split()
+
+
+def top_folder(path: Path, env=None) -> Path | None:
+    """The top folder of the git worktree that holds `path` (a folder, or a file's folder), or None
+    when no worktree holds it."""
+    folder = path if path.is_dir() else path.parent
+    if not folder.is_dir():
+        return None
+    r = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"], capture_output=True,
+                       text=True, env=env)
+    top = r.stdout.strip()
+    return Path(top).resolve() if r.returncode == 0 and top else None
+
+
 def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tuple = (),
-                env=None) -> int:
+                env=None, only: str | None = None) -> int:
     """Settle every conflicted file in a stopped rebase in `wt` and stage it. 0 when every one
     settled, 1 when any is refused. Each file is settled on its own: one that settles is written and
     staged, one that is refused is left exactly as git left it (markers and all, not staged) and named
     with its reason, so whoever finishes the rebase settles only those. `env` is passed to every git
-    command."""
-    files = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"],
-                           capture_output=True, text=True, check=True, env=env).stdout.split()
+    command. `only`, a path relative to the top folder, settles that one file and leaves the others."""
+    files = [f for f in conflicted(wt, env) if only is None or f == only]
     settled: dict[str, str] = {}
     refused: list[str] = []
     for f in files:
@@ -280,9 +301,16 @@ def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tu
     return 1 if refused else 0
 
 
+USAGE = "claude-ops union [<worktree> | <conflicted file>] [--ordered FILE] [--journal FILE] [--set FILE]"
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="claude-ops union", description=__doc__.split("\n")[0])
-    ap.add_argument("worktree", nargs="?", default=".", type=Path)
+    """Settle a stopped rebase. The argument is a folder of the worktree (every conflicted file is
+    settled) or one conflicted file (only that one is). Anything else is refused with exit 2 and a
+    line that says why, never a traceback."""
+    ap = argparse.ArgumentParser(prog="claude-ops union", description=__doc__.split("\n")[0], usage=USAGE)
+    ap.add_argument("worktree", nargs="?", default=".", type=Path,
+                    help="a folder of the worktree, or one conflicted file in it (default: .)")
     ap.add_argument("--ordered", action="append", default=[], metavar="FILE",
                     help="a file that lists each entry once (repeatable)")
     ap.add_argument("--journal", action="append", default=[], metavar="FILE",
@@ -290,7 +318,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--set", action="append", default=[], metavar="FILE", dest="sets",
                     help="a ledger whose entry lines are an unordered set (repeatable)")
     a = ap.parse_args(argv)
-    return settle_tree(a.worktree, ordered=tuple(a.ordered), journals=tuple(a.journal), sets=tuple(a.sets))
+    path: Path = a.worktree
+    top = top_folder(path) if path.exists() else None
+    if top is None:
+        print(f"claude-ops union: {path} is not in a git worktree. Usage: {USAGE}", file=sys.stderr)
+        return 2
+    only = None
+    if not path.is_dir():
+        only = path.resolve().relative_to(top).as_posix()
+        if only not in conflicted(top):
+            print(f"claude-ops union: {path} holds no conflict git knows of. Give the worktree to settle every "
+                  f"conflicted file, or one file that `git diff --name-only --diff-filter=U` lists.", file=sys.stderr)
+            return 2
+    return settle_tree(top, ordered=tuple(a.ordered), journals=tuple(a.journal), sets=tuple(a.sets), only=only)
 
 
 if __name__ == "__main__":
