@@ -70,8 +70,60 @@ self.addEventListener('fetch', e => { if (e.request.method === 'POST') e.respond
 <script>const w = new WebSocket('ws://' + location.host + '/ws'); w.onopen = () => w.send('hi');</script>
 <button onclick="w.readyState === 1 && w.send('tap'); document.body.append('sent')">Socket</button>
 </body>""",
+    # fills laid over buttons: one drawn short (an SVG at 90% of the width and a third of the height), one layer
+    # with a gradient a quarter as tall as its button, and ones that are right or are no fill at all (a full
+    # fill, a chosen chip's fill, an icon in the label's line, a dot in a corner, a bar that is no button)
+    "fills.html": """<!doctype html><meta name=viewport content="width=device-width">
+<body style="margin:0;font:14px sans-serif">
+<div role=button aria-label="Short fill" style="position:relative;overflow:hidden;width:200px;height:44px;margin:10px;border-radius:22px">
+<div style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"><svg width="180" height="15"><rect width="180" height="15" fill="#95f"/></svg></div>
+<span style="position:relative">Short fill</span></div>
+<div role=button style="position:relative;width:200px;height:44px;margin:10px">
+<div style="position:absolute;left:0;top:0;width:200px;height:11px;background:linear-gradient(#95f,#e5a)"></div>Thin layer</div>
+<div role=button style="position:relative;overflow:hidden;width:200px;height:44px;margin:10px;border-radius:22px">
+<div style="position:absolute;top:0;left:0;right:0;bottom:0"><svg width="200" height="44"><rect width="200" height="44" rx="22" fill="#95f"/></svg></div>
+<span style="position:relative">Full fill</span></div>
+<div role=button aria-selected=true style="position:relative;overflow:hidden;width:80px;height:30px;margin:10px">
+<div style="position:absolute;inset:0;background:linear-gradient(90deg,#95f,#e5a)"></div><span style="position:relative">Chosen</span></div>
+<button style="position:relative;width:120px;height:40px;margin:10px"><svg width="16" height="16"><circle cx="8" cy="8" r="8"/></svg> Icon</button>
+<button style="position:relative;width:120px;height:40px;margin:10px">Badge<span style="position:absolute;top:2px;right:2px;width:8px;height:8px;background:red;border-radius:4px"></span></button>
+<div style="position:relative;width:200px;height:10px;margin:10px;background:#333"><div style="position:absolute;left:0;top:0;bottom:0;width:30%;background:#95f"></div></div>
+</body>""",
+    # a sheet that a tap opens, whose Send has its fill drawn a third as tall as itself
+    "sheet-opens.html": """<!doctype html><meta name=viewport content="width=device-width">
+<body style="margin:0;font:14px sans-serif">
+<button id=ask>Ask</button>
+<div id=sheet hidden><div role=button style="position:relative;overflow:hidden;width:160px;height:42px;margin:10px">
+<div style="position:absolute;top:0;left:0;right:0;bottom:0"><svg width="144" height="14"><rect width="144" height="14" fill="#95f"/></svg></div>
+<span style="position:relative">Send</span></div></div>
+<script>document.getElementById('ask').onclick = () => { document.getElementById('sheet').hidden = false; };</script>
+</body>""",
+    # a row of filter chips: All is chosen, and a tap on it changes nothing; Queued chooses itself
+    "chips.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<div id=row></div><div id=out>all</div>
+<script>
+let on = 'All';
+function draw() {
+  document.getElementById('row').innerHTML = ['All', 'Queued'].map(w =>
+    `<div role=button aria-selected=${w === on}>${w}</div>`).join(' ');
+  for (const el of document.querySelectorAll('[role=button]')) el.onclick = () => {
+    if (on === el.textContent) return;
+    on = el.textContent; document.getElementById('out').textContent = on.toLowerCase(); draw();
+  };
+}
+draw();
+</script></body>""",
+    # a page drawn the way react-native-web draws a scroll view: a box that hides what runs sideways and scrolls
+    # what runs down, holding the whole page, and a row of chips that scrolls sideways and hides what runs down
+    "scroller.html": """<!doctype html><meta name=viewport content="width=device-width">
+<body style="margin:0;font:14px sans-serif">
+<div style="height:100vh;overflow-x:hidden;overflow-y:auto">
+<div style="width:300px;overflow-x:auto;overflow-y:hidden;white-space:nowrap"><span>All topics</span> <span style="display:inline-block;width:500px">and a row of many more chips</span></div>
+<p style="height:3000px">A page much taller than the screen</p>
+</div>
+</body>""",
     # Approve stays greyed out until the box holds text
-    "box.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+    "box.html":"""<!doctype html><meta name=viewport content="width=device-width"><body>
 <input id=t placeholder="Type it, then Approve">
 <button id=ok disabled>Approve</button> <button>Decline</button>
 <script>
@@ -267,3 +319,34 @@ def test_a_button_that_moved_on_a_fresh_load_is_not_tapped(site, tmp_path):
     assert [t["button"] for t in page["taps"]] == ["Alpha", "Beta"]
     assert all(t.get("skipped") and not t["pictures"] for t in page["taps"]), page["taps"]
     assert "2 tap(s) skipped (the button moved)" in look.summary({"pages": [page]})[0]
+
+
+def test_a_fill_that_stops_short_of_its_button_is_short_fill(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/fills.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
+    short = [f["detail"] for f in page["findings"] if f["kind"] == "short_fill"]
+    assert any(d.startswith("Short fill") and "90% of its width and 34% of its height" in d for d in short), short
+    assert any(d.startswith("Thin layer") and "25% of its height" in d for d in short), short
+    assert len(short) == 2, f"a full fill, a chosen chip's fill, an icon, a dot and a bar are no short fill: {short}"
+
+
+def test_a_fill_drawn_short_after_a_tap_is_found_too(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/sheet-opens.html"], tmp_path, boxes=False, settle_ms=150)["pages"][0]
+    found = [(f["kind"], f["detail"], f["picture"]) for f in page["findings"] if f["kind"] == "short_fill"]
+    assert len(found) == 1 and found[0][1].startswith("Send") and found[0][2].endswith("tap1-yes.png"), found
+
+
+def test_a_tap_on_a_chip_already_chosen_is_not_dead(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/chips.html"], tmp_path, boxes=False, settle_ms=100)["pages"][0]
+    taps = {t["button"]: t for t in page["taps"]}
+    assert set(taps) == {"All", "Queued"}
+    assert taps["All"].get("chosen") is True and not taps["Queued"].get("chosen")
+    assert not [f for f in page["findings"] if f["kind"] == "dead_tap"], page["findings"]
+
+
+def test_what_runs_the_way_a_box_scrolls_is_not_cut_off(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/scroller.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
+    assert not [f for f in page["findings"] if f["kind"] == "cut_off"], page["findings"]
