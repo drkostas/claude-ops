@@ -18,8 +18,11 @@ back to the model):
   only when the rest of it names a protected folder (`$T/worktrees/app-live/x`);
 - Write, Edit, MultiEdit and NotebookEdit of a file inside one.
 
-Reading stays allowed: log, show, status, diff, rev-parse, fetch, reflog, `stash list`, and
-`worktree add` of a new folder (how a session makes its own worktree from a protected checkout).
+Reading stays allowed: log, show, status, diff, rev-parse, fetch, reflog, `stash list`,
+`symbolic-ref` with one name (which only says where that name points, as in
+`git symbolic-ref --short HEAD`), and `worktree add` of a new folder (how a session makes its own
+worktree from a protected checkout). `symbolic-ref` with a second name writes the ref, and with
+`-d` or `--delete` removes it, so both stay refused.
 The command line is read by `commandline`, shared with the other hooks.
 
 The protected folders are regular expressions matched against absolute paths, from `--pattern`
@@ -51,6 +54,8 @@ CHANGES = {"checkout", "switch", "reset", "pull", "merge", "rebase", "restore", 
            "checkout-index", "update-index", "update-ref", "symbolic-ref"}
 #: `git stash` forms that only read
 STASH_READS = {"list", "show"}
+#: `git symbolic-ref` options that only shape a read's output
+SYMBOLIC_REF_READ_FLAGS = {"-q", "--quiet", "--short", "--no-short", "--recurse", "--no-recurse"}
 EDITS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 DEFAULT_CONFIG = "~/.config/claude-ops/protected-checkouts.json"
 
@@ -84,6 +89,20 @@ def protected(path: str, patterns: list[re.Pattern]) -> bool:
     return any(p.search(full + "/") for p in patterns)
 
 
+def symbolic_ref_reads(args: list[str]) -> bool:
+    """True when `git symbolic-ref <args>` only reads: one name, and only options that shape the
+    output. A second name writes the ref, and `-d`, `--delete`, `-m` or any other option is not
+    read as harmless."""
+    names = []
+    for a in args:
+        if a in SYMBOLIC_REF_READ_FLAGS:
+            continue
+        if a.startswith("-"):
+            return False
+        names.append(a)
+    return len(names) == 1
+
+
 def check_bash(command: str, cwd: str, patterns: list[re.Pattern]) -> str | None:
     """Why a Bash command is refused, or None."""
     for inv in commandline.git_invocations(command, cwd):
@@ -106,6 +125,8 @@ def check_bash(command: str, cwd: str, patterns: list[re.Pattern]) -> str | None
         if sub not in CHANGES or not protected(where, patterns):
             continue
         if sub == "stash" and args[:1] and args[0] in STASH_READS:
+            continue
+        if sub == "symbolic-ref" and symbolic_ref_reads(args):
             continue
         return f"`git {sub}` in {where}"
     for here, target, _text in commandline.write_targets(command, cwd):

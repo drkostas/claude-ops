@@ -39,6 +39,11 @@ def bash(command, cwd):
     "sed -i '' 's/a/b/' ~/worktrees/app-live/x.py",
     "cd ~/worktrees/app-live && sed -i '/old/d' notes.txt",
     "perl -pi -e 's/a/b/' ~/worktrees/lib-next/x.py",
+    # symbolic-ref with a second name writes the ref, and -d or --delete removes it
+    'git -C ~/worktrees/app-live symbolic-ref HEAD refs/heads/other',
+    'git -C ~/worktrees/app-live symbolic-ref -m why HEAD refs/heads/other',
+    'git -C ~/worktrees/app-live symbolic-ref -d HEAD',
+    'git -C ~/worktrees/app-live symbolic-ref --delete -q HEAD',
 ])
 def test_a_change_to_a_protected_checkout_is_refused(home, command):
     assert bash(command, home), command
@@ -50,6 +55,9 @@ def test_a_change_to_a_protected_checkout_is_refused(home, command):
     'git -C ~/worktrees/app-live status && git -C ~/worktrees/app-live show HEAD:README.md',
     'git -C ~/worktrees/app-live fetch origin',
     'git -C ~/worktrees/app-live stash list',
+    # symbolic-ref with one name only says where it points
+    'git -C ~/worktrees/app-live symbolic-ref HEAD',
+    'git -C ~/worktrees/app-live symbolic-ref -q --short HEAD',
     'git -C ~/worktrees/app-live worktree add ~/worktrees/app-x origin/main',
     'git -C "$UNKNOWN" checkout x',
     'cd ~/worktrees/app-topic && git checkout -b feat/x',
@@ -161,3 +169,18 @@ def test_commandline_splits_a_parenthesis_from_the_separator_after_it(home, unse
     assert commandline.after_unknown("$(mktemp -d)/x") == "/x"
     assert commandline.after_unknown("$F") == ""
     assert commandline.writes('cd /tmp/x && echo hi > "$PWD/a"', "/") == [("/tmp/x/a", "hi")]
+
+
+@pytest.mark.parametrize("args, reads", [
+    (["HEAD"], True),
+    (["--short", "-q", "HEAD"], True),
+    (["--no-recurse", "HEAD"], True),
+    (["HEAD", "refs/heads/x"], False),
+    (["-m", "why", "HEAD", "refs/heads/x"], False),
+    (["-d", "HEAD"], False),
+    (["--delete", "HEAD"], False),
+    (["--", "HEAD"], False),
+    ([], False),
+])
+def test_symbolic_ref_reads_only_with_one_name(args, reads):
+    assert pc.symbolic_ref_reads(args) is reads
