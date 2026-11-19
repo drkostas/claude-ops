@@ -112,6 +112,15 @@ self.addEventListener('fetch', e => { if (e.request.method === 'POST') e.respond
 <div style="position:fixed;left:0;right:0;top:180px;height:80px">
 <button style="position:absolute;top:25px;left:40px;width:150px;height:40px">Floating</button></div>
 </body>""",
+    # taps that hand the person elsewhere (a new tab, an app that takes a link's scheme, a file picker) and one that
+    # does nothing at all
+    "elsewhere.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<button onclick="window.open('/faults.html', '_blank', 'noopener')">New tab</button>
+<button onclick="window.open('vnc://192.0.2.1', '_blank', 'noopener')">Screen</button>
+<button onclick="location.href = 'vnc://192.0.2.1'">Screen here</button>
+<button onclick="document.getElementById('f').click()">Pick</button><input id=f type=file style="display:none">
+<button>Nothing</button>
+</body>""",
     # a row of filter chips: All is chosen, and a tap on it changes nothing; Queued chooses itself
     "chips.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
 <div id=row></div><div id=out>all</div>
@@ -350,6 +359,17 @@ def test_what_a_sheet_covers_is_no_overlap_and_no_short_fill(site, tmp_path):
     found = [(f["kind"], f["detail"]) for f in page["findings"]]
     assert ("overlap", "Beneath and Floating") in found, found
     assert [f for f in found if f[0] in ("overlap", "short_fill")] == [("overlap", "Beneath and Floating")], found
+
+
+def test_a_tap_that_opens_a_tab_an_app_or_a_file_picker_is_not_dead(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/elsewhere.html"], tmp_path, boxes=False, settle_ms=100)["pages"][0]
+    dead = [f["detail"] for f in page["findings"] if f["kind"] == "dead_tap"]
+    assert dead == ["Nothing"], dead
+    opened = {t["button"]: t.get("opened") for t in page["taps"]}
+    assert opened["New tab"] and opened["New tab"][0].endswith("/faults.html"), opened
+    assert opened["Screen"] == ["vnc://192.0.2.1"] and opened["Screen here"] == ["vnc://192.0.2.1"], opened
+    assert opened["Pick"] == ["a file picker"] and opened["Nothing"] is None, opened
 
 
 def test_a_fill_drawn_short_after_a_tap_is_found_too(site, tmp_path):

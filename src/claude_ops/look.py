@@ -38,11 +38,13 @@ A button whose tap sends such a request is tapped once for each way of answering
 After a tap that stays on the same address, the page is checked again as it is then, so a sheet or a menu the tap
 opened is checked too. A tap that sends nothing, stays on the same address and changes nothing on the page is
 `dead_tap`, unless the button is already the one chosen (`aria-selected`, `aria-checked` or `aria-pressed` true,
-or a checked input), as a filter chip that is on already. A button
-still there, enabled and with the same words after a `yes` is `offered_again`, unless it matches `again`, a
-CSS selector for buttons meant to stay. A button whose words at its place differ on a fresh load (the page
-drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a text area) is shown empty and with text, and
-the report lists the buttons enabled in each case, so a button meant to wait for text can be seen both ways.
+or a checked input), as a filter chip that is on already, or the tap opened a file picker or asked the browser
+to open an address elsewhere (`window.open`, or a link whose scheme an app takes), which the tap's `opened`
+lists. A button still there, enabled and with the same words after a `yes` is `offered_again`, unless it
+matches `again`, a CSS selector for buttons meant to stay. A button whose words at its place differ on a fresh
+load (the page drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a
+text area) is shown empty and with text, and the report lists the buttons enabled in each case, so a button meant
+to wait for text can be seen both ways.
 
 The report (`report.json` in the output folder) lists each page's pictures, findings, taps and boxes, and the
 buttons left out by `max_taps`, so a short run never reads as a full one. `sheet` puts two reports' pictures
@@ -191,7 +193,10 @@ CHECKS_JS = r"""
   // cannot be tested, and counts as seen.
   const alpha = c => { const m = /rgba?\(([^)]*)\)/.exec(c || ''); if (!m) return c === 'transparent' ? 0 : 1;
                        const p = m[1].split(/[\s,/]+/).filter(Boolean); return p.length > 3 ? parseFloat(p[3]) : 1; };
-  const opaque = el => { const s = getComputedStyle(el); return s.backgroundImage !== 'none' || alpha(s.backgroundColor) >= 0.99; };
+  const opaque = el => {
+    const s = getComputedStyle(el);
+    return s.backgroundImage !== 'none' || alpha(s.backgroundColor) >= 0.99;
+  };
   const hidden = (el, x, y, but) => {
     const stack = document.elementsFromPoint(x, y);
     const i = stack.findIndex(e => el.contains(e));
@@ -262,6 +267,18 @@ STATE_JS = r"""
 (sel) => [location.href, (document.body && document.body.innerText || ''),
           [...document.querySelectorAll(sel)].map(el => !el.disabled && el.getAttribute('aria-disabled') !== 'true').join(',')].join('\n')
 """
+
+# every address the page asks window.open to open, kept on the window, so a tap that opens a link in another tab or
+# in another app (a link whose scheme the browser hands to an app, which opens no page here) is seen
+OPENED_JS = r"""
+(() => {
+  const opened = [];
+  Object.defineProperty(window, '__look_opened', {value: opened});
+  const open = window.open;
+  window.open = function (url) { opened.push(String(url)); return open.apply(this, arguments); };
+})();
+"""
+WEB = ("http:", "https:", "data:", "blob:", "about:")
 
 # scroll the page and every scrolling box in it to its end
 END_JS = r"""
@@ -348,6 +365,7 @@ def _open(browser, url: str, held: _Held, *, viewport: tuple[int, int], timeout_
     try:
         context.route("**/*", held)
         context.route_web_socket(re.compile(".*"), held.socket)
+        context.add_init_script(OPENED_JS)
         page = context.new_page()
         page.goto(url, wait_until="load", timeout=timeout_s * 1000)
     except Exception:
@@ -446,6 +464,9 @@ def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: A
             _close(page, held)
             return tap
         before = page.evaluate(STATE_JS, TAPPABLE)
+        elsewhere: list[str] = []   # what the tap handed the person to: a file picker, a tab, another app
+        page.on("filechooser", lambda _chooser: elsewhere.append("a file picker"))
+        page.on("requestfailed", lambda r: elsewhere.append(r.url) if not r.url.startswith(WEB) else None)
         try:
             page.locator(TAPPABLE).nth(button["i"]).click(timeout=5000)
         except Exception as e:   # noqa: BLE001
@@ -467,8 +488,11 @@ def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: A
             _add(rec["findings"], page.evaluate(CHECKS_JS, TAPPABLE), tap["pictures"]["yes"])
         if mode == "yes":
             tap["sent"] = held.sent
+            elsewhere += page.evaluate("() => window.__look_opened || []")
+            if elsewhere:
+                tap["opened"] = elsewhere[:3]
             if not held.sent:
-                if page.url == href and page.evaluate(STATE_JS, TAPPABLE) == before:
+                if page.url == href and page.evaluate(STATE_JS, TAPPABLE) == before and not elsewhere:
                     if button.get("chosen"):
                         tap["chosen"] = True   # it is already the one chosen, so a tap on it changes nothing
                     else:
