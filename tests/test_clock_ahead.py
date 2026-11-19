@@ -102,6 +102,43 @@ def test_what_is_left_alone(text):
     assert hits(text) == []
 
 
+@pytest.mark.parametrize("text, found", [
+    # the shapes of four real note headings and lines written ahead of the clock with a dot
+    ("## State at 13.25 (9 Mar)", ["13.25"]),
+    ("## Update 9 Mar 13.25", ["13.25"]),
+    ("- **13.29 the fix is open** at its head", ["13.29"]),
+    ("the run ended at 13.20.43 in success", ["13.20.43"]),
+    ("UPDATE 13.22: queued", ["13.22"]),
+    ("## 13.25 a heading", ["13.25"]),
+    ("1. 13.25 the first step", ["13.25"]),
+    ("2026-03-09 13.25 it ran", ["13.25"]),
+    ("read at 13.25, then it stopped", ["13.25"]),
+])
+def test_a_dotted_time_where_a_time_is_expected_is_found(text, found):
+    assert hits(text) == found
+
+
+@pytest.mark.parametrize("text", [
+    "the pace is 1.04 a day",
+    "runway 13.25 h",
+    "- 13.25 h of runway left",
+    "it held at 13.25 GB",
+    "it was at 13.25% and at 13.25 %",
+    "Python 13.20 and version 13.20",
+    "a version v13.20 and a release 13.20.1",
+    "at 13.25.1 it was",
+    "It waits until 13.25.",
+    "the rate rose 13.25 points",
+    "it is 13.25 in the morning",             # a dotted number in running text is not read
+    "## Update 10 Mar 13.25",                 # another day
+    "at 13.22 UTC it ran",
+    "the log says `at 13.25 queued`",
+    "a plan at 14.45, an hour on",            # past the window
+])
+def test_a_dotted_number_that_is_not_a_time_is_left_alone(text):
+    assert hits(text) == []
+
+
 def test_the_window_is_the_configuration():
     assert hits("read at 13:40") == []                      # 22.5 minutes ahead, past the default 15
     assert hits("read at 13:40", max_minutes=30) == ["13:40"]
