@@ -7,7 +7,12 @@ compares that time with the log and goes to the wrong minute. This hook refuses 
 day between `min_minutes` (1) and `max_minutes` (15) ahead of the local clock (exit 2, with one line sent
 back to the model that names the time and the clock).
 
-Only a bare time of day (`13:22`, `13:22:05`) is judged. These are left alone:
+Only a bare time of day (`13:22`, `13:22:05`) is judged. A dotted one (`13.22`, `13.22.05`) is judged
+only where a time is expected, since the same digits are as often a decimal or a version: right after
+"at" or "update" (`State at 13.22`, `UPDATE 13.22`), right after a date (`9 Mar 13.22`), or as the first
+word of a line, a heading or a list item (`- 13.22 shipped`, `## 13.22`). A dotted number with a unit
+after it (`13.25 h`, `13.25 GB`, `13.25%`) or a third part (`13.22.1`) is never a time. These are left
+alone:
 
 - a time with a zone or an offset after it (`08:46Z`, `05:25 UTC`, `10:00 -03`, `10:00+02:00`, and the
   words in `zones`);
@@ -101,6 +106,16 @@ _ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?:T|\s+)?(?:at\s+)?$")
 _DAY_MONTH = re.compile(r"(\d{1,2})\s+([A-Za-z]{3,9})\.?,?(?:\s+(\d{4}))?,?\s+(?:at\s+)?$")
 _MONTH_DAY = re.compile(r"([A-Za-z]{3,9})\.?\s+(\d{1,2}),?(?:\s+(\d{4}))?,?\s+(?:at\s+)?$")
 _SENTENCE_END = re.compile(r"[.!?;]\s|\n")
+#: a dotted time of day (`13.22`, `13.22.05`). It is judged only where `dotted_expected` says a time is
+#: expected, since `1.04` and `3.14` are as often a decimal or a version
+DOTTED = re.compile(r"(?<![\w.\-/])([01]?\d|2[0-3])\.([0-5]\d)(?:\.[0-5]\d)?(?!\w|[.,]\d)")
+#: the words right before a dotted time that say a time follows
+_DOTTED_WORD = re.compile(r"\b(?:at|update)\s+$", re.I)
+#: the start of a line, a heading or a list item, with an opening bold or italic mark
+_LINE_START = re.compile(r"^[ \t]*(?:#{1,6}[ \t]+|[-*+][ \t]+|\d+[.)][ \t]+)?(?:\*\*|__|\*|_)?$")
+#: a unit after a dotted number, which makes it a measure and not a time
+_UNIT = re.compile(r"\s?(?:%|(?:h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?|ms|x|[kmgt]i?b|points?|pts|"
+                   r"days?|weeks?)\b)", re.I)
 #: a correction names the wrong time on purpose ("written at 10:06, not 10:10")
 _NOT = re.compile(r"\bnot\s+(?:at\s+)?$", re.I)
 
@@ -190,12 +205,31 @@ def dated(before: str, today: dt.date) -> bool | None:
     return None
 
 
+def dotted_expected(text: str, m: re.Match, today: dt.date) -> bool:
+    """Whether the dotted number `m` in `text` stands where a time is expected: right after "at" or
+    "update", right after a date, or as the first word of a line, a heading or a list item, and with
+    no unit after it."""
+    if _UNIT.match(text, m.end()):
+        return False
+    line = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+    if _DOTTED_WORD.search(line) or _LINE_START.match(line):
+        return True
+    return dated(text[max(0, m.start() - LOOKBACK):m.start()], today) is not None
+
+
+def times(text: str, today: dt.date) -> list[re.Match]:
+    """Each time of day in `text` in order: every colon time, and a dotted one where a time is expected."""
+    found = list(TIME.finditer(text))
+    found += [m for m in DOTTED.finditer(text) if dotted_expected(text, m, today)]
+    return sorted(found, key=lambda m: m.start())
+
+
 def ahead(text: str, now: dt.datetime, cfg: Config) -> list[tuple[str, float]]:
     """(the time as written, minutes ahead of `now`) for each bare time of day in `text` that is more
     than `min_minutes` and at most `max_minutes` ahead of the clock, with what is left alone (see the
     module's words) taken out first."""
     clean, out = prose(text, cfg), []
-    for m in TIME.finditer(clean):
+    for m in times(clean, now.date()):
         after = clean[m.end():m.end() + 12]
         if _OFFSET.match(after) or (cfg.zone_re and cfg.zone_re.match(after)):
             continue
