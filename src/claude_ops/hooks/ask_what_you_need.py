@@ -9,7 +9,10 @@ It answers with `hookSpecificOutput.additionalContext`, Claude Code's channel fo
 not an error: the conversation continues under the same loop protections as a blocked stop, and
 the terminal shows "Stop hook feedback" instead of a red "Stop hook error".
 
-The heading is configurable with CLAUDE_OPS_ASK_HEADING (default "What I need from you").
+The heading is configurable with CLAUDE_OPS_ASK_HEADING (default "What I need from you"), and the
+tools that count as asking with CLAUDE_OPS_ASK_TOOLS, a comma-separated list of tool names (default
+"AskUserQuestion"). A setup that asks people through another tool (a task on their phone, for
+example, an MCP tool) names it first, and the hook's words then tell the session to call that one.
 
 It is a Stop hook because the problem is a tool that was NOT called, and the end of the turn is the
 only moment that can be seen. It always fails open: an unexpected input lets the turn end, because
@@ -25,6 +28,8 @@ import sys
 
 HEADING_TEXT = os.environ.get("CLAUDE_OPS_ASK_HEADING", "What I need from you")
 NEXT_HEADING = re.compile(r"^\s{0,3}(?:#{1,6}\s|\*{2}[^*]+\*{2}\s*$|---\s*$)")
+ASK_TOOLS = tuple(t.strip() for t in os.environ.get("CLAUDE_OPS_ASK_TOOLS", "AskUserQuestion").split(",")
+                  if t.strip()) or ("AskUserQuestion",)
 NOTHING = re.compile(r"^\W*(nothing|none|no asks?|nothing for now)\b", re.I)
 
 
@@ -54,8 +59,8 @@ def _is_tool_result(rec: dict) -> bool:
     return isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
 
 
-def check(records: list[dict], heading: str = HEADING_TEXT) -> str | None:
-    """Why this turn may not end yet, or None when it may."""
+def check(records: list[dict], heading: str = HEADING_TEXT, tools: tuple[str, ...] = ASK_TOOLS) -> str | None:
+    """Why this turn may not end yet, or None when it may. A call of any of `tools` counts as the ask."""
     start = 0
     for i in range(len(records) - 1, -1, -1):
         if records[i].get("type") == "user" and not _is_tool_result(records[i]):
@@ -71,7 +76,7 @@ def check(records: list[dict], heading: str = HEADING_TEXT) -> str | None:
         for block in content:
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
+            if block.get("type") == "tool_use" and block.get("name") in tools:
                 asked = True
             elif block.get("type") == "text" and rec.get("type") == "assistant":
                 final_text = block.get("text") or final_text
@@ -83,9 +88,9 @@ def check(records: list[dict], heading: str = HEADING_TEXT) -> str | None:
     first = " ".join(body.split())[:160]
     return (
         f"From the ask-what-you-need hook. Your message has a '{heading}' section that is not "
-        "'Nothing', and you did not call AskUserQuestion this turn:\n\n"
+        f"'Nothing', and you did not call {tools[0]} this turn:\n\n"
         f"    {first}\n\n"
-        "Call AskUserQuestion now, one question per real decision (up to four), each with real "
+        f"Call {tools[0]} now, one question per real decision (up to four), each with real "
         "options and your recommendation first. If an item is yours to settle (by reading a file, "
         "running a command or checking git), settle it instead and remove it from the section."
     )
