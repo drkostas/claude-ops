@@ -98,6 +98,20 @@ self.addEventListener('fetch', e => { if (e.request.method === 'POST') e.respond
 <span style="position:relative">Send</span></div></div>
 <script>document.getElementById('ask').onclick = () => { document.getElementById('sheet').hidden = false; };</script>
 </body>""",
+    # a sheet with an opaque background laid over two buttons, one of them with a short fill, and a layer with no
+    # background holding a button over another button, so both of those are seen
+    "covered.html": """<!doctype html><meta name=viewport content="width=device-width">
+<body style="margin:0;font:14px sans-serif">
+<button style="position:absolute;top:20px;left:10px;width:150px;height:40px">Under</button>
+<div role=button style="position:absolute;top:80px;left:10px;width:200px;height:44px;overflow:hidden">
+<div style="position:absolute;inset:0;pointer-events:none"><svg width="180" height="15"><rect width="180" height="15" fill="#95f"/></svg></div>
+<span style="position:relative">Fill under the sheet</span></div>
+<button style="position:absolute;top:200px;left:10px;width:150px;height:40px">Beneath</button>
+<div style="position:fixed;left:0;right:0;top:0;height:150px;background:#223">
+<button style="position:absolute;top:25px;left:40px;width:150px;height:40px">Over</button></div>
+<div style="position:fixed;left:0;right:0;top:180px;height:80px">
+<button style="position:absolute;top:25px;left:40px;width:150px;height:40px">Floating</button></div>
+</body>""",
     # a row of filter chips: All is chosen, and a tap on it changes nothing; Queued chooses itself
     "chips.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
 <div id=row></div><div id=out>all</div>
@@ -328,6 +342,14 @@ def test_a_fill_that_stops_short_of_its_button_is_short_fill(site, tmp_path):
     assert any(d.startswith("Short fill") and "90% of its width and 34% of its height" in d for d in short), short
     assert any(d.startswith("Thin layer") and "25% of its height" in d for d in short), short
     assert len(short) == 2, f"a full fill, a chosen chip's fill, an icon, a dot and a bar are no short fill: {short}"
+
+
+def test_what_a_sheet_covers_is_no_overlap_and_no_short_fill(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/covered.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
+    found = [(f["kind"], f["detail"]) for f in page["findings"]]
+    assert ("overlap", "Beneath and Floating") in found, found
+    assert [f for f in found if f[0] in ("overlap", "short_fill")] == [("overlap", "Beneath and Floating")], found
 
 
 def test_a_fill_drawn_short_after_a_tap_is_found_too(site, tmp_path):

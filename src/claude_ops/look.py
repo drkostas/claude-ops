@@ -13,7 +13,9 @@ picture shows a person at once.
 - `short_fill` is a fill that stops short of the button it is laid over. A fill is a painted layer with no text
   (an SVG, a canvas, an image, or a box with a background) set at the top left corner of the box it is laid in and
   at least half as wide or half as tall as that box. The detail says how much of the width and height it covers.
-- `overlap` is two tappable elements on top of each other.
+  A button that a menu or a sheet covers is left for a look where it is seen.
+- `overlap` is two tappable elements on top of each other, where both are seen. A button under a menu, a sheet
+  or a dialog is not seen there, since a box with an opaque background, other than the button's own, lies above it.
 - `off_screen` is a tappable element, or an element with text, that reaches past the screen's left or right edge.
 - `empty` is a page with no text and no image.
 - `not_loaded` is a page that did not load within the time given.
@@ -183,18 +185,34 @@ CHECKS_JS = r"""
     if (t.width && (t.left < r.left - 1 || t.right > r.right + 1 || t.top < r.top - 1 || t.bottom > r.bottom + 1))
       out.push({kind: 'cut_off', detail: words(el) + ' (runs over its button)'});
   }
+  // A layer laid over the page on purpose (a menu, a sheet, a dialog) paints a box of its own over what is under it,
+  // so what it covers is not seen there. `hidden(el, x, y, but)` is true when, at the point (x, y), a box with an
+  // opaque background lies above el, other than el's own ancestors and anything inside `but`. A point off the screen
+  // cannot be tested, and counts as seen.
+  const alpha = c => { const m = /rgba?\(([^)]*)\)/.exec(c || ''); if (!m) return c === 'transparent' ? 0 : 1;
+                       const p = m[1].split(/[\s,/]+/).filter(Boolean); return p.length > 3 ? parseFloat(p[3]) : 1; };
+  const opaque = el => { const s = getComputedStyle(el); return s.backgroundImage !== 'none' || alpha(s.backgroundColor) >= 0.99; };
+  const hidden = (el, x, y, but) => {
+    const stack = document.elementsFromPoint(x, y);
+    const i = stack.findIndex(e => el.contains(e));
+    return i > 0 && stack.slice(0, i).some(e => !e.contains(el) && !(but && but.contains(e)) && opaque(e));
+  };
+  // two tappable elements on top of each other, where both are seen (a button under a menu or a sheet is not)
   for (let i = 0; i < taps.length; i++) for (let j = i + 1; j < taps.length; j++) {
     const a = taps[i], b = taps[j];
     if (a.contains(b) || b.contains(a)) continue;
     const p = a.getBoundingClientRect(), q = b.getBoundingClientRect();
-    const w = Math.min(p.right, q.right) - Math.max(p.left, q.left), h = Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top);
-    if (w > 1 && h > 1) out.push({kind: 'overlap', detail: words(a) + ' and ' + words(b)});
+    const left = Math.max(p.left, q.left), top = Math.max(p.top, q.top);
+    const w = Math.min(p.right, q.right) - left, h = Math.min(p.bottom, q.bottom) - top;
+    if (w <= 1 || h <= 1) continue;
+    const x = left + w / 2, y = top + h / 2;
+    if (hidden(a, x, y, b) || hidden(b, x, y, a)) continue;
+    out.push({kind: 'overlap', detail: words(a) + ' and ' + words(b)});
   }
   // a fill is a painted layer laid over a button (an SVG, a canvas, an image, or a box with a background), with no
   // text, set at the top left corner of the box it is laid in and as wide or as tall as half of it at least. It is
-  // there to cover that box, so a fill that stops short of the right or the bottom edge is drawn wrong.
-  const alpha = c => { const m = /rgba?\(([^)]*)\)/.exec(c || ''); if (!m) return c === 'transparent' ? 0 : 1;
-                       const p = m[1].split(/[\s,/]+/).filter(Boolean); return p.length > 3 ? parseFloat(p[3]) : 1; };
+  // there to cover that box, so a fill that stops short of the right or the bottom edge is drawn wrong. A button
+  // that a menu or a sheet covers is left for a look where it is seen.
   const painted = el => {
     if (/^(svg|canvas|img|video)$/i.test(el.tagName)) return true;
     const s = getComputedStyle(el);
@@ -202,6 +220,8 @@ CHECKS_JS = r"""
   };
   const pct = (a, b) => Math.round(100 * a / b);
   for (const t of taps) {
+    const r = t.getBoundingClientRect();
+    if (hidden(t, r.left + r.width / 2, r.top + r.height / 2)) continue;
     for (const el of t.querySelectorAll('*')) {
       const drawing = el.closest('svg');
       if ((drawing && drawing !== el) || el.closest(sel) !== t || !shown(el) || !painted(el)) continue;
