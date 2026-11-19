@@ -98,3 +98,20 @@ def test_compact_prompt_is_included(tmp_path, monkeypatch):
     p.write_text("KEEP EVERYTHING")
     monkeypatch.setattr(cm, "PROMPT_FILE", str(p))
     assert "KEEP EVERYTHING" in cm.nudge(900_000)
+
+
+def asked_with(text, tool):
+    recs = [{"type": "user", "message": {"content": "do it"}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": tool}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}]
+    return recs
+
+
+def test_another_configured_ask_tool_counts_and_is_named_in_the_words():
+    tools = ("mcp__tickets__ask", "AskUserQuestion")
+    assert ask.check(asked_with(REPORT, "mcp__tickets__ask"), tools=tools) is None
+    assert ask.check(asked_with(REPORT, "AskUserQuestion"), tools=tools) is None
+    why = ask.check(turn(REPORT), tools=tools)
+    assert why and "call mcp__tickets__ask this turn" in why and "Call mcp__tickets__ask now" in why
+    assert ask.check(asked_with(REPORT, "mcp__tickets__ask")) is not None, "by default only AskUserQuestion counts"
