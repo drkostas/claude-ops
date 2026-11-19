@@ -72,6 +72,47 @@ def test_union_settles_what_it_can_and_leaves_each_refused_file_as_git_left_it(t
     assert unmerged == ["a.py"]
 
 
+NOTES = "# notes\n\n- first\n"
+
+
+def test_union_given_one_conflicted_file_settles_only_that_file(tmp_path, capsys):
+    d = rebasing(tmp_path, {"a.md": NOTES, "docs/b.md": NOTES},
+                 {"a.md": NOTES + "- upstream a\n", "docs/b.md": NOTES + "- upstream b\n"},
+                 {"a.md": NOTES + "- branch a\n", "docs/b.md": NOTES + "- branch b\n"})
+    assert union.main([str(d / "docs" / "b.md")]) == 0
+    b = (d / "docs" / "b.md").read_text()
+    assert "<<<<<<<" not in b and b.index("upstream b") < b.index("branch b")
+    assert git(d, "diff", "--name-only", "--diff-filter=U").stdout.split() == ["a.md"]
+    assert "<<<<<<<" in (d / "a.md").read_text()
+    assert "kept both sides in docs/b.md" in capsys.readouterr().out
+
+
+def test_union_given_a_folder_below_the_top_settles_the_whole_worktree(tmp_path):
+    d = rebasing(tmp_path, {"a.md": NOTES, "docs/b.md": NOTES},
+                 {"a.md": NOTES + "- upstream a\n", "docs/b.md": NOTES + "- upstream b\n"},
+                 {"a.md": NOTES + "- branch a\n", "docs/b.md": NOTES + "- branch b\n"})
+    assert union.main([str(d / "docs")]) == 0
+    assert git(d, "diff", "--name-only", "--diff-filter=U").stdout.split() == []
+    assert "<<<<<<<" not in (d / "a.md").read_text() + (d / "docs" / "b.md").read_text()
+
+
+def test_union_refuses_a_file_with_no_conflict_and_a_path_outside_a_worktree(tmp_path, capsys):
+    d = rebasing(tmp_path, {"a.md": NOTES, "clean.md": NOTES},
+                 {"a.md": NOTES + "- upstream a\n"}, {"a.md": NOTES + "- branch a\n"})
+    before = (d / "a.md").read_text()
+    assert union.main([str(d / "clean.md")]) == 2
+    err = capsys.readouterr().err
+    assert "holds no conflict git knows of" in err and "Traceback" not in err
+    assert (d / "a.md").read_text() == before
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "f.md").write_text(NOTES)
+    for path in (plain, plain / "f.md", tmp_path / "nowhere.md"):
+        assert union.main([str(path)]) == 2
+        err = capsys.readouterr().err
+        assert "is not in a git worktree" in err and "Usage: claude-ops union" in err
+
+
 def test_union_refuses_a_name_defined_twice(tmp_path, capsys):
     base = "import os\n\n\ndef first():\n    return 1\n"
     same = "\n\ndef derived(x):\n    return x\n"
