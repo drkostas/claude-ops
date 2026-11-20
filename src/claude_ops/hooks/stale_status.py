@@ -41,8 +41,11 @@ command's exit: another command runs after it, its output is piped (without pipe
 command other than a failing exit when it fails. These go through: the watch as the only or last
 command, joined to the next with `&&`, tested in an if, elif, while or until condition or after `!`,
 with `set -e` before it, piped after `set -o pipefail`, followed by `|| exit 1`, and a command whose
-first exit after the watch is `exit "$rc"` (any variable) or an `exit $?` straight after it. A command
-in the foreground is not read, since its output and status are read when it ends.
+first exit after the watch is `exit "$rc"` of a variable saved with `rc=$?` straight after the watch, or
+an `exit $?` straight after it. A watch in the body of a for, while or until loop is refused unless
+`|| exit 1` after it or `set -e` before it ends the loop at the first failure, since a loop gives only
+its last round's status. A command in the foreground is not read, since its output and status are read
+when it ends.
 
     claude-ops hook stale-status      # reads the tool call on stdin
     python3 -P -m claude_ops.hooks.stale_status
@@ -385,6 +388,12 @@ BODIES = {"then", "do"}
 SYNTAX = CONDITIONS | BODIES | {"!", "done", "fi", "else", "esac", "{", "}"}
 #: a word that is one variable: what `exit "$rc"` or `exit ${rc}` hands over once quotes are removed
 ONE_VARIABLE = re.compile(r"^\$(?:\?|[A-Za-z_][A-Za-z0-9_]*|\{[?A-Za-z_][^}]*\})$")
+#: the name of the variable such a word reads (`?` for `$?`)
+VARIABLE_NAME = re.compile(r"^\$\{?(\?|[A-Za-z_][A-Za-z0-9_]*)")
+#: an assignment of the status to a variable, `rc=$?` (quotes are gone once the line is split)
+SAVES_STATUS = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=\$(?:\?|\{\?\})$")
+#: words that may stand before such an assignment
+DECLARE = {"local", "export", "declare", "typeset", "readonly"}
 
 
 def leading(words: list[str]) -> tuple[list[str], list[str]]:
@@ -420,6 +429,15 @@ def exits_with(words: list[str]) -> str | None:
     return w[1] if len(w) > 1 else ""
 
 
+def saved_status(words: list[str]) -> str | None:
+    """The variable a command saves `$?` into (`rc=$?`, `local rc=$?`), or None."""
+    _, w = leading(words)
+    while w and (w[0] in DECLARE or (w[0].startswith("-") and len(w) > 1)):
+        w = w[1:]
+    m = SAVES_STATUS.match(w[0]) if len(w) == 1 else None
+    return m.group(1) if m else None
+
+
 def shown(words: list[str], limit: int = 40) -> str:
     text = " ".join(leading(words)[1])
     return text if len(text) <= limit else text[:limit - 3] + "..."
@@ -443,8 +461,9 @@ def after_list(steps: list[dict], j: int) -> list[dict]:
     return out
 
 
-def hides(steps: list[dict], g: int, errexit: bool, pipefail: bool) -> str | None:
-    """How the command hides the status of the gate at step g, or None when its exit still reports it."""
+def hides(steps: list[dict], g: int, errexit: bool, pipefail: bool, in_loop: bool = False) -> str | None:
+    """How the command hides the status of the gate at step g, or None when its exit still reports it.
+    `in_loop`: the gate is in the body of a for, while or until loop, whose status is its last round's."""
     name = gate_name(steps[g]["words"])
     j = g
     while steps[j]["after"] == "|":
@@ -461,17 +480,20 @@ def hides(steps: list[dict], g: int, errexit: bool, pipefail: bool) -> str | Non
             return f"runs `|| {shown(steps[j]['words'])}` when {name} fails, which then gives the status"
         while steps[j]["after"] == "|":                 # `gate && a | b` runs only after a pass
             j += 1
+    stops = errexit and steps[g]["after"] not in ("&&", "||")   # set -e ends the command when the gate fails
+    if in_loop and not stops:
+        return f"runs {name} in a loop, which gives only its last round's status"
     rest = after_list(steps, j)
-    if not rest:
+    if not rest or stops:
         return None                                    # the gate's list is the last thing the command runs
-    if errexit and steps[g]["after"] not in ("&&", "||"):
-        return None                                    # set -e ends the command when the gate fails
+    saved = saved_status(rest[0]["words"])             # `rc=$?` straight after the gate
     for k, st in enumerate(rest):
         arg = exits_with(st["words"])
         if arg is None:
             continue
-        if ONE_VARIABLE.match(arg) and (k == 0 or "?" not in arg):
-            return None                                # `exit "$rc"`, or `exit $?` straight after the gate
+        var = VARIABLE_NAME.match(arg) if ONE_VARIABLE.match(arg) else None
+        if var and (var.group(1) == "?" and k == 0 or var.group(1) == saved):
+            return None                                # `exit $?` straight after the gate, or exit "$rc" of rc=$?
         break
     return f"then runs `{shown(rest[-1]['words'])}`, whose status the command ends with"
 
@@ -482,17 +504,19 @@ def hidden_gate(command: str) -> str | None:
     and passes."""
     steps = commandline.parse(command)
     condition = errexit = pipefail = False
+    loops = 0                                          # loop bodies the step is in (do ... done)
     for g, st in enumerate(steps):
         keys, words = leading(st["words"])
         if any(k in CONDITIONS for k in keys):
             condition = True
         if any(k in BODIES for k in keys):
             condition = False
+        loops = max(0, loops + keys.count("do") - keys.count("done"))
         e, p = shell_options(words)
         errexit, pipefail = errexit or e, pipefail or p
         if condition or "!" in keys or not gate_name(words):
             continue
-        how = hides(steps, g, errexit, pipefail)
+        how = hides(steps, g, errexit, pipefail, in_loop=loops > 0)
         if how:
             return how
     return None
@@ -510,9 +534,13 @@ def background_refusal(payload: dict) -> str | None:
     if not how:
         return None
     name = next((gate_name(s["words"]) for s in commandline.parse(command) if gate_name(s["words"])), "the gate")
-    fix = (f"put set -o pipefail; before it, or run the watch as the only command" if how.startswith("pipes")
-           else f"run the watch as the only command, or save its status and end with it, "
-                f"{name} ...; rc=$?; echo \"rc=$rc\" >> log; exit $rc")
+    if how.startswith("pipes"):
+        fix = "put set -o pipefail; before it, or run the watch as the only command"
+    elif " in a loop" in how:
+        fix = f"end the loop at the first failure, {name} ... || exit 1, or put set -e; before the loop"
+    else:
+        fix = (f"run the watch as the only command, or save its status straight after it and end with it, "
+               f"{name} ...; rc=$?; echo \"rc=$rc\" >> log; exit $rc")
     return (f"this background command {how}. A background command reports the exit status of its last "
             f"command, so a failed {name} would be reported as a success. To keep its status, {fix}")
 
