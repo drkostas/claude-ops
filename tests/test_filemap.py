@@ -48,6 +48,18 @@ def test_signature_changes_when_a_file_is_added_or_edited(tmp_path):
     assert filemap.signature(filemap.walk(tmp_path)) != before
 
 
+def test_signature_changes_when_a_file_is_renamed_or_moved(tmp_path):
+    make(tmp_path, {"loose/scan.pdf": 3, "other/x.pdf": 4})
+    seen = [filemap.signature(filemap.walk(tmp_path))]
+    os.rename(tmp_path / "loose/scan.pdf", tmp_path / "loose/passport.pdf")
+    seen.append(filemap.signature(filemap.walk(tmp_path)))
+    (tmp_path / "Identity").mkdir()
+    os.rename(tmp_path / "loose/passport.pdf", tmp_path / "Identity/passport.pdf")
+    seen.append(filemap.signature(filemap.walk(tmp_path)))
+    assert len({s["digest"] for s in seen}) == 3
+    assert all(s["files"] == 2 and s["bytes"] == 7 for s in seen)
+
+
 def test_an_id_need_prefers_the_sendable_copy_then_the_newest(tmp_path):
     make(tmp_path, FILES)
     os.utime(tmp_path / "Personal/Identity/Old ID Card (2015).pdf", (1, 1))
@@ -96,5 +108,6 @@ def test_no_match_gives_nothing_and_limit_holds(tmp_path):
 
 def test_words_and_stems():
     assert filemap.words("ID & Civil-Registry (2025)") == ["id", "civil", "registry", "2025"]
+    assert filemap.words("Résumé Müller_Ärzte Ελληνική") == ["résumé", "müller", "ärzte", "ελληνική"]
     assert filemap.stem("statements") == "statement" and filemap.stem("class") == "class"
     assert filemap.stem("copies") == "copy"

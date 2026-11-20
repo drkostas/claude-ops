@@ -1,7 +1,7 @@
 """Map a folder tree and find the files that answer a need, from paths and names alone.
 
 `walk` turns a folder into one row per file (path, size, modified time, extension).
-`signature` is a cheap reading that changes when a file is added, removed, renamed or
+`signature` is a cheap reading that changes when a file is added, removed, renamed, moved or
 edited, so a caller rebuilds its map only when it must. `find` ranks the rows for a
 need written in plain words ("a copy of my ID card"). It reads no file content, only the
 words of each folder and file name, so it is safe to run over a folder of private papers.
@@ -14,6 +14,7 @@ and name words then count for more:
 Among files that match equally well, the format a person can send is preferred (a PDF,
 then a picture, then a word processor file, then raw camera files), and then the newest.
 """
+import hashlib
 import os
 import re
 
@@ -28,7 +29,7 @@ SKIP_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 def words(text):
     """Lower case words of a text, split on anything that is not a letter or digit."""
-    return [w for w in re.split(r"[^0-9a-zͰ-Ͽ]+", (text or "").lower()) if w]
+    return re.findall(r"[^\W_]+", (text or "").lower())
 
 
 def stem(word):
@@ -80,9 +81,16 @@ def walk(root, skip=()):
 
 
 def signature(rows):
-    """What changed between two walks: the count, the total size and the newest time."""
+    """What changed between two walks: the count, the total size, the newest time and a digest.
+
+    The digest is the sha256 of every row's path, size and modified time, so a file that is
+    renamed or moved changes it though the count, the size and the times stay the same.
+    """
+    digest = hashlib.sha256()
+    for r in sorted(rows, key=lambda r: r["path"]):
+        digest.update(f"{r['path']}\0{r['size']}\0{r['mtime']}\n".encode("utf-8", "surrogateescape"))
     return {"files": len(rows), "bytes": sum(r["size"] for r in rows),
-            "newest": max((r["mtime"] for r in rows), default=0)}
+            "newest": max((r["mtime"] for r in rows), default=0), "digest": digest.hexdigest()}
 
 
 def format_rank(ext):
