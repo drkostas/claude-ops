@@ -191,9 +191,9 @@ def test_the_cli_and_the_chain_offer_the_hook(tmp_path, monkeypatch):
 
 
 # --- a background command that hides a gate's exit ------------------------------------------------
-# Each command runs with a stand-in `gh` that fails, as a red check would. The hook refuses exactly the
-# commands the shell then reports as a success (HIDDEN), and lets through the ones whose exit still
-# carries the failure (REPORTED).
+# Each command runs with a stand-in `gh` that fails, as a red check would, except for pull request 8,
+# whose checks pass. The hook refuses exactly the commands the shell then reports as a success (HIDDEN),
+# and lets through the ones whose exit still carries the failure (REPORTED).
 HIDDEN = [
     'gh pr checks 7 --watch; echo "rc=$?" >> log',
     'gh pr checks 7 --watch --fail-fast >/dev/null; echo "checks exit $?"',
@@ -206,6 +206,14 @@ HIDDEN = [
     'gh pr checks 7 --watch\necho done',
     'set -e; gh pr checks 7 --watch && echo green; echo done',
     'if true; then gh pr checks 7 --watch; fi; echo done',
+    # a variable saved after another command holds that command's status, and an unset one exits with
+    # the last command's
+    'gh pr checks 7 --watch; echo x; rc=$?; exit $rc',
+    'gh pr checks 7 --watch; echo "$(date)" >> log; exit $rc',
+    # a loop gives the status of its last round, so a red pull request before a green one is lost
+    'for p in 7 8; do gh pr checks $p --watch; done',
+    'for p in 7 8; do gh pr checks $p --watch; rc=$?; done; exit $rc',
+    "printf '7\\n8\\n' | while read p; do gh pr checks $p --watch; done",
 ]
 REPORTED = [
     'gh pr checks 7 --watch',
@@ -220,6 +228,8 @@ REPORTED = [
     'gh pr checks 7 --watch || exit 1; echo green',
     'for p in 7 8; do gh pr checks $p --watch || exit 1; done; echo all green',
     'if [ -n "x" ]; then gh pr checks 7 --watch; else echo none; fi',
+    'gh pr checks 7 --watch; s=$?; echo "rc=$s" >> log; exit "$s"',
+    'set -e; for p in 7 8; do gh pr checks $p --watch; done; echo all green',
 ]
 # The command tests the gate's status itself, so the hook leaves it to the command.
 HANDLED = [
@@ -242,7 +252,8 @@ def failing_gh(tmp_path):
     folder = tmp_path / "bin"
     folder.mkdir()
     gh = folder / "gh"
-    gh.write_text("#!/bin/sh\necho 'tests  fail  1m'\nexit 1\n")
+    gh.write_text("#!/bin/sh\ncase \" $* \" in *\" 8 \"*) echo 'tests  pass  1m'; exit 0;; esac\n"
+                  "echo 'tests  fail  1m'\nexit 1\n")
     gh.chmod(0o755)
     return {"PATH": f"{folder}:/usr/bin:/bin", "HOME": str(tmp_path)}
 
@@ -282,6 +293,17 @@ def test_the_reason_gives_the_fix_for_its_shape():
     assert "then runs `echo rc=$?`" in later and 'rc=$?; echo "rc=$rc" >> log; exit $rc' in later
     either = ss.check(background("gh run watch 9 --exit-status || echo failed"))
     assert "runs `|| echo failed` when gh run watch fails" in either
+    loop = ss.check(background("for p in 7 8; do gh pr checks $p --watch; done"))
+    assert "runs gh pr checks in a loop" in loop and "|| exit 1" in loop and "set -e" in loop
+
+
+def test_a_status_is_saved_only_by_an_assignment_of_it():
+    assert ss.saved_status(["rc=$?"]) == "rc"
+    assert ss.saved_status(["local", "rc=$?"]) == "rc"
+    assert ss.saved_status(["declare", "-i", "s=${?}"]) == "s"
+    assert ss.saved_status(["rc=$?", "echo"]) is None
+    assert ss.saved_status(["rc=0"]) is None
+    assert ss.saved_status(["echo", "rc=$?"]) is None
 
 
 def test_an_unreadable_command_goes_through():
