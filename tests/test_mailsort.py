@@ -57,6 +57,17 @@ def test_is_automated():
     assert not is_automated({"From": "Ana <ana@example.com>"})
 
 
+def test_a_no_reply_word_anywhere_in_the_local_part_is_automated():
+    for sender in ("star.notifier.noreply@example.com", "github-noreply@example.com",
+                   "alerts.noreply@example.com", "app_do-not-reply@example.com", "a+no.reply@example.com"):
+        assert is_automated({"From": sender}), sender
+    for sender in ("replyguy@example.com", "noreplyfan@example.com", "jane.team@example.com",
+                   "ana.reply@example.com"):
+        assert not is_automated({"From": sender}), sender
+    # a known contact is judged by the headers alone
+    assert not is_automated({"From": "star.notifier.noreply@example.com"}, by_name=False)
+
+
 def test_is_bulk():
     assert is_bulk(["INBOX", "CATEGORY_PROMOTIONS"])
     assert not is_bulk(["INBOX", "CATEGORY_UPDATES"]) and not is_bulk(None)
