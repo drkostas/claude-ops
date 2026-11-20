@@ -7,9 +7,16 @@ picture shows a person at once.
 
 - `cut_off` is text that does not fit. It is an element whose own text is wider or taller than its box, a box
   that hides its overflow and holds text larger than itself (a button of fixed width with a long label inside it),
-  or a tappable element whose text reaches outside its own rectangle. The detail says when the box ends the text
-  with an ellipsis on purpose, and when the text runs over its button.
-- `overlap` is two tappable elements on top of each other.
+  or a tappable element whose text reaches outside its own rectangle. A box that scrolls one way and hides the
+  other (a page in a scroll view, a row of chips that scrolls sideways) is measured only the way it hides. The
+  detail says when the box ends the text with an ellipsis on purpose, and when the text runs over its button.
+- `short_fill` is a fill that stops short of the button it is laid over. A fill is a painted layer with no text
+  (an SVG, a canvas, an image, or a box with a background) set at the top left corner of the box it is laid in and
+  at least half as wide or half as tall as that box. The detail says how much of the width and height it covers.
+  A button that a menu or a sheet covers is left for a look where it is seen.
+- `overlap` is two tappable elements on top of each other, where both are seen. A button under a menu, a sheet
+  or a dialog is not seen there, since a box with an opaque background, other than the button's own, lies above it.
+  Past the screen's edge, where that cannot be tested, two elements meet only when the same box scrolls them.
 - `off_screen` is a tappable element, or an element with text, that reaches past the screen's left or right edge.
 - `empty` is a page with no text and no image.
 - `not_loaded` is a page that did not load within the time given.
@@ -29,11 +36,16 @@ A button whose tap sends such a request is tapped once for each way of answering
 - `slow` holds the answer, takes a picture while the page waits, then answers yes.
 - `none` never answers.
 
-A tap that sends nothing, stays on the same address and changes nothing on the page is `dead_tap`. A button
-still there, enabled and with the same words after a `yes` is `offered_again`, unless it matches `again`, a
-CSS selector for buttons meant to stay. A button whose words at its place differ on a fresh load (the page
-drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a text area) is shown empty and with text, and
-the report lists the buttons enabled in each case, so a button meant to wait for text can be seen both ways.
+After a tap that stays on the same address, the page is checked again as it is then, so a sheet or a menu the tap
+opened is checked too. A tap that sends nothing, stays on the same address and changes nothing on the page is
+`dead_tap`, unless the button is already the one chosen (`aria-selected`, `aria-checked` or `aria-pressed` true,
+or a checked input), as a filter chip that is on already, or the tap opened a file picker or asked the browser
+to open an address elsewhere (`window.open`, or a link whose scheme an app takes), which the tap's `opened`
+lists. A button still there, enabled and with the same words after a `yes` is `offered_again`, unless it
+matches `again`, a CSS selector for buttons meant to stay. A button whose words at its place differ on a fresh
+load (the page drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a
+text area) is shown empty and with text, and the report lists the buttons enabled in each case, so a button meant
+to wait for text can be seen both ways.
 
 The report (`report.json` in the output folder) lists each page's pictures, findings, taps and boxes, and the
 buttons left out by `max_taps`, so a short run never reads as a full one. `sheet` puts two reports' pictures
@@ -151,14 +163,18 @@ CHECKS_JS = r"""
     }
   }
   // a box that hides its overflow and holds text larger than itself (a fixed-width button with a long label in a
-  // span, the way react-native-web draws a Text inside a Pressable)
+  // span, the way react-native-web draws a Text inside a Pressable). Only a direction the box hides counts: a box
+  // that scrolls down and hides what runs sideways (react-native-web's scroll view, holding a whole page) keeps the
+  // text below the screen within reach, and so does a row of chips that scrolls sideways.
   const clips = s => /(hidden|clip)/.test(s.overflowX + ' ' + s.overflowY);
+  const hides = v => /(hidden|clip)/.test(v);
   const ellipsis = s => s.textOverflow === 'ellipsis' || (s.webkitLineClamp && s.webkitLineClamp !== 'none');
   for (const el of document.querySelectorAll('body *')) {
     if (!shown(el) || el.clientWidth === 0) continue;
     const s = getComputedStyle(el);
     if (!clips(s) || !(el.innerText || '').trim()) continue;
-    if (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1)
+    if ((hides(s.overflowX) && el.scrollWidth > el.clientWidth + 1) ||
+        (hides(s.overflowY) && el.scrollHeight > el.clientHeight + 1))
       out.push({kind: 'cut_off', detail: words(el) + (ellipsis(s) ? ' (ends with an ellipsis)' : '')});
   }
   const taps = [...document.querySelectorAll(sel)].filter(shown);
@@ -172,14 +188,81 @@ CHECKS_JS = r"""
     if (t.width && (t.left < r.left - 1 || t.right > r.right + 1 || t.top < r.top - 1 || t.bottom > r.bottom + 1))
       out.push({kind: 'cut_off', detail: words(el) + ' (runs over its button)'});
   }
+  // A layer laid over the page on purpose (a menu, a sheet, a dialog) paints a box of its own over what is under it,
+  // so what it covers is not seen there. `hidden(el, x, y, but)` is true when, at the point (x, y), a box with an
+  // opaque background lies above el, other than el's own ancestors and anything inside `but`. A point off the screen
+  // cannot be tested this way. There two elements are taken to meet only when the same box scrolls them, since a
+  // menu's item and a page's button below the screen's edge move apart as soon as either box scrolls.
+  const alpha = c => { const m = /rgba?\(([^)]*)\)/.exec(c || ''); if (!m) return c === 'transparent' ? 0 : 1;
+                       const p = m[1].split(/[\s,/]+/).filter(Boolean); return p.length > 3 ? parseFloat(p[3]) : 1; };
+  const opaque = el => {
+    const s = getComputedStyle(el);
+    return s.backgroundImage !== 'none' || alpha(s.backgroundColor) >= 0.99;
+  };
+  const H = document.documentElement.clientHeight || window.innerHeight;
+  const hidden = (el, x, y, but) => {
+    const at = (px, py) => { const st = document.elementsFromPoint(px, py); return [st, st.findIndex(e => el.contains(e))]; };
+    let [stack, i] = at(x, y);
+    if (i < 0) {
+      // el is not drawn at that point (a rounded corner, a gap in it), so it is tested in the middle of what of
+      // it is on the screen
+      const r = el.getBoundingClientRect();
+      const l = Math.max(r.left, 0), t = Math.max(r.top, 0), rr = Math.min(r.right, W), rb = Math.min(r.bottom, H);
+      if (rr > l && rb > t) [stack, i] = at((l + rr) / 2, (t + rb) / 2);
+    }
+    return i > 0 && stack.slice(0, i).some(e => !e.contains(el) && !(but && but.contains(e)) && opaque(e));
+  };
+  const scroller = el => {
+    for (let a = el.parentElement; a; a = a.parentElement) {
+      const s = getComputedStyle(a);
+      if (/(auto|scroll)/.test(s.overflowX + ' ' + s.overflowY) &&
+          (a.scrollHeight > a.clientHeight || a.scrollWidth > a.clientWidth)) return a;
+    }
+    return null;
+  };
+  // two tappable elements on top of each other, where both are seen (a button under a menu or a sheet is not)
   for (let i = 0; i < taps.length; i++) for (let j = i + 1; j < taps.length; j++) {
     const a = taps[i], b = taps[j];
     if (a.contains(b) || b.contains(a)) continue;
     const p = a.getBoundingClientRect(), q = b.getBoundingClientRect();
-    const w = Math.min(p.right, q.right) - Math.max(p.left, q.left), h = Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top);
-    if (w > 1 && h > 1) out.push({kind: 'overlap', detail: words(a) + ' and ' + words(b)});
+    const left = Math.max(p.left, q.left), top = Math.max(p.top, q.top);
+    const w = Math.min(p.right, q.right) - left, h = Math.min(p.bottom, q.bottom) - top;
+    if (w <= 1 || h <= 1) continue;
+    const x = left + w / 2, y = top + h / 2;
+    if (x >= 0 && y >= 0 && x < W && y < H ? hidden(a, x, y, b) || hidden(b, x, y, a) : scroller(a) !== scroller(b))
+      continue;
+    out.push({kind: 'overlap', detail: words(a) + ' and ' + words(b)});
   }
-  const text = (document.body && document.body.innerText || '').trim();
+  // a fill is a painted layer laid over a button (an SVG, a canvas, an image, or a box with a background), with no
+  // text, set at the top left corner of the box it is laid in and as wide or as tall as half of it at least. It is
+  // there to cover that box, so a fill that stops short of the right or the bottom edge is drawn wrong. A button
+  // that a menu or a sheet covers is left for a look where it is seen.
+  const painted = el => {
+    if (/^(svg|canvas|img|video)$/i.test(el.tagName)) return true;
+    const s = getComputedStyle(el);
+    return s.backgroundImage !== 'none' || alpha(s.backgroundColor) > 0;
+  };
+  const pct = (a, b) => Math.round(100 * a / b);
+  for (const t of taps) {
+    const r = t.getBoundingClientRect();
+    if (hidden(t, r.left + r.width / 2, r.top + r.height / 2)) continue;
+    for (const el of t.querySelectorAll('*')) {
+      const drawing = el.closest('svg');
+      if ((drawing && drawing !== el) || el.closest(sel) !== t || !shown(el) || !painted(el)) continue;
+      if ((el.textContent || '').trim()) continue;   // a face that holds the label, not a layer under it
+      let laid = el;
+      while (laid && laid !== t && getComputedStyle(laid).position !== 'absolute') laid = laid.parentElement;
+      if (!laid || laid === t) continue;   // drawn in the label's line (an icon), not laid over the button
+      const frame = laid.offsetParent && t.contains(laid.offsetParent) ? laid.offsetParent : t;
+      const b = frame.getBoundingClientRect(), e = el.getBoundingClientRect();
+      if (Math.abs(e.left - b.left) > 2 || Math.abs(e.top - b.top) > 2) continue;   // a dot or a mark, not a fill
+      if (e.width < b.width / 2 && e.height < b.height / 2) continue;
+      if (e.right < b.right - 2 || e.bottom < b.bottom - 2)
+        out.push({kind: 'short_fill', detail: words(t) + ` (its fill covers ${pct(e.width, b.width)}% of its width` +
+                                              ` and ${pct(e.height, b.height)}% of its height)`});
+    }
+  }
+  const text =(document.body && document.body.innerText || '').trim();
   const pictures = [...document.querySelectorAll('img, svg, canvas, video')].filter(shown);
   if (!text && !pictures.length) out.push({kind: 'empty', detail: 'no text and no image'});
   return out;
@@ -193,7 +276,8 @@ BUTTONS_JS = r"""
   const shown = r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
   const words = ((el.innerText || el.value || el.getAttribute('aria-label') || '') + '').trim().replace(/\s+/g, ' ').slice(0, 60);
   const enabled = !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-  return {i, words, enabled, shown, stays: !!(again && el.matches(again))};
+  const chosen = ['aria-selected', 'aria-checked', 'aria-pressed'].some(a => el.getAttribute(a) === 'true') || el.checked === true;
+  return {i, words, enabled, shown, chosen, stays: !!(again && el.matches(again))};
 }).filter(b => b.shown)
 """
 
@@ -202,6 +286,18 @@ STATE_JS = r"""
 (sel) => [location.href, (document.body && document.body.innerText || ''),
           [...document.querySelectorAll(sel)].map(el => !el.disabled && el.getAttribute('aria-disabled') !== 'true').join(',')].join('\n')
 """
+
+# every address the page asks window.open to open, kept on the window, so a tap that opens a link in another tab or
+# in another app (a link whose scheme the browser hands to an app, which opens no page here) is seen
+OPENED_JS = r"""
+(() => {
+  const opened = [];
+  Object.defineProperty(window, '__look_opened', {value: opened});
+  const open = window.open;
+  window.open = function (url) { opened.push(String(url)); return open.apply(this, arguments); };
+})();
+"""
+WEB = ("http:", "https:", "data:", "blob:", "about:")
 
 # scroll the page and every scrolling box in it to its end
 END_JS = r"""
@@ -288,6 +384,7 @@ def _open(browser, url: str, held: _Held, *, viewport: tuple[int, int], timeout_
     try:
         context.route("**/*", held)
         context.route_web_socket(re.compile(".*"), held.socket)
+        context.add_init_script(OPENED_JS)
         page = context.new_page()
         page.goto(url, wait_until="load", timeout=timeout_s * 1000)
     except Exception:
@@ -386,6 +483,9 @@ def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: A
             _close(page, held)
             return tap
         before = page.evaluate(STATE_JS, TAPPABLE)
+        elsewhere: list[str] = []   # what the tap handed the person to: a file picker, a tab, another app
+        page.on("filechooser", lambda _chooser: elsewhere.append("a file picker"))
+        page.on("requestfailed", lambda r: elsewhere.append(r.url) if not r.url.startswith(WEB) else None)
         try:
             page.locator(TAPPABLE).nth(button["i"]).click(timeout=5000)
         except Exception as e:   # noqa: BLE001
@@ -402,12 +502,21 @@ def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: A
             page.wait_for_timeout(answers.slow_s * 1000)
         page.wait_for_timeout(settle_ms)
         tap["pictures"][mode] = shot(page, f"tap{n}-{mode}")
+        if mode == "yes" and page.url == href:
+            # what the tap opened (a sheet, a menu) is checked like the page itself
+            _add(rec["findings"], page.evaluate(CHECKS_JS, TAPPABLE), tap["pictures"]["yes"])
         if mode == "yes":
             tap["sent"] = held.sent
+            elsewhere += page.evaluate("() => window.__look_opened || []")
+            if elsewhere:
+                tap["opened"] = elsewhere[:3]
             if not held.sent:
-                if page.url == href and page.evaluate(STATE_JS, TAPPABLE) == before:
-                    _add(rec["findings"], [{"kind": "dead_tap", "detail": button["words"]}],
-                         tap["pictures"]["yes"])
+                if page.url == href and page.evaluate(STATE_JS, TAPPABLE) == before and not elsewhere:
+                    if button.get("chosen"):
+                        tap["chosen"] = True   # it is already the one chosen, so a tap on it changes nothing
+                    else:
+                        _add(rec["findings"], [{"kind": "dead_tap", "detail": button["words"]}],
+                             tap["pictures"]["yes"])
                 _close(page, held)
                 return tap   # nothing was sent, so the other answers would show the same
             same = [b for b in page.evaluate(BUTTONS_JS, [TAPPABLE, again or None])
