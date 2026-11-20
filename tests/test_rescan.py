@@ -160,3 +160,12 @@ def test_the_command_passes_its_options(monkeypatch, capsys):
     assert code == 5 and "could not complete either" in capsys.readouterr().err
     assert seen == {"number": "7", "repo": "owner/repo", "head": SHA, "pattern": rescan.INCOMPLETE,
                     "timeout_s": 120.0, "poll_s": 5.0}
+
+
+def test_a_pull_request_gh_cannot_read_is_left_alone():
+    def gh(args):
+        if args[:2] == ["pr", "view"]:
+            return run(out="not json")
+        raise AssertionError(args)
+    code, said = go(gh)
+    assert code == 4 and "could not read the pull request" in said

@@ -110,7 +110,7 @@ def rescan(number: str, repo: str | None = None, *, head: str | None = None, pat
         gh = lambda a: merge._gh(a, env)   # noqa: E731 - the default gh, with the caller's environment
     try:
         pr = merge._view(number, repo, gh, FIELDS)
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         return 4, f"could not read the pull request: {e}"
     if pr.get("state") != "OPEN":
         return 4, f"#{number} is {(pr.get('state') or 'unknown').lower()}, not open"
