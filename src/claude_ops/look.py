@@ -16,6 +16,7 @@ picture shows a person at once.
   A button that a menu or a sheet covers is left for a look where it is seen.
 - `overlap` is two tappable elements on top of each other, where both are seen. A button under a menu, a sheet
   or a dialog is not seen there, since a box with an opaque background, other than the button's own, lies above it.
+  Past the screen's edge, where that cannot be tested, two elements meet only when the same box scrolls them.
 - `off_screen` is a tappable element, or an element with text, that reaches past the screen's left or right edge.
 - `empty` is a page with no text and no image.
 - `not_loaded` is a page that did not load within the time given.
@@ -190,7 +191,8 @@ CHECKS_JS = r"""
   // A layer laid over the page on purpose (a menu, a sheet, a dialog) paints a box of its own over what is under it,
   // so what it covers is not seen there. `hidden(el, x, y, but)` is true when, at the point (x, y), a box with an
   // opaque background lies above el, other than el's own ancestors and anything inside `but`. A point off the screen
-  // cannot be tested, and counts as seen.
+  // cannot be tested this way. There two elements are taken to meet only when the same box scrolls them, since a
+  // menu's item and a page's button below the screen's edge move apart as soon as either box scrolls.
   const alpha = c => { const m = /rgba?\(([^)]*)\)/.exec(c || ''); if (!m) return c === 'transparent' ? 0 : 1;
                        const p = m[1].split(/[\s,/]+/).filter(Boolean); return p.length > 3 ? parseFloat(p[3]) : 1; };
   const opaque = el => {
@@ -202,6 +204,15 @@ CHECKS_JS = r"""
     const i = stack.findIndex(e => el.contains(e));
     return i > 0 && stack.slice(0, i).some(e => !e.contains(el) && !(but && but.contains(e)) && opaque(e));
   };
+  const H = document.documentElement.clientHeight || window.innerHeight;
+  const scroller = el => {
+    for (let a = el.parentElement; a; a = a.parentElement) {
+      const s = getComputedStyle(a);
+      if (/(auto|scroll)/.test(s.overflowX + ' ' + s.overflowY) &&
+          (a.scrollHeight > a.clientHeight || a.scrollWidth > a.clientWidth)) return a;
+    }
+    return null;
+  };
   // two tappable elements on top of each other, where both are seen (a button under a menu or a sheet is not)
   for (let i = 0; i < taps.length; i++) for (let j = i + 1; j < taps.length; j++) {
     const a = taps[i], b = taps[j];
@@ -211,7 +222,8 @@ CHECKS_JS = r"""
     const w = Math.min(p.right, q.right) - left, h = Math.min(p.bottom, q.bottom) - top;
     if (w <= 1 || h <= 1) continue;
     const x = left + w / 2, y = top + h / 2;
-    if (hidden(a, x, y, b) || hidden(b, x, y, a)) continue;
+    if (x >= 0 && y >= 0 && x < W && y < H ? hidden(a, x, y, b) || hidden(b, x, y, a) : scroller(a) !== scroller(b))
+      continue;
     out.push({kind: 'overlap', detail: words(a) + ' and ' + words(b)});
   }
   // a fill is a painted layer laid over a button (an SVG, a canvas, an image, or a box with a background), with no

@@ -121,6 +121,18 @@ self.addEventListener('fetch', e => { if (e.request.method === 'POST') e.respond
 <button onclick="document.getElementById('f').click()">Pick</button><input id=f type=file style="display:none">
 <button>Nothing</button>
 </body>""",
+    # below the screen's edge: two buttons of the page on top of each other in its scroll box, and a menu's item over
+    # a page's button, each in a box of its own that scrolls
+    "below.html": """<!doctype html><meta name=viewport content="width=device-width">
+<body style="margin:0;font:14px sans-serif">
+<div style="height:100vh;overflow-y:auto"><div style="position:relative;height:1500px">
+<button style="position:absolute;top:1200px;left:200px;width:150px;height:40px">Low one</button>
+<button style="position:absolute;top:1210px;left:220px;width:150px;height:40px">Low two</button>
+<button style="position:absolute;top:1300px;left:10px;width:120px;height:40px">Page low</button></div></div>
+<div style="position:fixed;left:0;top:0;width:150px;height:100vh;overflow-y:auto;background:#112">
+<div style="position:relative;height:1500px">
+<button style="position:absolute;top:1305px;left:20px;width:120px;height:40px">Menu low</button></div></div>
+</body>""",
     # a row of filter chips: All is chosen, and a tap on it changes nothing; Queued chooses itself
     "chips.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
 <div id=row></div><div id=out>all</div>
@@ -370,6 +382,13 @@ def test_a_tap_that_opens_a_tab_an_app_or_a_file_picker_is_not_dead(site, tmp_pa
     assert opened["New tab"] and opened["New tab"][0].endswith("/faults.html"), opened
     assert opened["Screen"] == ["vnc://192.0.2.1"] and opened["Screen here"] == ["vnc://192.0.2.1"], opened
     assert opened["Pick"] == ["a file picker"] and opened["Nothing"] is None, opened
+
+
+def test_below_the_screen_only_buttons_one_box_scrolls_overlap(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/below.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
+    overlaps = [f["detail"] for f in page["findings"] if f["kind"] == "overlap"]
+    assert overlaps == ["Low one and Low two"], overlaps
 
 
 def test_a_fill_drawn_short_after_a_tap_is_found_too(site, tmp_path):
