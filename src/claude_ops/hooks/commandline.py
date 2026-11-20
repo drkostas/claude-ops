@@ -96,7 +96,9 @@ ADD_SWEEPING = {"-A", "--all", "-u", "--update", "--no-ignore-removal"}
 
 def parse(command: str) -> list[dict]:
     """The command line as simple commands (split on &&, ||, ;, |, & and newlines), each as
-    {"words": [...], "writes": [files its output is redirected into], "heredoc": body or None}.
+    {"words": [...], "writes": [files its output is redirected into], "heredoc": body or None,
+    "piped": whether a pipe feeds it, "after": the operator that ends it (`&&`, `||`, `|`, `;`, `&`,
+    a newline as "\\n", or "" for the last command)}.
     Line continuations are joined, here-document bodies are kept apart from the words, and
     redirections and subshell parentheses are not words. An unfinished quote gives []."""
     command = CONTINUATION.sub(r"\1", command)
@@ -117,7 +119,7 @@ def parse(command: str) -> list[dict]:
         return []
 
     def fresh(piped: bool = False) -> dict:
-        return {"words": [], "writes": [], "heredoc": None, "piped": piped}
+        return {"words": [], "writes": [], "heredoc": None, "piped": piped, "after": ""}
 
     out = [fresh()]
     pending: str | None = None                # the redirection whose target word comes next
@@ -131,8 +133,10 @@ def parse(command: str) -> list[dict]:
             pending = None
             continue
         if t and set(t) <= SEPARATORS:
+            op = t.replace("\n", "") or "\n"     # shlex joins `;` and the newline after it in one token
             if out[-1]["words"]:
-                out.append(fresh(piped=t == "|"))
+                out[-1]["after"] = op
+                out.append(fresh(piped=op == "|"))
         elif REDIRECT.match(t):
             words = out[-1]["words"]
             fd = ""

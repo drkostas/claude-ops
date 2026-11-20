@@ -51,3 +51,12 @@ def test_read_note_says_the_file_is_read_before_the_command_runs(tmp_path):
                     "command runs. Write body.md in a call of its own, then send the command again")
     elsewhere = str(tmp_path / "sub")
     assert f"read from {body} as it is now" in commandline.read_note(body, "git commit -F ../body.md", elsewhere)
+
+
+def test_each_command_carries_the_operator_after_it():
+    steps = commandline.parse('cd x && gh pr checks 5 --watch 2>&1 | tail -3; echo "rc=$?" || true &\nnext')
+    assert [(s["words"][0], s["after"]) for s in steps] == [
+        ("cd", "&&"), ("gh", "|"), ("tail", ";"), ("echo", "||"), ("true", "&"), ("next", "")]
+    assert [s["piped"] for s in steps] == [False, False, True, False, False, False]
+    # shlex hands `;` and the newline after it over as one token, and a line break after && keeps the &&
+    assert [s["after"] for s in commandline.parse("a;\nb &&\n  c\nd")] == [";", "&&", "\n", ""]
