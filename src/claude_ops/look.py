@@ -199,12 +199,19 @@ CHECKS_JS = r"""
     const s = getComputedStyle(el);
     return s.backgroundImage !== 'none' || alpha(s.backgroundColor) >= 0.99;
   };
+  const H = document.documentElement.clientHeight || window.innerHeight;
   const hidden = (el, x, y, but) => {
-    const stack = document.elementsFromPoint(x, y);
-    const i = stack.findIndex(e => el.contains(e));
+    const at = (px, py) => { const st = document.elementsFromPoint(px, py); return [st, st.findIndex(e => el.contains(e))]; };
+    let [stack, i] = at(x, y);
+    if (i < 0) {
+      // el is not drawn at that point (a rounded corner, a gap in it), so it is tested in the middle of what of
+      // it is on the screen
+      const r = el.getBoundingClientRect();
+      const l = Math.max(r.left, 0), t = Math.max(r.top, 0), rr = Math.min(r.right, W), rb = Math.min(r.bottom, H);
+      if (rr > l && rb > t) [stack, i] = at((l + rr) / 2, (t + rb) / 2);
+    }
     return i > 0 && stack.slice(0, i).some(e => !e.contains(el) && !(but && but.contains(e)) && opaque(e));
   };
-  const H = document.documentElement.clientHeight || window.innerHeight;
   const scroller = el => {
     for (let a = el.parentElement; a; a = a.parentElement) {
       const s = getComputedStyle(a);

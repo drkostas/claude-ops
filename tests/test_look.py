@@ -107,8 +107,10 @@ self.addEventListener('fetch', e => { if (e.request.method === 'POST') e.respond
 <div style="position:absolute;inset:0;pointer-events:none"><svg width="180" height="15"><rect width="180" height="15" fill="#95f"/></svg></div>
 <span style="position:relative">Fill under the sheet</span></div>
 <button style="position:absolute;top:200px;left:10px;width:150px;height:40px">Beneath</button>
+<button style="position:absolute;top:100px;left:250px;width:40px;height:30px;padding:0;border:0;border-radius:20px;overflow:hidden">Dot</button>
 <div style="position:fixed;left:0;right:0;top:0;height:150px;background:#223">
-<button style="position:absolute;top:25px;left:40px;width:150px;height:40px">Over</button></div>
+<button style="position:absolute;top:25px;left:40px;width:150px;height:40px">Over</button>
+<button style="position:absolute;top:120px;left:286px;width:100px;height:28px">Over a corner</button></div>
 <div style="position:fixed;left:0;right:0;top:180px;height:80px">
 <button style="position:absolute;top:25px;left:40px;width:150px;height:40px">Floating</button></div>
 </body>""",
