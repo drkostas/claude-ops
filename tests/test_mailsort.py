@@ -1,5 +1,5 @@
-from claude_ops.mailsort import (Sorter, address, domain, gitguardian_incidents, is_automated, is_bulk,
-                                 neon_usage, vercel_deploy_failed)
+from claude_ops.mailsort import (Sorter, address, contact_of, domain, gitguardian_incidents, is_automated, is_bulk,
+                                 matches, neon_usage, vercel_deploy_failed)
 
 SORTER = Sorter(kinds={"scanner": ["gitguardian.com"], "platform": ["neon.tech", "vercel.com"]},
                 names={"widget": ["widget-cli"], "gadget": []},
@@ -107,3 +107,51 @@ def test_gitguardian_incidents():
         {"kind": "Generic Password", "repo": "acme/widget", "commit": "0a1b2c3"},
         {"kind": "Username Password", "repo": "acme/gadget", "commit": "1234abc"}]
     assert gitguardian_incidents("Historical Scan Report - 0 Secrets", one) == []
+
+
+CONTACTS = [{
+    "name": "the firm",
+    "senders": ["firm.example", "ana@partner.example"],
+    "people": ["info@small.example"],
+    "except_senders": ["accounts@firm.example"],
+    "except_subjects": ["Monthly statement"],
+    "except_text": ["forward the matching invoice"],
+}]
+
+
+def test_matches_takes_an_address_a_domain_and_a_subdomain():
+    assert matches("Ana <ana@mail.firm.example>", ["firm.example"])
+    assert matches("ana@partner.example", ["ana@partner.example"])
+    assert not matches("bob@partner.example", ["ana@partner.example"])
+
+
+def test_a_contact_who_writes_names_no_project_and_still_counts():
+    assert contact_of({"From": "Sam <sam.lee@firm.example>", "Subject": "Quick question"}, CONTACTS) is CONTACTS[0]
+    assert contact_of({"From": "Ana <ana@partner.example>", "Subject": "Hello"}, CONTACTS) is CONTACTS[0]
+
+
+def test_a_stranger_the_users_own_mail_and_bulk_labels_do_not_count():
+    assert contact_of({"From": "bob@elsewhere.example", "Subject": "Hello"}, CONTACTS) is None
+    assert contact_of({"From": "me@firm.example", "Subject": "Hello"}, CONTACTS, own=["me@firm.example"]) is None
+    assert contact_of({"From": "sam@firm.example", "Subject": "Offer"}, CONTACTS, labels=["CATEGORY_PROMOTIONS"]) is None
+
+
+def test_automated_mail_at_a_contacts_domain_does_not_count():
+    assert contact_of({"From": "noreply@firm.example", "Subject": "Hello"}, CONTACTS) is None
+    assert contact_of({"From": "sam@firm.example", "Subject": "News", "List-Unsubscribe": "<mailto:x@y>"}, CONTACTS) is None
+    assert contact_of({"From": "sam@firm.example", "Subject": "Re", "Auto-Submitted": "auto-replied"}, CONTACTS) is None
+
+
+def test_a_person_with_an_automated_looking_address_counts_unless_the_headers_say_automated():
+    assert is_automated({"From": "info@small.example"})
+    assert contact_of({"From": "info@small.example", "Subject": "Your question"}, CONTACTS) is CONTACTS[0]
+    assert contact_of({"From": "info@small.example", "Subject": "Digest", "Precedence": "bulk"}, CONTACTS) is None
+    assert not is_automated({"From": "info@small.example"}, by_name=False)
+
+
+def test_a_contacts_own_routine_notices_are_left_out():
+    assert contact_of({"From": "accounts@firm.example", "Subject": "Approved"}, CONTACTS) is None
+    assert contact_of({"From": "sam@firm.example", "Subject": "Monthly statement for May"}, CONTACTS) is None
+    assert contact_of({"From": "sam@firm.example", "Subject": "Invoice"}, CONTACTS,
+                      text="Please Forward the Matching Invoice to us") is None
+    assert contact_of({"From": "sam@firm.example", "Subject": "Invoice"}, CONTACTS, text="the invoice is attached") is CONTACTS[0]

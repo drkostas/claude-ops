@@ -65,13 +65,15 @@ def _matches(sender: str, patterns) -> bool:
     return False
 
 
-def is_automated(headers: dict) -> bool:
+def is_automated(headers: dict, by_name: bool = True) -> bool:
     """Pure. Whether a message was sent by a program rather than typed by a person: an automated
     sender name (noreply, notifications, ...), a List-Unsubscribe or List-Id header, Precedence bulk
-    or list, or an Auto-Submitted header other than "no"."""
+    or list, or an Auto-Submitted header other than "no". With `by_name` false the sender's name is
+    not read, only the headers, for a sender known to be a person whose address looks automated
+    (info@, support@)."""
     h = {k.lower(): v for k, v in (headers or {}).items()}
     local = address(h.get("from", "")).partition("@")[0]
-    if AUTOMATED_LOCAL.match(local):
+    if by_name and AUTOMATED_LOCAL.match(local):
         return True
     if h.get("list-unsubscribe") or h.get("list-id"):
         return True
@@ -150,6 +152,51 @@ class Sorter:
             # newsletter, so naming a project is kept apart as a mention rather than dropped
             return Sorted("mention", names, sender, "automated mail that names a project")
         return Sorted("person", names, sender, "a person who names a project")
+
+
+def matches(sender: str, patterns) -> bool:
+    """Pure. Whether an address matches one of the patterns: a whole address, a domain (which also
+    matches its subdomains) or "@domain"."""
+    return _matches(address(sender) or (sender or "").strip().lower(), patterns)
+
+
+def contact_of(headers: dict, contacts, labels=(), text: str = "", own=()):
+    """Pure. The first of the user's contacts whose mail this message is, or None.
+
+    `contacts` is a list of dicts, each with `senders` (addresses and domains the contact writes
+    from, as `Sorter` reads them) and optionally `people` (addresses of people who count whatever
+    their name looks like, so info@ or support@ of a small firm), `except_senders` (addresses and
+    domains of that contact's own automated mail), `except_subjects` (subject beginnings of its
+    routine notices) and `except_text` (words whose presence in `text`, the snippet or the body,
+    marks a routine notice). Other keys are left to the caller (a name, who it concerns).
+
+    A message counts only when a person typed it. The sender's name is read as `is_automated` does,
+    except for an address in `people`, which only the headers (a list header, bulk precedence, an
+    Auto-Submitted header) can turn down. Gmail's promotions, social and forums labels turn it
+    down too, and so does the user's own mail (`own`). The caller adds the contact's own key to
+    what it did with it."""
+    h = {k.lower(): v for k, v in (headers or {}).items()}
+    sender = address(h.get("from", ""))
+    if not sender or sender in {a.strip().lower() for a in own}:
+        return None
+    if is_bulk(labels):
+        return None
+    subject = (h.get("subject") or "").strip().lower()
+    body = (text or "").lower()
+    for contact in contacts or ():
+        if not matches(sender, contact.get("senders") or ()) and not matches(sender, contact.get("people") or ()):
+            continue
+        if matches(sender, contact.get("except_senders") or ()):
+            continue
+        if any(subject.startswith(s.strip().lower()) for s in contact.get("except_subjects") or () if s.strip()):
+            continue
+        if any(w.strip().lower() in body for w in contact.get("except_text") or () if w.strip()):
+            continue
+        known_person = matches(sender, contact.get("people") or ())
+        if is_automated(headers, by_name=not known_person):
+            continue
+        return contact
+    return None
 
 
 # --- notice readers: each takes the subject and the text, and answers the fact or None ----------
