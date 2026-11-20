@@ -262,7 +262,7 @@ CHECKS_JS = r"""
                                               ` and ${pct(e.height, b.height)}% of its height)`});
     }
   }
-  const text =(document.body && document.body.innerText || '').trim();
+  const text = (document.body && document.body.innerText || '').trim();
   const pictures = [...document.querySelectorAll('img, svg, canvas, video')].filter(shown);
   if (!text && !pictures.length) out.push({kind: 'empty', detail: 'no text and no image'});
   return out;
@@ -591,6 +591,44 @@ def sheet(before: dict[str, Any], after: dict[str, Any], out: str | Path, *, bef
     return written
 
 
+#: a measure at the end of a finding's detail, such as "(its fill covers 90% of its width ...)", which
+#: moves by a point between two builds of the same page and so is not part of what the finding names
+_MEASURE = re.compile(r"\s*\([^()]*\d[^()]*\)\s*$")
+
+
+def finding_key(path: str, finding: dict[str, Any]) -> tuple[str, str, str]:
+    """The page, the kind and what a finding names (its detail without a measure at its end), which two
+    looks of the same pages share when they found the same thing."""
+    return path, str(finding.get("kind", "")), _MEASURE.sub("", str(finding.get("detail", ""))).strip()
+
+
+def new_findings(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+    """The findings `after` has that `before` does not, page by page, each once, with its page's path and the
+    picture of its first sighting. A page `before` does not hold is new as a whole (`new_page` true), so a look
+    that could not open a page on one build never hides what the other found there."""
+    seen = {pg["path"]: {finding_key(pg["path"], f) for f in pg.get("findings", [])}
+            for pg in before.get("pages", [])}
+    out: list[dict[str, Any]] = []
+    told: set[tuple[str, str, str]] = set()
+    for pg in after.get("pages", []):
+        old = seen.get(pg["path"])
+        for f in pg.get("findings", []):
+            k = finding_key(pg["path"], f)
+            if (old is not None and k in old) or k in told:
+                continue
+            told.add(k)
+            out.append({"path": pg["path"], **f, **({"new_page": True} if old is None else {})})
+    return out
+
+
+def by_kind(findings: list[dict[str, Any]]) -> dict[str, int]:
+    """How many findings of each kind, by kind's name."""
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f["kind"]] = counts.get(f["kind"], 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def summary(report: dict[str, Any]) -> list[str]:
     lines = []
     for pg in report["pages"]:
@@ -607,6 +645,21 @@ def summary(report: dict[str, Any]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["diff"]:
+        p = argparse.ArgumentParser(prog="claude-ops look diff",
+                                    description="the findings a later look has that an earlier one of the same pages does not")
+        p.add_argument("before", help="the earlier look's report.json")
+        p.add_argument("after", help="the later look's report.json")
+        p.add_argument("--json", action="store_true", help="print the new findings as JSON")
+        a = p.parse_args(argv[1:])
+        new = new_findings(json.loads(Path(a.before).read_text()), json.loads(Path(a.after).read_text()))
+        if a.json:
+            print(json.dumps({"by_kind": by_kind(new), "findings": new}, indent=2))
+        else:
+            print("new: " + (", ".join(f"{k} {n}" for k, n in by_kind(new).items()) or "nothing"))
+            for f in new:
+                print(f"{f['path']}: {f['kind']} {f.get('detail', '')} ({f.get('picture', 'no picture')})")
+        return 1 if new else 0
     if argv[:1] == ["sheet"]:
         p = argparse.ArgumentParser(prog="claude-ops look sheet",
                                     description="put two looks' pictures of the same page side by side")

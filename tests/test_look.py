@@ -413,3 +413,48 @@ def test_what_runs_the_way_a_box_scrolls_is_not_cut_off(site, tmp_path):
     base, _ = site
     page = look.look(base, ["/scroller.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
     assert not [f for f in page["findings"] if f["kind"] == "cut_off"], page["findings"]
+
+
+def _report(*pages):
+    return {"pages": [{"path": path, "findings": list(found)} for path, found in pages]}
+
+
+def test_new_findings_are_what_the_later_look_has_and_the_earlier_does_not():
+    before = _report(("/home", [{"kind": "dead_tap", "detail": "All", "picture": "a.png"},
+                                {"kind": "short_fill", "detail": "Send (its fill covers 89% of its width and 32% of its height)",
+                                 "picture": "b.png"}]),
+                     ("/list", []))
+    after = _report(("/home", [{"kind": "dead_tap", "detail": "All", "picture": "c.png"},
+                               {"kind": "short_fill", "detail": "Send (its fill covers 90% of its width and 31% of its height)",
+                                "picture": "d.png"},
+                               {"kind": "short_fill", "detail": "↑ (its fill covers 90% of its width and 33% of its height)",
+                                "picture": "e.png"},
+                               {"kind": "short_fill", "detail": "↑ (its fill covers 90% of its width and 33% of its height)",
+                                "picture": "f.png"}]),
+                    ("/list", [{"kind": "overlap", "detail": "Save and Close", "picture": "g.png"}]),
+                    ("/more", [{"kind": "cut_off", "detail": "A long title", "picture": "h.png"}]))
+    new = look.new_findings(before, after)
+    assert [(f["path"], f["kind"], f["picture"]) for f in new] == [
+        ("/home", "short_fill", "e.png"), ("/list", "overlap", "g.png"), ("/more", "cut_off", "h.png")]
+    assert new[-1]["new_page"] is True and "new_page" not in new[0]
+    assert look.by_kind(new) == {"cut_off": 1, "overlap": 1, "short_fill": 1}
+    assert look.new_findings(after, after) == []
+
+
+def test_a_finding_s_key_drops_only_a_measure_at_its_end():
+    assert look.finding_key("/", {"kind": "short_fill", "detail": "Send (its fill covers 90% of its width)"}) == \
+        ("/", "short_fill", "Send")
+    assert look.finding_key("/", {"kind": "overlap", "detail": "Save (draft) and Close"}) == \
+        ("/", "overlap", "Save (draft) and Close")
+
+
+def test_look_diff_prints_the_new_findings_and_exits_1(tmp_path, capsys):
+    b, a = tmp_path / "b.json", tmp_path / "a.json"
+    b.write_text(json.dumps(_report(("/home", []))))
+    a.write_text(json.dumps(_report(("/home", [{"kind": "short_fill", "detail": "Send (its fill covers 90%)",
+                                                 "picture": "p.png"}]))))
+    assert look.main(["diff", str(b), str(a)]) == 1
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "new: short_fill 1" and "/home: short_fill Send (its fill covers 90%) (p.png)" in out
+    assert look.main(["diff", str(b), str(b), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"by_kind": {}, "findings": []}

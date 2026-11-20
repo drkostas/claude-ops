@@ -215,6 +215,7 @@ pip install 'claude-ops[look]' && python -m playwright install chromium
 claude-ops look http://localhost:8081 /home /items/42 --out /tmp/look      # pictures and report.json
 claude-ops look http://localhost:8081 /home --out /tmp/look --no-taps      # only the load and end pictures
 claude-ops look sheet /tmp/look-before/report.json /tmp/look/report.json --out /tmp/sheets
+claude-ops look diff /tmp/look-before/report.json /tmp/look/report.json        # what only the later look found
 ```
 
 A change to a web app is easiest to judge from pictures of the pages it touched, before and after it,
@@ -244,7 +245,14 @@ file with other `yes` and `no` answers and the slow wait (`slow_s`, 5).
 
 `report.json` lists each page's pictures, findings, taps and boxes, and the buttons `--max-taps` left
 out. `look sheet` puts the pictures of the same page from two looks side by side, one picture per page.
-`look.look`, `look.look_page`, `look.sheet` and `look.answers_from` are the parts.
+`look diff` lists the findings the later look has that the earlier one of the same pages does not, with
+the count of each kind and the picture of each, and exits 1 when there is one (`--json` prints them as
+JSON). Two findings are the same when they are on the same page, of the same kind and name the same
+thing, and a measure at the end of a finding's words (how much of a button its fill covers) is left
+out of that, since it moves by a point between two builds. So a look of a branch's build after one of
+the main branch's build says what the branch brought. A page the earlier look does not hold is new as
+a whole. `look.look`, `look.look_page`, `look.sheet`, `look.new_findings`, `look.by_kind` and
+`look.answers_from` are the parts.
 
 ## Find general code in a private project
 
