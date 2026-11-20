@@ -34,6 +34,9 @@ AUTOMATED_LOCAL = re.compile(
     r"^(no-?reply|do-?not-?reply|notifications?|notify|alerts?|mailer-daemon|postmaster|bounces?|"
     r"news(letter)?|updates?|info|support|hello|team|marketing|billing|security)([+._-].*)?$",
     re.IGNORECASE)
+#: a no-reply word is automated wherever it stands as its own token of the local part, so
+#: "star.notifier.noreply" and "github-noreply" count too. "noreplyfan" and "replyguy" do not.
+NOREPLY_TOKEN = re.compile(r"(^|[+._-])(no[-_.]?reply|do[-_.]?not[-_.]?reply)([+._-]|$)", re.IGNORECASE)
 #: Gmail's own category labels for bulk mail
 BULK_LABELS = ("CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS")
 
@@ -73,7 +76,7 @@ def is_automated(headers: dict, by_name: bool = True) -> bool:
     (info@, support@)."""
     h = {k.lower(): v for k, v in (headers or {}).items()}
     local = address(h.get("from", "")).partition("@")[0]
-    if by_name and AUTOMATED_LOCAL.match(local):
+    if by_name and (AUTOMATED_LOCAL.match(local) or NOREPLY_TOKEN.search(local)):
         return True
     if h.get("list-unsubscribe") or h.get("list-id"):
         return True
