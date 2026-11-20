@@ -133,7 +133,7 @@ def score(row, need, rules=()):
 def find(rows, need, rules=(), limit=5, min_score=3):
     """The best `limit` rows for a need, best first, each with `score`, `why` and `format`.
 
-    Order is the score, then the sendable format, then the newest. A row that scores under
+    Order is the score, then the sendable format, then the shorter name, then the newest. A row that scores under
     `min_score` is never returned, so a need that matches nothing gives an empty list.
     """
     found = []
@@ -141,5 +141,6 @@ def find(rows, need, rules=(), limit=5, min_score=3):
         s, why = score(row, need, rules)
         if s >= min_score:
             found.append(dict(row, score=s, why=why, format=row["ext"] or "none"))
-    found.sort(key=lambda r: (-r["score"], -format_rank(r["ext"]), -r["mtime"], r["path"]))
+    found.sort(key=lambda r: (-r["score"], -format_rank(r["ext"]), len(words(r["path"].rpartition("/")[2])),
+                              -r["mtime"], r["path"]))
     return found[:limit]

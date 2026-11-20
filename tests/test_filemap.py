@@ -73,6 +73,14 @@ def test_the_same_score_gives_the_newest_first(tmp_path):
     assert [r["path"][-11:] for r in got] == ["2025-10.pdf", "2025-09.pdf"]
 
 
+def test_a_shorter_name_beats_a_longer_one_of_the_same_score(tmp_path):
+    make(tmp_path, {"P/Identity/National ID Card (2025).pdf": 1, "P/Identity/National ID Card - Someone Else (2026).pdf": 1,
+                    "P/Identity/ID Card Renewal Appointment Confirmation.pdf": 1})
+    rows = filemap.walk(tmp_path)
+    got = filemap.find(rows, "ID card", RULES)
+    assert got[0]["path"].endswith("National ID Card (2025).pdf")
+
+
 def test_a_plain_word_match_works_without_rules(tmp_path):
     rows = filemap.walk(make(tmp_path, FILES))
     got = filemap.find(rows, "my lease", ())
