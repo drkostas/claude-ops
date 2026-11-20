@@ -305,9 +305,9 @@ def test_each_commit_is_checked_against_its_own_repository(cfg, public, private)
 def test_parse_keeps_here_documents_and_write_targets():
     cmds = commandline.parse("cat > a.md <<'EOF'\nline one\nEOF\necho hi 2>&1 1>b.txt 2> err | tee -a c.md")
     assert cmds == [
-        {"words": ["cat"], "writes": ["a.md"], "heredoc": "line one\n", "piped": False},
-        {"words": ["echo", "hi"], "writes": ["b.txt"], "heredoc": None, "piped": False},
-        {"words": ["tee", "-a", "c.md"], "writes": [], "heredoc": None, "piped": True},
+        {"words": ["cat"], "writes": ["a.md"], "heredoc": "line one\n", "piped": False, "after": "\n"},
+        {"words": ["echo", "hi"], "writes": ["b.txt"], "heredoc": None, "piped": False, "after": "|"},
+        {"words": ["tee", "-a", "c.md"], "writes": [], "heredoc": None, "piped": True, "after": ""},
     ]
     assert commandline.simple_commands("cat > a.md <<'EOF'\nit's data\nEOF\ngit add a.md") == \
         [["cat"], ["git", "add", "a.md"]]

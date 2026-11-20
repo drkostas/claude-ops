@@ -26,11 +26,23 @@ command that opened it, since the shell expands it after that command's words:
   into `tee`, or the replacement of a `sed -i` or `perl -i -p` substitution), read by `commandline`,
   shared with the other hooks.
 
-The command line given to the Bash tool is not read. Single quotes, a quoted here-document, a comment
+The command line given to the Bash tool is not read for this, with one exception below. Single quotes, a
+quoted here-document, a comment
 and an escaped `\\$?` are text. `rc=$?` on its own statement, a plain `"$?"`, a `$?` before the
 substitution, a `$?` inside a substitution of its own and a `$?` inside `$(( ... ))` with no substitution
 before it go through. Text with no `$?` or `${?` in it (a Write's, or the file's after an Edit) is not
 scanned at all. On anything unexpected the call goes through: a broken hook must never stop work.
+
+A command run in the background (a Bash call with `run_in_background`) is reported by its exit status,
+which is the status of the last command it ran. So a watch on a check (`gh pr checks <n> --watch`, or
+`gh run watch <id> --exit-status`) followed by `echo "rc=$?" >> log`, or piped into `tail`, is reported
+as a success when the check failed. Such a call is refused when the gate's status does not reach the
+command's exit: another command runs after it, its output is piped (without pipefail), or `||` runs a
+command other than a failing exit when it fails. These go through: the watch as the only or last
+command, joined to the next with `&&`, tested in an if, elif, while or until condition or after `!`,
+with `set -e` before it, piped after `set -o pipefail`, followed by `|| exit 1`, and a command whose
+first exit after the watch is `exit "$rc"` (any variable) or an `exit $?` straight after it. A command
+in the foreground is not read, since its output and status are read when it ends.
 
     claude-ops hook stale-status      # reads the tool call on stdin
     python3 -P -m claude_ops.hooks.stale_status
@@ -359,11 +371,157 @@ def findings(payload: dict) -> list[tuple[str, int, str]]:
     return out
 
 
+# --- a background command that hides a gate's exit ------------------------------------------------
+
+#: commands that wait for something and exit non-zero when it failed: the words they start with and the
+#: flag that makes them wait and report (`gh pr checks` alone answers at once, and `gh run watch` without
+#: --exit-status exits 0 whatever the run did)
+GATES = ((("gh", "pr", "checks"), "--watch"), (("gh", "run", "watch"), "--exit-status"))
+#: keywords that open a condition, whose status the shell tests instead of reporting it
+CONDITIONS = {"if", "elif", "while", "until"}
+#: keywords that end a condition
+BODIES = {"then", "do"}
+#: words that are shell syntax, not a command that runs
+SYNTAX = CONDITIONS | BODIES | {"!", "done", "fi", "else", "esac", "{", "}"}
+#: a word that is one variable: what `exit "$rc"` or `exit ${rc}` hands over once quotes are removed
+ONE_VARIABLE = re.compile(r"^\$(?:\?|[A-Za-z_][A-Za-z0-9_]*|\{[?A-Za-z_][^}]*\})$")
+
+
+def leading(words: list[str]) -> tuple[list[str], list[str]]:
+    """(the keywords in front of a command, the rest)."""
+    i = 0
+    while i < len(words) and words[i] in SYNTAX:
+        i += 1
+    return words[:i], words[i:]
+
+
+def gate_name(words: list[str]) -> str:
+    """The gate a command runs (`gh pr checks`), or "" when it runs none."""
+    w = commandline.unwrap(words)
+    for start, flag in GATES:
+        if tuple(w[:len(start)]) == start and any(x == flag or x.startswith(flag + "=") for x in w):
+            return " ".join(start)
+    return ""
+
+
+def shell_options(words: list[str]) -> tuple[bool, bool]:
+    """(whether this command sets errexit, whether it sets pipefail): `set -e`, `set -euo pipefail`."""
+    if words[:1] != ["set"]:
+        return False, False
+    short = any(w.startswith("-") and not w.startswith("--") and "e" in w[1:] for w in words[1:])
+    return short or "errexit" in words, "pipefail" in words
+
+
+def exits_with(words: list[str]) -> str | None:
+    """The argument of an `exit` or `return` command ("" when it has none), or None for any other."""
+    _, w = leading(words)
+    if w[:1] not in (["exit"], ["return"]):
+        return None
+    return w[1] if len(w) > 1 else ""
+
+
+def shown(words: list[str], limit: int = 40) -> str:
+    text = " ".join(leading(words)[1])
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def after_list(steps: list[dict], j: int) -> list[dict]:
+    """The commands that run after the and-or list ending at step j, leaving out shell syntax alone and
+    the other branches of an if the list sits in (an else runs instead of it, not after it)."""
+    out, skip = [], 0
+    for st in steps[j + 1:]:
+        keys, words = leading(st["words"])
+        if skip:
+            skip += keys.count("if")
+            skip -= keys.count("fi")
+            continue
+        if "else" in keys or "elif" in keys:
+            skip = 1
+            continue
+        if words:
+            out.append(st)
+    return out
+
+
+def hides(steps: list[dict], g: int, errexit: bool, pipefail: bool) -> str | None:
+    """How the command hides the status of the gate at step g, or None when its exit still reports it."""
+    name = gate_name(steps[g]["words"])
+    j = g
+    while steps[j]["after"] == "|":
+        if not pipefail:
+            return (f"pipes {name} into `{shown(steps[j + 1]['words'])}`, and a pipe's status is its last "
+                    "command's")
+        j += 1
+    while steps[j]["after"] in ("&&", "||"):
+        op, j = steps[j]["after"], j + 1
+        if op == "||":
+            arg = exits_with(steps[j]["words"])
+            if arg is not None and arg not in ("", "0"):
+                return None                            # `|| exit 1` ends the command as a failure
+            return f"runs `|| {shown(steps[j]['words'])}` when {name} fails, which then gives the status"
+        while steps[j]["after"] == "|":                 # `gate && a | b` runs only after a pass
+            j += 1
+    rest = after_list(steps, j)
+    if not rest:
+        return None                                    # the gate's list is the last thing the command runs
+    if errexit and steps[g]["after"] not in ("&&", "||"):
+        return None                                    # set -e ends the command when the gate fails
+    for k, st in enumerate(rest):
+        arg = exits_with(st["words"])
+        if arg is None:
+            continue
+        if ONE_VARIABLE.match(arg) and (k == 0 or "?" not in arg):
+            return None                                # `exit "$rc"`, or `exit $?` straight after the gate
+        break
+    return f"then runs `{shown(rest[-1]['words'])}`, whose status the command ends with"
+
+
+def hidden_gate(command: str) -> str | None:
+    """Why a command run in the background would report a gate's failure as its last command's status,
+    or None. A gate in a condition (if, elif, while, until) or after `!` is tested by the command itself,
+    and passes."""
+    steps = commandline.parse(command)
+    condition = errexit = pipefail = False
+    for g, st in enumerate(steps):
+        keys, words = leading(st["words"])
+        if any(k in CONDITIONS for k in keys):
+            condition = True
+        if any(k in BODIES for k in keys):
+            condition = False
+        e, p = shell_options(words)
+        errexit, pipefail = errexit or e, pipefail or p
+        if condition or "!" in keys or not gate_name(words):
+            continue
+        how = hides(steps, g, errexit, pipefail)
+        if how:
+            return how
+    return None
+
+
+def background_refusal(payload: dict) -> str | None:
+    """Why a Bash call run in the background is refused for a gate whose exit it hides, or None."""
+    if payload.get("tool_name") != "Bash":
+        return None
+    ti = payload.get("tool_input") or {}
+    if ti.get("run_in_background") not in (True, "true", "True", 1):
+        return None
+    command = str(ti.get("command", ""))
+    how = hidden_gate(command)
+    if not how:
+        return None
+    name = next((gate_name(s["words"]) for s in commandline.parse(command) if gate_name(s["words"])), "the gate")
+    fix = (f"put set -o pipefail; before it, or run the watch as the only command" if how.startswith("pipes")
+           else f"run the watch as the only command, or save its status and end with it, "
+                f"{name} ...; rc=$?; echo \"rc=$rc\" >> log; exit $rc")
+    return (f"this background command {how}. A background command reports the exit status of its last "
+            f"command, so a failed {name} would be reported as a success. To keep its status, {fix}")
+
+
 def check(payload: dict) -> str | None:
     """Why this tool call is refused, or None."""
     hits = findings(payload)
     if not hits:
-        return None
+        return background_refusal(payload)
     path, n, line = hits[0]
     shown = line.strip()
     shown = shown if len(shown) <= 100 else shown[:97] + "..."

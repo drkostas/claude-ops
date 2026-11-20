@@ -188,3 +188,110 @@ def test_the_cli_and_the_chain_offer_the_hook(tmp_path, monkeypatch):
     assert rc == 2 and err.startswith("Blocked:") and out == ""
     rc, out, err = chain.run_module("claude_ops.hooks.stale_status", [], json.dumps(write(tmp_path / "job.sh", "rc=$?")))
     assert rc == 0 and err == ""
+
+
+# --- a background command that hides a gate's exit ------------------------------------------------
+# Each command runs with a stand-in `gh` that fails, as a red check would. The hook refuses exactly the
+# commands the shell then reports as a success (HIDDEN), and lets through the ones whose exit still
+# carries the failure (REPORTED).
+HIDDEN = [
+    'gh pr checks 7 --watch; echo "rc=$?" >> log',
+    'gh pr checks 7 --watch --fail-fast >/dev/null; echo "checks exit $?"',
+    'gh pr checks 7 --watch 2>&1 | tail -3',
+    'cd . && gh run watch 9 --exit-status | tail -1',
+    'gh pr checks 7 --watch || echo "the checks failed"',
+    'gh pr checks 7 --watch && echo green || echo red',
+    'gh pr checks 7 --watch; echo done; exit 0',
+    'gh pr checks 7 --watch; echo done; exit $?',
+    'gh pr checks 7 --watch\necho done',
+    'set -e; gh pr checks 7 --watch && echo green; echo done',
+    'if true; then gh pr checks 7 --watch; fi; echo done',
+]
+REPORTED = [
+    'gh pr checks 7 --watch',
+    'cd . && gh pr checks 7 --watch',
+    'echo start\ngh pr checks 7 --watch',
+    'gh pr checks 7 --watch && echo merged',
+    'gh pr checks 7 --watch; rc=$?; echo "rc=$rc" >> log; exit "$rc"',
+    'gh pr checks 7 --watch; exit $?',
+    'gh pr checks 7 --watch; rc=$?; exit ${rc:-1}',
+    'set -o pipefail; gh pr checks 7 --watch 2>&1 | tail -3',
+    'set -e; gh pr checks 7 --watch; echo green',
+    'gh pr checks 7 --watch || exit 1; echo green',
+    'for p in 7 8; do gh pr checks $p --watch || exit 1; done; echo all green',
+    'if [ -n "x" ]; then gh pr checks 7 --watch; else echo none; fi',
+]
+# The command tests the gate's status itself, so the hook leaves it to the command.
+HANDLED = [
+    'if gh pr checks 7 --watch; then echo green; else echo red; fi; echo done',
+    'if cd . && gh pr checks 7 --watch; then echo green; fi',
+    'until gh run watch 9 --exit-status; do break; done; echo done',
+    '! gh pr checks 7 --watch; echo inverted',
+]
+# Not a gate: no --watch, no --exit-status, or another gh command.
+NOT_GATES = ['gh run watch 9; echo done', 'gh pr checks 7; echo done', 'gh pr view 7 | tail -1']
+SHELLS = [s for s in ("bash", "zsh") if shutil.which(s)]
+
+
+def background(command, cwd="/"):
+    return {"tool_name": "Bash", "tool_input": {"command": command, "run_in_background": True}, "cwd": str(cwd)}
+
+
+@pytest.fixture
+def failing_gh(tmp_path):
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    gh = folder / "gh"
+    gh.write_text("#!/bin/sh\necho 'tests  fail  1m'\nexit 1\n")
+    gh.chmod(0o755)
+    return {"PATH": f"{folder}:/usr/bin:/bin", "HOME": str(tmp_path)}
+
+
+@pytest.mark.skipif(not SHELLS, reason="needs bash or zsh")
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("command,hidden", [(c, True) for c in HIDDEN] + [(c, False) for c in REPORTED])
+def test_the_hook_refuses_the_commands_the_shell_reports_as_green(command, hidden, shell, failing_gh, tmp_path):
+    rc = subprocess.run([shell, "-c", command], cwd=tmp_path, env=failing_gh, capture_output=True).returncode
+    assert (rc == 0) == hidden
+    assert bool(ss.check(background(command, tmp_path))) == hidden
+
+
+@pytest.mark.parametrize("command", HANDLED + NOT_GATES)
+def test_a_tested_gate_and_other_commands_go_through(command):
+    assert ss.check(background(command)) is None
+
+
+def test_a_foreground_command_is_not_read():
+    for command in HIDDEN:
+        assert ss.check(bash(command, "/")) is None
+        call = background(command)
+        call["tool_input"]["run_in_background"] = False
+        assert ss.check(call) is None
+
+
+def test_a_gate_behind_a_wrapper_is_read():
+    assert ss.check(background("timeout 600 gh pr checks 7 --watch; echo done"))
+    assert ss.check(background("rtk gh pr checks 7 --watch | tail -3"))
+    assert ss.check(background("env GH_PAGER= gh run watch 9 --exit-status\necho done"))
+
+
+def test_the_reason_gives_the_fix_for_its_shape():
+    pipe = ss.check(background("gh pr checks 7 --watch 2>&1 | tail -3"))
+    assert "pipes gh pr checks into `tail -3`" in pipe and "set -o pipefail" in pipe
+    later = ss.check(background('gh pr checks 7 --watch; echo "rc=$?" >> log'))
+    assert "then runs `echo rc=$?`" in later and 'rc=$?; echo "rc=$rc" >> log; exit $rc' in later
+    either = ss.check(background("gh run watch 9 --exit-status || echo failed"))
+    assert "runs `|| echo failed` when gh run watch fails" in either
+
+
+def test_an_unreadable_command_goes_through():
+    assert ss.check(background('gh pr checks 7 --watch; echo "unfinished')) is None
+    assert ss.check({"tool_name": "Bash", "tool_input": {"run_in_background": True}}) is None
+
+
+def test_main_refuses_a_hidden_background_gate(monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(background('gh pr checks 7 --watch; echo "rc=$?"'))))
+    assert ss.main([]) == 2
+    assert capsys.readouterr().err.startswith("Blocked: this background command then runs")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(background("gh pr checks 7 --watch"))))
+    assert ss.main([]) == 0
