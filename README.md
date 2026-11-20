@@ -105,6 +105,14 @@ the merge commit of the command's own `update-branch` counts as the same head.
 Exit codes: 0 merged, 2 still running or no checks, 3 a check failed, 4 the merge was refused,
 5 not open, 6 not the dependency update asked for, 8 the head moved while it waited.
 
+A scanning app may end a check run as `neutral` both when it found something and when it could not
+finish, and only the run's title tells them apart. `claude-ops rescan 123` closes and reopens the
+pull request once when every check that did not pass is a neutral run whose title says it could not
+complete (`--title <regex>` for another app's words), waits for the new runs and judges them. A
+neutral run with any other title is a finding, and nothing is closed for it. Exit codes: 0 the new
+runs passed, 1 nothing to run again, 2 not done at the timeout, 3 a new run did not pass, 4 gh could
+not read, close or reopen it, 5 a new run could not complete either, 8 not the `--head` given.
+
 `--method auto` uses the first of merge, squash and rebase the repository allows, so one command
 serves repositories with different settings. `--dependency-bump patch` or `minor` merges only a
 dependency update a program may take on its own: opened by Dependabot or Renovate (another updater

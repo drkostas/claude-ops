@@ -285,6 +285,15 @@ def cmd_merge(a) -> int:
     return code
 
 
+def cmd_rescan(a) -> int:
+    from . import rescan
+    code, said = rescan.rescan(a.number, a.repo, head=a.head, pattern=a.title or rescan.INCOMPLETE,
+                               timeout_s=a.timeout * 60,
+                               poll_s=a.poll)
+    print(said, file=sys.stdout if code == 0 else sys.stderr)
+    return code
+
+
 def cmd_meter(a) -> int:
     from . import meter
     if a.what == "statusline":
@@ -416,6 +425,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--prod-environment",
                    help="with --confirm-prod, keep only deployments whose environment name contains this")
     s.set_defaults(func=cmd_merge)
+
+    s = sub.add_parser("rescan", help="close and reopen a pull request once when its only red checks are runs "
+                                      "that could not complete, and judge the new runs")
+    s.add_argument("number", help="the pull request number")
+    s.add_argument("--repo", help="owner/name (default: the repository of the current folder)")
+    s.add_argument("--head", help="act only while this is the pull request's head (exit 8 otherwise)")
+    s.add_argument("--title", default=None, help="a regular expression for a run's title that says the app could "
+                                                 "not complete (default: 'could not complete', any case)")
+    s.add_argument("--timeout", type=float, default=30, help="minutes to wait for the new runs")
+    s.add_argument("--poll", type=float, default=20, help="seconds between reads")
+    s.set_defaults(func=cmd_rescan)
 
     s = sub.add_parser("stall", help="wait on a session's transcript until it finishes, stops on an "
                                       "error, or stalls (exit 0, 1 or 2)")

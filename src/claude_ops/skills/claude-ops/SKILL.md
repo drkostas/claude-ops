@@ -484,6 +484,13 @@ green at the end. Read its exit code: 0 merged, 2 still running or no checks, 3 
 names are printed), 4 the merge was refused, 5 not open, 6 not the dependency update asked for,
 8 the head moved while it waited.
 
+When a check that did not pass is a neutral run whose title says the app could not complete its scan
+(a scanner that timed out, say), it is no finding, and GitHub lets only the app run it again. A chat
+runs `claude-ops rescan <number> --head <sha>`, which closes and reopens the pull request once, waits
+for the new run and judges it, instead of closing and reopening by hand or reading the run as red.
+It never touches a run that names a finding (exit 1). Read its exit code: 0 the new runs passed,
+3 a new run did not pass, 5 it could not complete again (say so, and do not report a finding).
+
 When a chat waits for a pull request's workflow run before merging it, it runs `claude-ops ci-run
 <run> --pr <number> --budget <minutes>` instead of writing its own loop. It waits on a deadline, re-runs
 only a job its runner lost before the first step (`--rerun-starved N`, after `--gate` passed twice),
