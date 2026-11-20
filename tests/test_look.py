@@ -159,6 +159,17 @@ draw();
 <p style="height:3000px">A page much taller than the screen</p>
 </div>
 </body>""",
+    # a row whose tap only changes the colour of its switch (no words change), and a button that does nothing
+    "toggle.html": """<!doctype html><meta name=viewport content="width=device-width"><body style="font:14px sans-serif">
+<div role=button id=row style="display:flex;justify-content:space-between;width:220px;padding:10px">Hide amounts
+<span id=knob style="display:inline-block;width:40px;height:20px;border-radius:10px;background:#555"></span></div>
+<button>Still</button>
+<script>
+document.getElementById('row').onclick = () => {
+  const k = document.getElementById('knob');
+  k.style.background = k.style.background === 'rgb(149, 85, 255)' ? '#555' : '#95f';
+};
+</script></body>""",
     # Approve stays greyed out until the box holds text
     "box.html":"""<!doctype html><meta name=viewport content="width=device-width"><body>
 <input id=t placeholder="Type it, then Approve">
@@ -183,7 +194,7 @@ def site(tmp_path_factory):
     for name, text in PAGES.items():
         (root / name).write_text(text)
     posts: list[str] = []
-    loads = {"moving": 0}
+    loads = {"moving": 0, "late": 0}
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -206,6 +217,21 @@ def site(tmp_path_factory):
                 order = ["Alpha", "Beta"] if loads["moving"] == 1 else ["Beta", "Alpha"]
                 body = ("<!doctype html><body>" + "".join(f"<button>{w}</button>" for w in order)
                         + "</body>").encode()
+                self.send_response(200)
+                self.send_header("content-type", "text/html")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/late.html":
+                # the first load draws Gamma at once, every later load a second and a half after it loaded, as a
+                # page does whose data comes slowly
+                loads["late"] += 1
+                wait = 0 if loads["late"] == 1 else 1500
+                body = ("<!doctype html><body><div id=out>ready</div><script>setTimeout(() => {"
+                        "const b = document.createElement('button'); b.textContent = 'Gamma';"
+                        "b.onclick = () => { document.getElementById('out').textContent = 'gamma'; };"
+                        f"document.body.append(b); }}, {wait});</script></body>").encode()
                 self.send_response(200)
                 self.send_header("content-type", "text/html")
                 self.send_header("content-length", str(len(body)))
@@ -358,6 +384,22 @@ def test_a_button_that_moved_on_a_fresh_load_is_not_tapped(site, tmp_path):
     assert "2 tap(s) skipped (the button moved)" in look.summary({"pages": [page]})[0]
 
 
+def test_a_button_a_fresh_load_draws_late_is_waited_for_and_tapped(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/late.html"], tmp_path, boxes=False, settle_ms=100)["pages"][0]
+    assert [t["button"] for t in page["taps"]] == ["Gamma"]
+    tap = page["taps"][0]
+    assert not tap.get("skipped") and tap["pictures"].get("yes"), tap
+    assert not [f for f in page["findings"] if f["kind"] == "dead_tap"], page["findings"]
+
+
+def test_a_tap_that_changes_only_its_own_colour_is_not_dead(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/toggle.html"], tmp_path, boxes=False, settle_ms=100)["pages"][0]
+    dead = [f["detail"] for f in page["findings"] if f["kind"] == "dead_tap"]
+    assert dead == ["Still"], page["findings"]
+
+
 def test_a_fill_that_stops_short_of_its_button_is_short_fill(site, tmp_path):
     base, _ = site
     page = look.look(base, ["/fills.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
@@ -441,6 +483,28 @@ def test_new_findings_are_what_the_later_look_has_and_the_earlier_does_not():
     assert look.new_findings(after, after) == []
 
 
+def test_a_finding_from_a_tap_the_earlier_look_did_not_make_is_not_compared():
+    def page(taps, findings):
+        return {"pages": [{"path": "/work", "taps": taps, "findings": findings}]}
+    before = page([{"button": "All", "skipped": "the button is gone on a fresh load", "pictures": {}},
+                   {"button": "Queued", "pictures": {"yes": "q0.png"}},
+                   {"button": "Send", "skipped": "the button is gone on a fresh load", "pictures": {}}], [])
+    after = page([{"button": "All", "pictures": {"yes": "a.png"}}, {"button": "Queued", "pictures": {"yes": "q.png"}},
+                  {"button": "Send", "pictures": {}}],
+                 [{"kind": "dead_tap", "detail": "All", "picture": "a.png"},
+                  {"kind": "dead_tap", "detail": "Queued", "picture": "q.png"},
+                  {"kind": "dead_tap", "detail": "Send (not tappable: covered)", "picture": ""},
+                  {"kind": "short_fill", "detail": "↑ (its fill covers 90%)", "picture": "work-load.png"}])
+    new, unchecked = look.compare(before, after)
+    assert [f["detail"] for f in new] == ["Queued", "↑ (its fill covers 90%)"], new
+    assert [(f["detail"], f["not_tapped_before"]) for f in unchecked] == [
+        ("All", "All"), ("Send (not tappable: covered)", "Send")], unchecked
+    assert look.new_findings(before, after) == new and look.not_compared(before, after) == unchecked
+    # a report without taps (an older look) compares every finding as before
+    assert [f["detail"] for f in look.new_findings(_report(("/work", [])), after)] == [
+        "All", "Queued", "Send (not tappable: covered)", "↑ (its fill covers 90%)"]
+
+
 def test_a_finding_s_key_drops_only_a_measure_at_its_end():
     assert look.finding_key("/", {"kind": "short_fill", "detail": "Send (its fill covers 90% of its width)"}) == \
         ("/", "short_fill", "Send")
@@ -457,4 +521,12 @@ def test_look_diff_prints_the_new_findings_and_exits_1(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.splitlines()[0] == "new: short_fill 1" and "/home: short_fill Send (its fill covers 90%) (p.png)" in out
     assert look.main(["diff", str(b), str(b), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"by_kind": {}, "findings": []}
+    assert json.loads(capsys.readouterr().out) == {"by_kind": {}, "findings": [], "not_compared": []}
+    b.write_text(json.dumps({"pages": [{"path": "/home", "findings": [],
+                                        "taps": [{"button": "All", "skipped": "gone", "pictures": {}}]}]}))
+    a.write_text(json.dumps({"pages": [{"path": "/home", "taps": [{"button": "All", "pictures": {"yes": "t.png"}}],
+                                        "findings": [{"kind": "dead_tap", "detail": "All", "picture": "t.png"}]}]}))
+    assert look.main(["diff", str(b), str(a)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["new: nothing", "not compared, the earlier look did not tap their button: 1",
+                   "/home: dead_tap All (t.png)"], out

@@ -37,13 +37,15 @@ A button whose tap sends such a request is tapped once for each way of answering
 - `none` never answers.
 
 After a tap that stays on the same address, the page is checked again as it is then, so a sheet or a menu the tap
-opened is checked too. A tap that sends nothing, stays on the same address and changes nothing on the page is
-`dead_tap`, unless the button is already the one chosen (`aria-selected`, `aria-checked` or `aria-pressed` true,
+opened is checked too. A tap that sends nothing, stays on the same address and changes nothing on the page (its
+words, which buttons are enabled, and the button's own pixels, so a switch that only changes its colour is not
+dead) is `dead_tap`, unless the button is already the one chosen (`aria-selected`, `aria-checked` or `aria-pressed` true,
 or a checked input), as a filter chip that is on already, or the tap opened a file picker or asked the browser
 to open an address elsewhere (`window.open`, or a link whose scheme an app takes), which the tap's `opened`
 lists. A button still there, enabled and with the same words after a `yes` is `offered_again`, unless it
-matches `again`, a CSS selector for buttons meant to stay. A button whose words at its place differ on a fresh
-load (the page drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a
+matches `again`, a CSS selector for buttons meant to stay. Each tap's fresh load waits up to 15 s for the page to draw
+the button again (a page whose data comes slowly), and a button whose words at its place still differ (the page
+drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a
 text area) is shown empty and with text, and the report lists the buttons enabled in each case, so a button meant
 to wait for text can be seen both ways.
 
@@ -67,6 +69,7 @@ import html
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,6 +93,8 @@ TIMEOUT_S = 90.0
 SETTLE_MS = 800
 #: how long a slow answer is held
 SLOW_S = 5.0
+#: how long a fresh load before a tap may take to draw the button the first load drew, before the tap is skipped
+DRAWN_S = 15.0
 
 _JSON = {"content-type": "application/json"}
 
@@ -463,18 +468,41 @@ def look_page(browser, base: str, path: str, out: Path, *, answers: Answers, tap
         rec["left_out"] = [b["words"] for b in buttons if b["enabled"]][max_taps:]
         for n, b in enumerate(tried, 1):
             rec["taps"].append(_tap(browser, url, b, n, rec, shot, answers=answers, again=again,
-                                    viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms))
+                                    viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms,
+                                    count=len(buttons)))
     return rec
 
 
+def _drawn(page, button: dict, count: int, wait_s: float) -> str | None:
+    """The words of the button at `button`'s place, once the page has drawn it or as many buttons as the first load
+    drew, or when `wait_s` has passed. A page whose data comes slowly draws fewer buttons on one load than another,
+    and a tap skipped for that would leave the button unchecked."""
+    end = time.monotonic() + wait_s
+    while True:
+        drawn = page.evaluate(BUTTONS_JS, [TAPPABLE, None])
+        now = next((b["words"] for b in drawn if b["i"] == button["i"]), None)
+        if now == button["words"] or len(drawn) >= count or time.monotonic() >= end:
+            return now
+        page.wait_for_timeout(250)
+
+
+def _own_pixels(page, button: dict) -> bytes | None:
+    """A picture of the button alone, with the pointer away from it, or None when it cannot be taken."""
+    try:
+        page.mouse.move(0, 0)
+        return page.locator(TAPPABLE).nth(button["i"]).screenshot(timeout=3000)
+    except Exception:   # noqa: BLE001 gone, moved off the page or hidden
+        return None
+
+
 def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: Answers, again: str,
-         viewport: tuple[int, int], timeout_s: float, settle_ms: int) -> dict[str, Any]:
+         viewport: tuple[int, int], timeout_s: float, settle_ms: int, count: int = 0) -> dict[str, Any]:
     tap: dict[str, Any] = {"button": button["words"], "sent": [], "pictures": {}}
     for mode in MODES:
         held = _Held(answers, mode)
         page = _open(browser, url, held, viewport=viewport, timeout_s=timeout_s, settle_ms=settle_ms)
         href = page.url
-        now = next((b["words"] for b in page.evaluate(BUTTONS_JS, [TAPPABLE, None]) if b["i"] == button["i"]), None)
+        now = _drawn(page, button, count, min(timeout_s, DRAWN_S))
         if now != button["words"]:
             # the page drew its buttons in another order this time, so this place holds another button, and a
             # picture filed under this one would show that one
@@ -483,6 +511,7 @@ def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: A
             _close(page, held)
             return tap
         before = page.evaluate(STATE_JS, TAPPABLE)
+        own = _own_pixels(page, button) if mode == "yes" else None
         elsewhere: list[str] = []   # what the tap handed the person to: a file picker, a tab, another app
         page.on("filechooser", lambda _chooser: elsewhere.append("a file picker"))
         page.on("requestfailed", lambda r: elsewhere.append(r.url) if not r.url.startswith(WEB) else None)
@@ -511,7 +540,9 @@ def _tap(browser, url: str, button: dict, n: int, rec: dict, shot, *, answers: A
             if elsewhere:
                 tap["opened"] = elsewhere[:3]
             if not held.sent:
-                if page.url == href and page.evaluate(STATE_JS, TAPPABLE) == before and not elsewhere:
+                if (page.url == href and page.evaluate(STATE_JS, TAPPABLE) == before and not elsewhere
+                        and (own is None or _own_pixels(page, button) in (own, None))):
+                    # the button itself drew nothing new either (a switch that only changes its colour did)
                     if button.get("chosen"):
                         tap["chosen"] = True   # it is already the one chosen, so a tap on it changes nothing
                     else:
@@ -602,13 +633,28 @@ def finding_key(path: str, finding: dict[str, Any]) -> tuple[str, str, str]:
     return path, str(finding.get("kind", "")), _MEASURE.sub("", str(finding.get("detail", ""))).strip()
 
 
-def new_findings(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+def _tap_button(page: dict[str, Any], finding: dict[str, Any]) -> str | None:
+    """The words of the button whose tap a finding came from (its picture is one of that tap's, or it says the
+    button could not be tapped), or None for a finding of the page as it loaded."""
+    if finding.get("kind") == "dead_tap" and " (not tappable: " in str(finding.get("detail", "")):
+        return str(finding["detail"]).split(" (not tappable: ")[0]
+    picture = finding.get("picture")
+    return next((t["button"] for t in page.get("taps", []) if picture and picture in t.get("pictures", {}).values()),
+                None)
+
+
+def compare(before: dict[str, Any], after: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The findings `after` has that `before` does not, page by page, each once, with its page's path and the
-    picture of its first sighting. A page `before` does not hold is new as a whole (`new_page` true), so a look
-    that could not open a page on one build never hides what the other found there."""
+    picture of its first sighting, in two lists: new, and not compared. A finding that came from a tap `before`
+    did not make on that page (it skipped the tap because the button was not drawn at its place, or left it out)
+    is not compared, since `before` could not have found it. A page `before` does not hold is new as a whole
+    (`new_page` true), so a look that could not open a page on one build never hides what the other found there."""
     seen = {pg["path"]: {finding_key(pg["path"], f) for f in pg.get("findings", [])}
             for pg in before.get("pages", [])}
-    out: list[dict[str, Any]] = []
+    tapped = {pg["path"]: {t["button"] for t in pg["taps"] if not t.get("skipped")}
+              for pg in before.get("pages", []) if "taps" in pg}
+    new: list[dict[str, Any]] = []
+    unchecked: list[dict[str, Any]] = []
     told: set[tuple[str, str, str]] = set()
     for pg in after.get("pages", []):
         old = seen.get(pg["path"])
@@ -617,8 +663,22 @@ def new_findings(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str
             if (old is not None and k in old) or k in told:
                 continue
             told.add(k)
-            out.append({"path": pg["path"], **f, **({"new_page": True} if old is None else {})})
-    return out
+            button = _tap_button(pg, f)
+            if old is not None and button is not None and pg["path"] in tapped and button not in tapped[pg["path"]]:
+                unchecked.append({"path": pg["path"], **f, "not_tapped_before": button})
+            else:
+                new.append({"path": pg["path"], **f, **({"new_page": True} if old is None else {})})
+    return new, unchecked
+
+
+def new_findings(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+    """The findings `after` has that `before` does not and could have found (`compare`'s first list)."""
+    return compare(before, after)[0]
+
+
+def not_compared(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+    """The findings `after` has from taps `before` did not make (`compare`'s second list)."""
+    return compare(before, after)[1]
 
 
 def by_kind(findings: list[dict[str, Any]]) -> dict[str, int]:
@@ -652,13 +712,17 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("after", help="the later look's report.json")
         p.add_argument("--json", action="store_true", help="print the new findings as JSON")
         a = p.parse_args(argv[1:])
-        new = new_findings(json.loads(Path(a.before).read_text()), json.loads(Path(a.after).read_text()))
+        new, unchecked = compare(json.loads(Path(a.before).read_text()), json.loads(Path(a.after).read_text()))
         if a.json:
-            print(json.dumps({"by_kind": by_kind(new), "findings": new}, indent=2))
+            print(json.dumps({"by_kind": by_kind(new), "findings": new, "not_compared": unchecked}, indent=2))
         else:
             print("new: " + (", ".join(f"{k} {n}" for k, n in by_kind(new).items()) or "nothing"))
             for f in new:
                 print(f"{f['path']}: {f['kind']} {f.get('detail', '')} ({f.get('picture', 'no picture')})")
+            if unchecked:
+                print(f"not compared, the earlier look did not tap their button: {len(unchecked)}")
+                for f in unchecked:
+                    print(f"{f['path']}: {f['kind']} {f.get('detail', '')} ({f.get('picture', 'no picture')})")
         return 1 if new else 0
     if argv[:1] == ["sheet"]:
         p = argparse.ArgumentParser(prog="claude-ops look sheet",

@@ -251,8 +251,10 @@ JSON). Two findings are the same when they are on the same page, of the same kin
 thing, and a measure at the end of a finding's words (how much of a button its fill covers) is left
 out of that, since it moves by a point between two builds. So a look of a branch's build after one of
 the main branch's build says what the branch brought. A page the earlier look does not hold is new as
-a whole. `look.look`, `look.look_page`, `look.sheet`, `look.new_findings`, `look.by_kind` and
-`look.answers_from` are the parts.
+a whole. A finding that came from a tap the earlier look did not make on that page (it skipped the tap because
+the button was not drawn at its place, or left it out) is listed apart as not compared, since the earlier look
+could not have found it. `look.look`, `look.look_page`, `look.sheet`, `look.compare`, `look.new_findings`,
+`look.not_compared`, `look.by_kind` and `look.answers_from` are the parts.
 
 ## Find general code in a private project
 
