@@ -10,6 +10,9 @@ Two facts about a service are easy to get wrong when they are read from what is 
   before it still maps them. A reading of the installed package's version says the fix is in place
   while those processes run without it.
 
+The library check is for macOS, where `lsof -d txt` lists every mapped library. (On Linux lsof lists
+shared libraries under `mem`, so the check does not see them there.)
+
 So this reads the process. `lsof -p <pid> -a -d txt` lists the program and every library the process
 has mapped, and a mapped path that no longer exists on the disk (or that the system marks as deleted)
 is a mapping of a version that has been replaced. The program's own `--version` names the runtime,
@@ -84,12 +87,14 @@ def stale_mappings(paths: Iterable[str], exists: Callable[[str], bool] = os.path
 
 
 def runtime_name(executable: str | None) -> str | None:
-    """`node` from /usr/local/bin/node, `python` from python3.14, `php` from php-fpm8.3, else None."""
+    """`node` from /usr/local/bin/node, `python` from python3.14, `php` from php-fpm8.3, else None.
+    Only the runtime's name followed by digits, dots, dashes or `-fpm` counts, so `node_exporter`,
+    `nodemon` and `rubocop` are not runtimes."""
     if not executable:
         return None
     base = os.path.basename(executable).lower()
     for name in ("node", "python", "php", "bun", "deno", "ruby", "perl", "java"):
-        if base.startswith(name):
+        if re.fullmatch(re.escape(name) + r"(-fpm)?[\d.\-]*", base):
             return name
     return None
 
@@ -120,7 +125,10 @@ def read(pid: int, run: Callable[..., "subprocess.CompletedProcess[str]"] = subp
     if not paths:
         return None
     exe = paths[0]
-    return ProcessRuntime(pid=pid, executable=exe, name=runtime_name(exe), version=version_of(exe, run),
+    name = runtime_name(exe)
+    # --version is asked only of a known runtime: any other program may not know the flag and
+    # start its normal work instead
+    return ProcessRuntime(pid=pid, executable=exe, name=name, version=version_of(exe, run) if name else None,
                           stale=tuple(stale_mappings(paths[1:], exists)), mapped=len(paths) - 1)
 
 

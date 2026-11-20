@@ -57,6 +57,17 @@ def test_the_manifest_fallback_is_used_when_buildx_is_missing():
     assert ic.read("web", run).current == NEW
 
 
+def test_a_multi_platform_manifest_list_gives_no_digest():
+    listing = '[{"Descriptor": {"digest": "%s"}}, {"Descriptor": {"digest": "%s"}}]' % (NEW, OLD)
+    run = _docker({
+        "inspect --format {{.Config.Image}}": (0, "example/app:1.10|sha256:img\n"),
+        "image inspect": (0, f'["example/app@{OLD}"]|2026-10-01T10:00:00Z\n'),
+        "manifest inspect": (0, listing),
+    })
+    r = ic.read("web", run)
+    assert (r.current, r.behind) == (None, None)
+
+
 def test_a_container_that_cannot_be_read_says_so():
     r = ic.read("gone", _docker({}))
     assert (r.reference, r.behind) == (None, None) and r.detail

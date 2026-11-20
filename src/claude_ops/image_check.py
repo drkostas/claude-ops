@@ -110,8 +110,13 @@ def current_digest(reference: str, run: Callable[..., "subprocess.CompletedProce
     if out:
         try:
             parsed = json.loads(out)
-            first = parsed[0] if isinstance(parsed, list) and parsed else parsed
-            m = _DIGEST.search(json.dumps((first or {}).get("Descriptor", {}).get("digest", "")))
+            if isinstance(parsed, list):
+                # a multi-platform tag lists one manifest per platform, none of which is the
+                # index digest the engine keeps, so no digest can be said
+                if len(parsed) != 1:
+                    return None
+                parsed = parsed[0]
+            m = _DIGEST.search(json.dumps((parsed or {}).get("Descriptor", {}).get("digest", "")))
             if m:
                 return m.group(0)
         except (ValueError, AttributeError):

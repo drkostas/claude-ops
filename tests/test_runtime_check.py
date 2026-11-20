@@ -45,6 +45,8 @@ def test_runtime_names():
     assert rc.runtime_name("/usr/sbin/php-fpm8.3") == "php"
     assert rc.runtime_name("/home/u/.bun/bin/bun") == "bun"
     assert rc.runtime_name("/bin/sh") is None
+    for other in ("node_exporter", "nodemon", "rubocop", "pythonista", "phpstorm"):
+        assert rc.runtime_name("/usr/bin/" + other) is None
     assert rc.runtime_name(None) is None
 
 
@@ -75,6 +77,17 @@ def test_read_puts_the_four_facts_together():
     r = rc.read(9, run)
     assert (r.name, r.version, r.executable, r.stale, r.mapped) == ("node", "25.8.1", "/opt/x/bin/node", (gone,), 2)
     assert ["/opt/x/bin/node", "--version"] in calls
+
+
+def test_a_program_that_is_not_a_runtime_is_never_run():
+    calls = []
+
+    def run(argv, **k):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "p9\nn/usr/bin/screencapture\n" if argv[0] == "lsof" else "x 1.2.3", "")
+    r = rc.read(9, run)
+    assert (r.name, r.version) == (None, None)
+    assert [c[0] for c in calls] == ["lsof"]
 
 
 def test_read_of_an_unreadable_process_is_none():
