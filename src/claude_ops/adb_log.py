@@ -6,7 +6,8 @@ retrying a device it cannot reach writes a few lines every second, and over some
 
 Because the server opens the log for appending, each of its writes goes to the file's end, whatever the end is
 at that moment. So the file can be emptied while the server runs, and its next lines start again at the top.
-`cap` keeps the log's last part in `<log>.1` first, then empties the log. No server is stopped.
+`cap` keeps the log's last part in `<log>.1` first, then empties the log. No server is stopped. The cut itself
+is `claude_ops.log_cap.cap`, which works on any log opened for appending, and this module only finds adb's.
 
     r = cap(max_bytes=100 * 2**20, keep_bytes=5 * 2**20)
     if r.cut:
@@ -21,22 +22,13 @@ import json
 import os
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 
-#: a log over this many bytes is cut
-MAX_BYTES = 100 * 2**20
-#: how much of the log's end a cut keeps, in <log>.1
-KEEP_BYTES = 5 * 2**20
+from claude_ops import log_cap
+from claude_ops.log_cap import KEEP_BYTES, MAX_BYTES, Capped, tail
 
-
-@dataclass
-class Capped:
-    path: str
-    bytes: int              # the log's size when it was read, 0 when there is none
-    cut: bool
-    kept: str | None = None
-    kept_bytes: int = 0
+__all__ = ["KEEP_BYTES", "MAX_BYTES", "Capped", "cap", "main", "server_log", "tail"]
 
 
 def server_log(env: dict[str, str] | None = None) -> Path:
@@ -52,38 +44,13 @@ def server_log(env: dict[str, str] | None = None) -> Path:
     return Path(env.get("TMPDIR") or "/tmp") / f"adb.{os.getuid()}.log"
 
 
-def tail(path: Path, keep_bytes: int) -> bytes:
-    """The last `keep_bytes` of a file, from the start of a line: a first line cut in the middle is left out."""
-    with open(path, "rb") as f:
-        size = f.seek(0, os.SEEK_END)
-        if size <= keep_bytes:
-            f.seek(0)
-            return f.read()
-        f.seek(size - keep_bytes)
-        data = f.read()
-    nl = data.find(b"\n")
-    return data[nl + 1:] if nl >= 0 else b""
-
-
 def cap(path: Path | str | None = None, *, max_bytes: int = MAX_BYTES, keep_bytes: int = KEEP_BYTES) -> Capped:
-    """Cut the adb server's log (`path`, else `server_log()`) when it is over `max_bytes`. Its last `keep_bytes`,
-    from a line start, are written to `<log>.1`, replacing an older one, and then the log is emptied in place,
-    so the running server goes on writing to it. A line the server writes between those two steps is lost. A
-    log at or under `max_bytes`, or no log at all, is left as it is."""
-    log = Path(path) if path is not None else server_log()
-    try:
-        size = log.stat().st_size
-    except FileNotFoundError:
-        return Capped(str(log), 0, False)
-    if size <= max_bytes:
-        return Capped(str(log), size, False)
-    kept = log.with_name(log.name + ".1")
-    data = tail(log, keep_bytes)
-    tmp = kept.with_name(kept.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, kept)
-    os.truncate(log, 0)
-    return Capped(str(log), size, True, str(kept), len(data))
+    """Cut the adb server's log (`path`, else `server_log()`) when it is over `max_bytes`, by
+    `claude_ops.log_cap.cap`. Its last `keep_bytes`, from a line start, are written to `<log>.1`, replacing an
+    older one, and then the log is emptied in place, so the running server goes on writing to it. A line the
+    server writes between those two steps is lost. A log at or under `max_bytes`, or no log at all, is left as
+    it is."""
+    return log_cap.cap(path if path is not None else server_log(), max_bytes=max_bytes, keep_bytes=keep_bytes)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -98,12 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
     r = cap(a.path, max_bytes=int(a.max_mb * 2**20), keep_bytes=int(a.keep_mb * 2**20))
-    if a.json:
-        print(json.dumps(asdict(r)))
-    elif r.cut:
-        print(f"{r.path}: {r.bytes} bytes, cut, the last {r.kept_bytes} kept in {r.kept}")
-    else:
-        print(f"{r.path}: {r.bytes} bytes, at most {int(a.max_mb * 2**20)}, left as it is")
+    print(json.dumps(asdict(r)) if a.json else log_cap.say(r, int(a.max_mb * 2**20)))
     return 0
 
 

@@ -489,6 +489,20 @@ and its next lines start at the top. `adb-log` keeps the log's end in `<log>.1` 
 It finds the log where adb does (`ANDROID_ADB_LOG_PATH`, else `adb.<uid>.log` in `TMPDIR` or `/tmp`), or
 takes `--path`.
 
+The same cut works on any log a program holds open for appending:
+
+```bash
+claude-ops log-cap /path/to/app.log /path/to/worker.log --max 10 --keep 2   # each one over 10 MB keeps its last 2 MB
+```
+
+```python
+from claude_ops.log_cap import cap
+r = cap("/path/to/app.log", max_bytes=10 * 2**20, keep_bytes=2 * 2**20)   # r.cut, r.bytes, r.kept, r.kept_bytes
+```
+
+A program that writes at its own offset instead (a file opened without `O_APPEND`) would leave a hole of zero
+bytes at the top after the cut, so use it only on logs opened for appending.
+
 ## One heavy job at a time
 
 ```bash
