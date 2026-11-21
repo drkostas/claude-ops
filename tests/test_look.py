@@ -21,6 +21,33 @@ PAGES = {
 <div style="overflow-x:auto;width:200px;white-space:nowrap"><span style="display:inline-block;width:600px">A row that scrolls sideways</span></div>
 </body>""",
     "empty.html": "<!doctype html><body></body>",
+    # Start posts, takes itself away on the answer, then reads the record again, which still offers it, since an answer
+    # look gives changed nothing there
+    "reread.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<div id=row></div>
+<script>
+function draw(offer) {
+  document.getElementById('row').innerHTML = offer ? '<button id=start>Start</button>' : '<div>starting</div>';
+  if (offer) document.getElementById('start').onclick = () => {
+    fetch('/act', {method: 'POST', body: '{}'}).then(r => r.json()).then(j => {
+      draw(!j.ok);
+      fetch('/state.json').then(r => r.json()).then(s => draw(s.offer));
+    });
+  };
+}
+draw(true);
+</script></body>""",
+    "state.json": '{"offer": true}',
+    # a menu laid over the page, whose last item and a button of the page behind it cross at the bottom edge, so the
+    # middle of where they cross is just below the screen; and two buttons that cross there with nothing over them
+    "drawer.html": """<!doctype html><meta name=viewport content="width=device-width">
+<body style="margin:0;height:2000px">
+<button style="position:absolute;top:calc(100vh - 20px);left:100px;width:200px;height:40px">Restart</button>
+<button style="position:absolute;top:calc(100vh - 20px);left:330px;width:50px;height:40px">Edge one</button>
+<button style="position:absolute;top:calc(100vh - 10px);left:340px;width:40px;height:40px">Edge two</button>
+<div style="position:fixed;top:0;left:0;width:300px;bottom:0;background:#123;overflow:hidden">
+<div role=button style="position:absolute;top:calc(100vh - 25px);left:10px;width:250px;height:50px;color:#fff">Work in progress</div>
+</div></body>""",
     # Send posts and draws itself again as it was (the shape of a button that comes back after its tap),
     # Stays does the same but is marked as meant to stay, and Nothing does nothing at all
     "again.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
@@ -159,6 +186,17 @@ draw();
 <p style="height:3000px">A page much taller than the screen</p>
 </div>
 </body>""",
+    # a row whose tap only changes the colour of its switch (no words change), and a button that does nothing
+    "toggle.html": """<!doctype html><meta name=viewport content="width=device-width"><body style="font:14px sans-serif">
+<div role=button id=row style="display:flex;justify-content:space-between;width:220px;padding:10px">Hide amounts
+<span id=knob style="display:inline-block;width:40px;height:20px;border-radius:10px;background:#555"></span></div>
+<button>Still</button>
+<script>
+document.getElementById('row').onclick = () => {
+  const k = document.getElementById('knob');
+  k.style.background = k.style.background === 'rgb(149, 85, 255)' ? '#555' : '#95f';
+};
+</script></body>""",
     # Approve stays greyed out until the box holds text
     "box.html":"""<!doctype html><meta name=viewport content="width=device-width"><body>
 <input id=t placeholder="Type it, then Approve">
@@ -183,7 +221,7 @@ def site(tmp_path_factory):
     for name, text in PAGES.items():
         (root / name).write_text(text)
     posts: list[str] = []
-    loads = {"moving": 0}
+    loads = {"moving": 0, "late": 0}
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -206,6 +244,21 @@ def site(tmp_path_factory):
                 order = ["Alpha", "Beta"] if loads["moving"] == 1 else ["Beta", "Alpha"]
                 body = ("<!doctype html><body>" + "".join(f"<button>{w}</button>" for w in order)
                         + "</body>").encode()
+                self.send_response(200)
+                self.send_header("content-type", "text/html")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/late.html":
+                # the first load draws Gamma at once, every later load a second and a half after it loaded, as a
+                # page does whose data comes slowly
+                loads["late"] += 1
+                wait = 0 if loads["late"] == 1 else 1500
+                body = ("<!doctype html><body><div id=out>ready</div><script>setTimeout(() => {"
+                        "const b = document.createElement('button'); b.textContent = 'Gamma';"
+                        "b.onclick = () => { document.getElementById('out').textContent = 'gamma'; };"
+                        f"document.body.append(b); }}, {wait});</script></body>").encode()
                 self.send_response(200)
                 self.send_header("content-type", "text/html")
                 self.send_header("content-length", str(len(body)))
@@ -291,6 +344,26 @@ def test_taps_show_each_answer_and_never_reach_the_server(site, tmp_path):
     assert all((tmp_path / f).exists() for t in page["taps"] for f in t["pictures"].values())
 
 
+def test_a_page_that_reads_again_after_a_yes_is_pictured_before_that_read(site, tmp_path):
+    # the answer was look's, so the record still offers Start, and a page that read it again drew the button back
+    # and read as offering it again, in one build and not the other, by how soon its picture was taken
+    base, posts = site
+    report = look.look(base, ["/reread.html"], tmp_path, boxes=False, answers=look.Answers(slow_s=0.5), settle_ms=400)
+    page = report["pages"][0]
+    found = {(f["kind"], f["detail"]) for f in page["findings"]}
+    assert ("offered_again", "Start") not in found, found
+    assert {t["button"] for t in page["taps"]} == {"Start"} and page["taps"][0]["sent"]
+    assert posts == [], "no request other than GET reaches the server"
+
+
+def test_where_a_menu_covers_the_part_on_the_screen_there_is_no_overlap(site, tmp_path):
+    # the middle of where the two cross is below the screen, and the part on the screen is under the menu
+    base, _ = site
+    report = look.look(base, ["/drawer.html"], tmp_path, boxes=False, taps=False)
+    overlaps = sorted(f["detail"] for f in report["pages"][0]["findings"] if f["kind"] == "overlap")
+    assert overlaps == ["Edge one and Edge two"], overlaps
+
+
 def test_a_box_is_shown_empty_and_with_text(site, tmp_path):
     base, _ = site
     page = look.look(base, ["/box.html"], tmp_path, taps=False, settle_ms=100)["pages"][0]
@@ -358,6 +431,22 @@ def test_a_button_that_moved_on_a_fresh_load_is_not_tapped(site, tmp_path):
     assert "2 tap(s) skipped (the button moved)" in look.summary({"pages": [page]})[0]
 
 
+def test_a_button_a_fresh_load_draws_late_is_waited_for_and_tapped(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/late.html"], tmp_path, boxes=False, settle_ms=100)["pages"][0]
+    assert [t["button"] for t in page["taps"]] == ["Gamma"]
+    tap = page["taps"][0]
+    assert not tap.get("skipped") and tap["pictures"].get("yes"), tap
+    assert not [f for f in page["findings"] if f["kind"] == "dead_tap"], page["findings"]
+
+
+def test_a_tap_that_changes_only_its_own_colour_is_not_dead(site, tmp_path):
+    base, _ = site
+    page = look.look(base, ["/toggle.html"], tmp_path, boxes=False, settle_ms=100)["pages"][0]
+    dead = [f["detail"] for f in page["findings"] if f["kind"] == "dead_tap"]
+    assert dead == ["Still"], page["findings"]
+
+
 def test_a_fill_that_stops_short_of_its_button_is_short_fill(site, tmp_path):
     base, _ = site
     page = look.look(base, ["/fills.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
@@ -413,3 +502,78 @@ def test_what_runs_the_way_a_box_scrolls_is_not_cut_off(site, tmp_path):
     base, _ = site
     page = look.look(base, ["/scroller.html"], tmp_path, taps=False, boxes=False, settle_ms=100)["pages"][0]
     assert not [f for f in page["findings"] if f["kind"] == "cut_off"], page["findings"]
+
+
+def _report(*pages):
+    return {"pages": [{"path": path, "findings": list(found)} for path, found in pages]}
+
+
+def test_new_findings_are_what_the_later_look_has_and_the_earlier_does_not():
+    before = _report(("/home", [{"kind": "dead_tap", "detail": "All", "picture": "a.png"},
+                                {"kind": "short_fill", "detail": "Send (its fill covers 89% of its width and 32% of its height)",
+                                 "picture": "b.png"}]),
+                     ("/list", []))
+    after = _report(("/home", [{"kind": "dead_tap", "detail": "All", "picture": "c.png"},
+                               {"kind": "short_fill", "detail": "Send (its fill covers 90% of its width and 31% of its height)",
+                                "picture": "d.png"},
+                               {"kind": "short_fill", "detail": "↑ (its fill covers 90% of its width and 33% of its height)",
+                                "picture": "e.png"},
+                               {"kind": "short_fill", "detail": "↑ (its fill covers 90% of its width and 33% of its height)",
+                                "picture": "f.png"}]),
+                    ("/list", [{"kind": "overlap", "detail": "Save and Close", "picture": "g.png"}]),
+                    ("/more", [{"kind": "cut_off", "detail": "A long title", "picture": "h.png"}]))
+    new = look.new_findings(before, after)
+    assert [(f["path"], f["kind"], f["picture"]) for f in new] == [
+        ("/home", "short_fill", "e.png"), ("/list", "overlap", "g.png"), ("/more", "cut_off", "h.png")]
+    assert new[-1]["new_page"] is True and "new_page" not in new[0]
+    assert look.by_kind(new) == {"cut_off": 1, "overlap": 1, "short_fill": 1}
+    assert look.new_findings(after, after) == []
+
+
+def test_a_finding_from_a_tap_the_earlier_look_did_not_make_is_not_compared():
+    def page(taps, findings):
+        return {"pages": [{"path": "/work", "taps": taps, "findings": findings}]}
+    before = page([{"button": "All", "skipped": "the button is gone on a fresh load", "pictures": {}},
+                   {"button": "Queued", "pictures": {"yes": "q0.png"}},
+                   {"button": "Send", "skipped": "the button is gone on a fresh load", "pictures": {}}], [])
+    after = page([{"button": "All", "pictures": {"yes": "a.png"}}, {"button": "Queued", "pictures": {"yes": "q.png"}},
+                  {"button": "Send", "pictures": {}}],
+                 [{"kind": "dead_tap", "detail": "All", "picture": "a.png"},
+                  {"kind": "dead_tap", "detail": "Queued", "picture": "q.png"},
+                  {"kind": "dead_tap", "detail": "Send (not tappable: covered)", "picture": ""},
+                  {"kind": "short_fill", "detail": "↑ (its fill covers 90%)", "picture": "work-load.png"}])
+    new, unchecked = look.compare(before, after)
+    assert [f["detail"] for f in new] == ["Queued", "↑ (its fill covers 90%)"], new
+    assert [(f["detail"], f["not_tapped_before"]) for f in unchecked] == [
+        ("All", "All"), ("Send (not tappable: covered)", "Send")], unchecked
+    assert look.new_findings(before, after) == new and look.not_compared(before, after) == unchecked
+    # a report without taps (an older look) compares every finding as before
+    assert [f["detail"] for f in look.new_findings(_report(("/work", [])), after)] == [
+        "All", "Queued", "Send (not tappable: covered)", "↑ (its fill covers 90%)"]
+
+
+def test_a_finding_s_key_drops_only_a_measure_at_its_end():
+    assert look.finding_key("/", {"kind": "short_fill", "detail": "Send (its fill covers 90% of its width)"}) == \
+        ("/", "short_fill", "Send")
+    assert look.finding_key("/", {"kind": "overlap", "detail": "Save (draft) and Close"}) == \
+        ("/", "overlap", "Save (draft) and Close")
+
+
+def test_look_diff_prints_the_new_findings_and_exits_1(tmp_path, capsys):
+    b, a = tmp_path / "b.json", tmp_path / "a.json"
+    b.write_text(json.dumps(_report(("/home", []))))
+    a.write_text(json.dumps(_report(("/home", [{"kind": "short_fill", "detail": "Send (its fill covers 90%)",
+                                                 "picture": "p.png"}]))))
+    assert look.main(["diff", str(b), str(a)]) == 1
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "new: short_fill 1" and "/home: short_fill Send (its fill covers 90%) (p.png)" in out
+    assert look.main(["diff", str(b), str(b), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"by_kind": {}, "findings": [], "not_compared": []}
+    b.write_text(json.dumps({"pages": [{"path": "/home", "findings": [],
+                                        "taps": [{"button": "All", "skipped": "gone", "pictures": {}}]}]}))
+    a.write_text(json.dumps({"pages": [{"path": "/home", "taps": [{"button": "All", "pictures": {"yes": "t.png"}}],
+                                        "findings": [{"kind": "dead_tap", "detail": "All", "picture": "t.png"}]}]}))
+    assert look.main(["diff", str(b), str(a)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["new: nothing", "not compared, the earlier look did not tap their button: 1",
+                   "/home: dead_tap All (t.png)"], out
