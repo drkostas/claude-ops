@@ -1,12 +1,10 @@
-"""adb_log: the adb server's log is cut over a size while the server runs, its end kept in <log>.1."""
+"""adb_log: the adb server's log is found where adb puts it and cut by log_cap while the server runs."""
 from __future__ import annotations
 
 import json
 import os
 
-import pytest
-
-from claude_ops import adb_log, cli
+from claude_ops import adb_log, cli, log_cap
 
 
 def lines(n: int, start: int = 0) -> bytes:
@@ -30,16 +28,15 @@ def test_a_log_under_the_size_or_none_is_left_alone(tmp_path):
     assert not (tmp_path / "adb.log.1").exists()
 
 
-def test_a_log_over_the_size_keeps_its_end_from_a_line_start_and_is_emptied(tmp_path):
+def test_cap_is_log_caps_cut_and_finds_adbs_log_by_itself(tmp_path, monkeypatch):
+    """adb_log keeps its names for callers that import them from here, and with no path cuts adb's own log."""
+    assert adb_log.Capped is log_cap.Capped and adb_log.tail is log_cap.tail
+    assert (adb_log.MAX_BYTES, adb_log.KEEP_BYTES) == (log_cap.MAX_BYTES, log_cap.KEEP_BYTES)
     log = tmp_path / "adb.log"
-    data = lines(1000)
-    log.write_bytes(data)
-    (tmp_path / "adb.log.1").write_bytes(b"an older cut\n")
-    r = adb_log.cap(log, max_bytes=10_000, keep_bytes=2_000)
-    kept = (tmp_path / "adb.log.1").read_bytes()
-    assert r.cut and r.bytes == len(data) and r.kept == str(tmp_path / "adb.log.1") and r.kept_bytes == len(kept)
-    assert data.endswith(kept) and 0 < len(kept) <= 2_000 and kept.startswith(b"11-15 ")
-    assert log.read_bytes() == b"" and not (tmp_path / "adb.log.1.tmp").exists()
+    log.write_bytes(lines(1000))
+    monkeypatch.setenv("ANDROID_ADB_LOG_PATH", str(log))
+    r = adb_log.cap(max_bytes=10_000, keep_bytes=2_000)
+    assert r.cut and r.path == str(log) and log.read_bytes() == b"" and lines(1000).endswith((tmp_path / "adb.log.1").read_bytes())
 
 
 def test_a_server_holding_the_log_open_for_appending_writes_from_the_top_after_the_cut(tmp_path):
@@ -64,11 +61,3 @@ def test_the_command_cuts_and_says_so(tmp_path, capsys):
     assert out["cut"] and out["path"] == str(log) and out["kept"] == str(log) + ".1" and log.stat().st_size == 0
     assert cli.main(["adb-log", "--path", str(log), "--max", "0.1"]) == 0
     assert "left as it is" in capsys.readouterr().out
-
-
-@pytest.mark.parametrize("keep", [0, 7])
-def test_a_tail_shorter_than_one_line_keeps_nothing(tmp_path, keep):
-    log = tmp_path / "adb.log"
-    log.write_bytes(lines(50))
-    adb_log.cap(log, max_bytes=10, keep_bytes=keep)
-    assert (tmp_path / "adb.log.1").read_bytes() == b"" and log.read_bytes() == b""

@@ -550,6 +550,7 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "look": ("look", "pictures of web pages at a phone's size, each button's states, and broken layout"),
          "adb-reach": ("adb", "reach an Android device over adb again after a restart undid tcpip"),
          "adb-log": ("adb_log", "cut the adb server's log when it is over a size, while the server runs"),
+         "log-cap": ("log_cap", "cut logs that are over a size, keeping each one's end, while their writers run"),
          "messages": ("messages", "what the person typed into chats, and the conversation around it"),
          "tracebacks": ("tracebacks", "Python tracebacks in log files, new since an offset, grouped"),
          "changelog": ("changelog", "the pull requests merged between two commits, oldest first"),
