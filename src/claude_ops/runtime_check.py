@@ -78,9 +78,15 @@ def mapped_files(pid: int, run: Callable[..., "subprocess.CompletedProcess[str]"
 
 def stale_mappings(paths: Iterable[str], exists: Callable[[str], bool] = os.path.exists) -> list[str]:
     """The mapped paths whose file is gone. lsof on Linux marks a replaced file with a trailing
-    ` (deleted)`. On macOS the path simply stops existing when an upgrade removes its folder."""
+    ` (deleted)`. On macOS the path simply stops existing when an upgrade removes its folder.
+    A hidden file (its name starts with a dot) or a file under /Library/Preferences is data a system
+    service rewrites, such as the unified logging plist cache that nearly every macOS process maps,
+    and is never a library, so it is left out."""
     out = []
     for p in paths:
+        base = os.path.basename(p.removesuffix(" (deleted)"))
+        if base.startswith(".") or p.startswith("/Library/Preferences/"):
+            continue
         if p.endswith(" (deleted)") or (p.startswith("/") and not exists(p)):
             out.append(p)
     return out
