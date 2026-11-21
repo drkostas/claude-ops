@@ -63,3 +63,37 @@ def test_the_short_place_goes_only_to_a_short_waiter_that_got_nothing_else():
 def test_the_short_place_follows_class_then_place():
     ws = [w("hand-short", "hand", 1, size=2), w("gate-short", "gate", 9, size=2)]
     assert turns.assign(ws, ["short"], CLASSES, now=10) == {"gate-short": "short"}
+
+
+def test_with_small_the_short_place_takes_a_small_waiter_before_an_older_bigger_short_one():
+    ws = [w("fifteen", place=100, size=15), w("one", place=200, size=1)]
+    assert turns.assign(ws, ["short"], CLASSES, short=20, small=3, now=300) == {"one": "short"}
+    # small=0, the default, keeps the order by place
+    assert turns.assign(ws, ["short"], CLASSES, short=20, now=300) == {"fifteen": "short"}
+
+
+def test_with_small_each_size_goes_oldest_first():
+    ws = [w("ten", place=100, size=10), w("two", place=150, size=2), w("one", place=200, size=1),
+          w("four", place=50, size=4)]
+    assert ids(turns.short_order(ws, CLASSES, short=20, small=3, now=300)) == ["two", "one", "four", "ten"]
+
+
+def test_a_bigger_short_waiter_that_waited_jump_s_goes_next_whatever_smaller_one_comes_after():
+    ws = [w("ten", place=0, size=10), w("one", place=550, size=1)]
+    assert turns.assign(ws, ["short"], CLASSES, short=20, small=3, jump_s=600, now=599) == {"one": "short"}
+    assert turns.assign(ws, ["short"], CLASSES, short=20, small=3, jump_s=600, now=600) == {"ten": "short"}
+    ws.append(w("newer-one", place=650, size=1))
+    assert turns.assign(ws, ["short"], CLASSES, short=20, small=3, jump_s=600, now=700) == {"ten": "short"}
+
+
+def test_the_short_line_holds_no_waiter_that_cannot_say_its_size_and_keeps_class_first():
+    ws = [w("unsure", place=1), w("hand-ten", "hand", 2, size=10), w("gate-ten", "gate", 9, size=10),
+          w("hand-one", "hand", 5, size=1)]
+    assert ids(turns.short_order(ws, CLASSES, short=20, small=3, now=10)) == ["gate-ten", "hand-one", "hand-ten"]
+    assert turns.assign([w("unsure", place=1)], ["short"], CLASSES, short=20, small=3, now=10) == {}
+
+
+def test_a_small_of_short_or_more_or_below_one_orders_by_place():
+    ws = [w("ten", place=1, size=10), w("one", place=2, size=1)]
+    for small in (0, -1, 20, 30):
+        assert ids(turns.short_order(ws, CLASSES, short=20, small=small, now=10)) == ["ten", "one"]
