@@ -21,6 +21,33 @@ PAGES = {
 <div style="overflow-x:auto;width:200px;white-space:nowrap"><span style="display:inline-block;width:600px">A row that scrolls sideways</span></div>
 </body>""",
     "empty.html": "<!doctype html><body></body>",
+    # Start posts, takes itself away on the answer, then reads the record again, which still offers it, since an answer
+    # look gives changed nothing there
+    "reread.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
+<div id=row></div>
+<script>
+function draw(offer) {
+  document.getElementById('row').innerHTML = offer ? '<button id=start>Start</button>' : '<div>starting</div>';
+  if (offer) document.getElementById('start').onclick = () => {
+    fetch('/act', {method: 'POST', body: '{}'}).then(r => r.json()).then(j => {
+      draw(!j.ok);
+      fetch('/state.json').then(r => r.json()).then(s => draw(s.offer));
+    });
+  };
+}
+draw(true);
+</script></body>""",
+    "state.json": '{"offer": true}',
+    # a menu laid over the page, whose last item and a button of the page behind it cross at the bottom edge, so the
+    # middle of where they cross is just below the screen; and two buttons that cross there with nothing over them
+    "drawer.html": """<!doctype html><meta name=viewport content="width=device-width">
+<body style="margin:0;height:2000px">
+<button style="position:absolute;top:calc(100vh - 20px);left:100px;width:200px;height:40px">Restart</button>
+<button style="position:absolute;top:calc(100vh - 20px);left:330px;width:50px;height:40px">Edge one</button>
+<button style="position:absolute;top:calc(100vh - 10px);left:340px;width:40px;height:40px">Edge two</button>
+<div style="position:fixed;top:0;left:0;width:300px;bottom:0;background:#123;overflow:hidden">
+<div role=button style="position:absolute;top:calc(100vh - 25px);left:10px;width:250px;height:50px;color:#fff">Work in progress</div>
+</div></body>""",
     # Send posts and draws itself again as it was (the shape of a button that comes back after its tap),
     # Stays does the same but is marked as meant to stay, and Nothing does nothing at all
     "again.html": """<!doctype html><meta name=viewport content="width=device-width"><body>
@@ -315,6 +342,26 @@ def test_taps_show_each_answer_and_never_reach_the_server(site, tmp_path):
     assert ("dead_tap", "Nothing") in found
     assert posts == [], "no request other than GET reaches the server"
     assert all((tmp_path / f).exists() for t in page["taps"] for f in t["pictures"].values())
+
+
+def test_a_page_that_reads_again_after_a_yes_is_pictured_before_that_read(site, tmp_path):
+    # the answer was look's, so the record still offers Start, and a page that read it again drew the button back
+    # and read as offering it again, in one build and not the other, by how soon its picture was taken
+    base, posts = site
+    report = look.look(base, ["/reread.html"], tmp_path, boxes=False, answers=look.Answers(slow_s=0.5), settle_ms=400)
+    page = report["pages"][0]
+    found = {(f["kind"], f["detail"]) for f in page["findings"]}
+    assert ("offered_again", "Start") not in found, found
+    assert {t["button"] for t in page["taps"]} == {"Start"} and page["taps"][0]["sent"]
+    assert posts == [], "no request other than GET reaches the server"
+
+
+def test_where_a_menu_covers_the_part_on_the_screen_there_is_no_overlap(site, tmp_path):
+    # the middle of where the two cross is below the screen, and the part on the screen is under the menu
+    base, _ = site
+    report = look.look(base, ["/drawer.html"], tmp_path, boxes=False, taps=False)
+    overlaps = sorted(f["detail"] for f in report["pages"][0]["findings"] if f["kind"] == "overlap")
+    assert overlaps == ["Edge one and Edge two"], overlaps
 
 
 def test_a_box_is_shown_empty_and_with_text(site, tmp_path):

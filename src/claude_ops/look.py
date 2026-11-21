@@ -43,7 +43,7 @@ dead) is `dead_tap`, unless the button is already the one chosen (`aria-selected
 or a checked input), as a filter chip that is on already, or the tap opened a file picker or asked the browser
 to open an address elsewhere (`window.open`, or a link whose scheme an app takes), which the tap's `opened`
 lists. A button still there, enabled and with the same words after a `yes` is `offered_again`, unless it
-matches `again`, a CSS selector for buttons meant to stay. Each tap's fresh load waits up to 15 s for the page to draw
+matches `again`, a CSS selector for buttons meant to stay. After a `yes` the page's reads from the address the answer went to wait until its picture is taken, because the answer was look's own and changed nothing the server holds, so a page that read it again would draw the button the answer took away. Each tap's fresh load waits up to 15 s for the page to draw
 the button again (a page whose data comes slowly), and a button whose words at its place still differ (the page
 drew its buttons in another order) is not tapped, and the tap says so. Each box (an input or a
 text area) is shown empty and with text, and the report lists the buttons enabled in each case, so a button meant
@@ -70,6 +70,7 @@ import json
 import re
 import sys
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -233,8 +234,11 @@ CHECKS_JS = r"""
     const left = Math.max(p.left, q.left), top = Math.max(p.top, q.top);
     const w = Math.min(p.right, q.right) - left, h = Math.min(p.bottom, q.bottom) - top;
     if (w <= 1 || h <= 1) continue;
-    const x = left + w / 2, y = top + h / 2;
-    if (x >= 0 && y >= 0 && x < W && y < H ? hidden(a, x, y, b) || hidden(b, x, y, a) : scroller(a) !== scroller(b))
+    // tested where it is seen: its middle, or the middle of the part of it on the screen when its middle is not (a
+    // menu laid over the page covers a button there just the same); only one wholly off the screen goes by its box
+    const vl = Math.max(left, 0), vt = Math.max(top, 0), vr = Math.min(left + w, W), vb = Math.min(top + h, H);
+    const x = (vl + vr) / 2, y = (vt + vb) / 2;
+    if (vr - vl > 1 && vb - vt > 1 ? hidden(a, x, y, b) || hidden(b, x, y, a) : scroller(a) !== scroller(b))
       continue;
     out.push({kind: 'overlap', detail: words(a) + ' and ' + words(b)});
   }
@@ -316,6 +320,12 @@ END_JS = r"""
 """
 
 
+def _origin(url: str) -> str:
+    """A URL's scheme, host and port, the part two requests to the same server share."""
+    u = urllib.parse.urlsplit(url)
+    return f"{u.scheme}://{u.netloc}"
+
+
 class _Held:
     """The requests a page sent that `look` answers, with the ones it holds."""
 
@@ -325,6 +335,10 @@ class _Held:
         self.held: list[Any] = []
         self.sockets: list[str] = []
         self.closing = False
+        #: after a `yes`, the page's reads from the address the answer went to, held until the picture: look's answer
+        #: changed nothing the server holds, so a page that read it again would draw what the answer took away
+        self.reads: list[Any] = []
+        self.origins: set[str] = set()
 
     def socket(self, ws) -> None:
         """A WebSocket the page opens: never connected to the server, so what the page sends on it goes nowhere."""
@@ -335,6 +349,9 @@ class _Held:
             route.abort()
             return
         if request.method in ("GET", "HEAD"):
+            if self.mode == "yes" and request.resource_type in ("fetch", "xhr") and _origin(request.url) in self.origins:
+                self.reads.append(route)
+                return
             route.continue_()
             return
         origin = request.headers.get("origin") or "*"
@@ -345,6 +362,8 @@ class _Held:
             route.fulfill(status=204, headers=cors)
             return
         self.sent.append(f"{request.method} {request.url}")
+        if self.mode == "yes":
+            self.origins.add(_origin(request.url))
         if self.mode in ("slow", "none"):
             self.held.append((route, cors))
             return
@@ -365,12 +384,12 @@ class _Held:
     def drop(self) -> None:
         """End every held request before its page closes. Without it, a request held on a page that was then
         closed was seen to reach the server, which is the one thing a tap here must never do."""
-        for route, _ in self.held:
+        for route in [r for r, _ in self.held] + self.reads:
             try:
                 route.abort()
             except Exception:   # noqa: BLE001
                 pass
-        self.held = []
+        self.held, self.reads = [], []
 
 
 def _close(page, held: _Held) -> None:
