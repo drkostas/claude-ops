@@ -38,6 +38,10 @@ def test_a_library_upgraded_on_disk_is_still_mapped_by_an_old_process():
 def test_linux_marks_a_replaced_file_as_deleted():
     cache = "/Library/Preferences/Logging/.plist-cache.dM7MVDfq"
     assert rc.stale_mappings([cache, "/tmp/x/.hidden.dylib", "/Library/Preferences/a.plist"], exists=lambda p: False) == []
+    # a system service's database, which macOS rewrites while every process maps it, is no library either
+    allow = "/private/var/db/analyticsd/events.allowlist"
+    gone = "/opt/example/lib/libssl.4.dylib"
+    assert rc.stale_mappings([allow, "/var/db/x/y.db", gone], exists=lambda p: False) == [gone]
     assert rc.stale_mappings(["/usr/lib/libz.so.1 (deleted)"]) == ["/usr/lib/libz.so.1 (deleted)"]
 
 
