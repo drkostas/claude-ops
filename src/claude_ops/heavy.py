@@ -119,7 +119,10 @@ each waiter in the order it goes next, and `failing` the jobs failing the same w
 when only the turn holds it, else its reason `kinds`, the gate's `words`, `held_s` and `most_free_gb`.
 
 A call made inside a heavy job runs at once, inside the outer job's slot and memory cap: the job is
-given HEAVY_HELD, and a caller whose ancestor holds the slot (a step of a CI job) counts too. The job is
+given HEAVY_HELD, the pid that holds the slot. A caller whose ancestor holds the slot with `hold` (a step of a
+CI job, or a process that takes the slot before it starts its work) also runs at once and takes no slot, but
+nothing caps a hold's work, so such a job runs as any job does, under its own memory cap and --max-hold, and
+its memory is sampled for the holder's pid. The job is
 also given HEAVY_CHAT and HEAVY_WHAT, the two names it was queued under, so a job that writes a file for
 its caller can say whose it is (two callers that queue the same kind of job each wait for their own). A CI
 runner can hold the slot for a job from its job-started hook (`hold ... --pid <worker>`) to its
@@ -132,7 +135,8 @@ the event, the chat, the job and the pid that holds or would hold the slot appen
 job starts to wait, `admitted` when it takes the slot, `released` when it gives back a slot it held
 (or ends after it was past its turn), `withdrawn` when it stops waiting without the slot (its
 holder ended, or the waiter was stopped), and `swapped` when a running job was swapped out (see below).
-A job run inside another heavy job tells nothing, since it takes no slot. The hook is told and never asked: it runs for at most HEAVY_HOOK_TIMEOUT seconds (5),
+A job run inside another heavy job tells nothing, since it takes no slot, and one run inside a hold tells only
+`swapped`, for the holder's pid. The hook is told and never asked: it runs for at most HEAVY_HOOK_TIMEOUT seconds (5),
 and a hook that fails, hangs or is missing never holds up or stops a job. The first failure is said.
 A hook that timed out was ended before it could write anything, and a job's own output is often kept
 nowhere, so with HEAVY_HOOK_LOG set every failure is also one line in that file: the time, the event,
@@ -1296,11 +1300,13 @@ def queues_itself(cmd: list[str], names: list[str] | None = None) -> str | None:
     return None
 
 
-def job_env(chat: str, what: str) -> dict[str, str]:
-    """The job's environment: the caller's own, by design, plus HEAVY_HELD (this process, so a call the job makes
-    to the queue knows it already holds the slot) and HEAVY_CHAT and HEAVY_WHAT (the names it was queued under,
-    so the job can tell its caller's files from another caller's)."""
-    return {**os.environ, "HEAVY_HELD": str(os.getpid()), "HEAVY_CHAT": chat, "HEAVY_WHAT": what}
+def job_env(chat: str, what: str, held: int | None = None) -> dict[str, str]:
+    """The job's environment: the caller's own, by design, plus HEAVY_HELD (the pid that holds the slot, this
+    process unless `held` names a hold the job runs inside, so a call the job makes to the queue knows it already
+    holds the slot) and HEAVY_CHAT and HEAVY_WHAT (the names it was queued under, so the job can tell its caller's
+    files from another caller's)."""
+    return {**os.environ, "HEAVY_HELD": str(os.getpid() if held is None else held), "HEAVY_CHAT": chat,
+            "HEAVY_WHAT": what}
 
 
 def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
@@ -1309,10 +1315,10 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
     took. `need_gb` is --need-gb's value; without it HEAVY_NEED_GB is read (declared_need)."""
     # A heavy job inside a heavy job runs at once. A job that calls the queue again (a script that
     # wraps its own steps) would wait for the slot its own parent holds, and nothing could give it
-    # back. It runs in the outer job's process group (no new session), so the outer job's memory
-    # cap still counts it and its stop still reaches it.
+    # back. Inside another heavy job (HEAVY_HELD names the holder) it runs in the outer job's process
+    # group (no new session), so the outer job's memory cap still counts it and its stop still reaches it.
     inside = inside_holder()
-    if inside is not None:
+    if inside is not None and os.environ.get("HEAVY_HELD", "") == str(inside["pid"]):
         say(f"running {what} inside {inside['chat']}: {inside['what']}, which holds the slot")
         try:
             # the caller's own command, in the caller's environment, as run() does below
@@ -1320,21 +1326,35 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         except OSError as e:
             say(f"could not run {cmd[0]}: {e}")
             return 127
-    blocked = queues_itself(cmd)
-    if blocked:
-        say(f"REFUSED {what}: it runs {blocked}, which waits in a queue of its own, so it would hold the slot "
-            f"while it waits there. This queues itself, so run it with claude-ops detach instead (HEAVY_SELF_QUEUED)")
-        return 2
+    # ⭐ INSIDE A HOLD THE JOB KEEPS ITS OWN CAP. A hold (`hold --pid`) takes the slot for a process that runs
+    # its own work, and nothing samples that work, so no outer cap counts a job started under it. Such a job
+    # (found because the holder is this process's ancestor) takes no slot and waits for no turn, and runs here
+    # like any other job: in its own session, under the memory cap and its --max-hold, with what it leaves
+    # ended. Its samples are written for the holder's pid, the slot's, so a waiter reads what the slot's work
+    # takes. Before, it ran its command directly with no cap at all.
+    if inside is None:
+        blocked = queues_itself(cmd)
+        if blocked:
+            say(f"REFUSED {what}: it runs {blocked}, which waits in a queue of its own, so it would hold the slot "
+                f"while it waits there. This queues itself, so run it with claude-ops detach instead "
+                f"(HEAVY_SELF_QUEUED)")
+            return 2
     need, declared = declared_need(need_gb)
-    wait_turn(chat, what, os.getpid(), need, declared)
-    say(f"running {what} for {chat} (memory cap {MAX_GB:g} GB"
-        + (f", declared need {need:g} GB)" if need is not None else ")"))
+    if inside is None:
+        wait_turn(chat, what, os.getpid(), need, declared)
+        slot_pid, held = os.getpid(), None
+        say(f"running {what} for {chat} (memory cap {MAX_GB:g} GB"
+            + (f", declared need {need:g} GB)" if need is not None else ")"))
+    else:
+        slot_pid = held = int(inside["pid"])
+        say(f"running {what} for {chat} inside {inside['chat']}: {inside['what']}, which holds the slot, "
+            f"under its own memory cap of {MAX_GB:g} GB")
     # the job is the caller's own command: it runs in the caller's environment, by design, plus
     # HEAVY_HELD, so a call it makes to the queue knows it already holds the slot
     last = [""]
     if notify_chat:
         # one stream through this process, so the job's last line can be told
-        job = subprocess.Popen(cmd, env=job_env(chat, what),
+        job = subprocess.Popen(cmd, env=job_env(chat, what, held),
                                start_new_session=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, bufsize=1)
         import threading   # noqa: PLC0415
@@ -1347,7 +1367,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                     last[0] = line
         threading.Thread(target=relay, daemon=True).start()
     else:
-        job = subprocess.Popen(cmd, env=job_env(chat, what),
+        job = subprocess.Popen(cmd, env=job_env(chat, what, held),
                                start_new_session=True)
 
     # the job's processes in groups of their own, kept from each sample and each stop: once their parent
@@ -1437,8 +1457,8 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 if line:
                     swapped = True
                     say(line)
-                    hook("swapped", chat, what, os.getpid())
-            taking(os.getpid(), used, peak, resident, peak_res, swapped)
+                    hook("swapped", chat, what, slot_pid)
+            taking(slot_pid, used, peak, resident, peak_res, swapped)
             if used > MAX_GB:
                 over = used
                 end_job()
@@ -1446,7 +1466,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 break
     finally:
         release(os.getpid())
-        (TAKING / f"{os.getpid()}.json").unlink(missing_ok=True)
+        (TAKING / f"{slot_pid}.json").unlink(missing_ok=True)
     time.sleep(0.2 if notify_chat else 0)      # the relay prints the job's last lines first
     peak = round(max(peak, peak_of_children()), 2)
     minutes = (time.time() - began) / 60

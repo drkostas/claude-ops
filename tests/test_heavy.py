@@ -1505,3 +1505,64 @@ def test_the_standing_cause_reads_this_machine(monkeypatch):
     monkeypatch.delenv("HEAVY_FAKE_MACHINE", raising=False)
     said = h.standing_cause()
     assert re.fullmatch(r"the biggest process is .+ \(pid \d+\) at [\d.]+ GB, and [\d.]+ GB is wired", said), said
+
+
+def _inside_a_hold(tmp_path, job, **extra):
+    """A process that holds the slot with `hold` and then starts `job` (argv) as a heavy job of its own child, the
+    shape of a CI step or of a daemon that takes the slot before it starts its work. Answers the holder's pid, the
+    holder's output and exit code, and whether a sample of the job was written for the holder's pid while it ran."""
+    state = tmp_path / "heavy"
+    env = _heavy_env(state, **extra)
+    go = tmp_path / "go"
+    script = tmp_path / "holder.sh"
+    script.write_text("#!/bin/bash\n"
+                      f'while [ ! -e "{go}" ]; do sleep 0.05; done\n'
+                      f'"{sys.executable}" -m claude_ops.heavy t-chat "inner job" "$@"\n')
+    holder = subprocess.Popen(["bash", str(script), *job], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, env=env)
+    sampled = False
+    try:
+        r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "hold", "t-chat", "a pass", "--pid",
+                            str(holder.pid)], capture_output=True, text=True, timeout=60, env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        go.touch()
+        end = time.time() + 40
+        while holder.poll() is None and time.time() < end:
+            sampled = sampled or (state / "taking" / f"{holder.pid}.json").exists()
+            time.sleep(0.1)
+        out, _ = holder.communicate(timeout=60)
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
+    return holder.pid, out, holder.returncode, sampled, state
+
+
+def test_a_job_inside_a_hold_keeps_its_own_max_hold_and_is_sampled_for_the_holder(tmp_path):
+    """Nothing caps the work of a hold, so a heavy job started under one runs as any job does. It takes no slot and
+    waits for no turn, is ended at its own --max-hold, is told the holder's pid as HEAVY_HELD, and writes its samples
+    for the holder's pid, which it removes when it ends. Before, it ran its command directly and --max-hold did
+    nothing."""
+    pid, out, rc, sampled, state = _inside_a_hold(
+        tmp_path, ["--max-hold", "0.03", "--", "bash", "-c", "echo held=$HEAVY_HELD; sleep 20"])
+    assert rc == 124 and "ENDED inner job: it ran for its --max-hold of 0.03 min" in out, out
+    assert "inside t-chat: a pass, which holds the slot, under its own memory cap" in out, out
+    assert f"held={pid}" in out.splitlines(), out
+    assert sampled and not (state / "taking" / f"{pid}.json").exists(), \
+        f"samples for the holder's pid while it ran, and none after it ended: {sampled}"
+
+
+def test_a_job_inside_a_hold_is_ended_at_its_own_memory_cap(tmp_path):
+    """The memory cap holds inside a hold too: a job whose child takes 0.4 GB under a 0.2 GB cap is ended."""
+    if sys.platform != "darwin":        # the cap reads proc_pid_rusage
+        return
+    pidfile = tmp_path / "child.pid"
+    _pid, out, rc, _sampled, _state = _inside_a_hold(
+        tmp_path, ["--", *_job_with_own_session_child(pidfile, gb="0.4")], HEAVY_MAX_GB="0.2", HEAVY_STOP_GRACE="2")
+    stray = _pid_in(pidfile, timeout=1) if pidfile.exists() else None
+    try:
+        assert rc == 137 and "ENDED inner job" in out and "over the 0.2 GB cap" in out, out
+        assert stray is None or _gone(stray), f"the child in its own session outlived the cap: {stray}"
+    finally:
+        if stray:
+            _kill(stray)
