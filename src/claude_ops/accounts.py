@@ -321,6 +321,45 @@ def expired(login: dict, now: dt.datetime, margin_s: int = 600) -> bool:
     return exp / 1000 <= now.timestamp() + margin_s
 
 
+def _moment(ms) -> "dt.datetime | None":
+    """A time in milliseconds since the epoch as an aware UTC datetime, or None for anything else."""
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms <= 0:
+        return None
+    return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc)
+
+
+def refresh_ends(login: "dict | None") -> "dt.datetime | None":
+    """When the login's refresh token stops being accepted, from its `refreshTokenExpiresAt`
+    (milliseconds since the epoch), or None when the login does not say.
+
+    Renewing the access token does not move this time. After it, the token endpoint refuses the
+    refresh token (`LoginExpired`) and only a new sign-in makes a new login. A caller that knows the
+    time can ask for that sign-in a day or two before it, rather than after the login has stopped."""
+    return _moment(((login or {}).get("claudeAiOauth") or {}).get("refreshTokenExpiresAt"))
+
+
+def renewable(login: "dict | None", now: dt.datetime) -> "bool | None":
+    """Whether a renewal can still give the login a new access token: it holds a refresh token, and
+    that token's end (`refresh_ends`) is after `now`. False without a refresh token or once the end
+    has passed, and None when it holds one but does not say when it ends."""
+    if not ((login or {}).get("claudeAiOauth") or {}).get("refreshToken"):
+        return False
+    ends = refresh_ends(login)
+    return None if ends is None else ends > now
+
+
+def describe(login: "dict | None", now: dt.datetime) -> dict:
+    """What a person may read about a saved login, never a token: whether there is one, when its
+    access token and its refresh token end (ISO 8601 in UTC, or None when the login does not say),
+    and whether it can be renewed (`renewable`)."""
+    o = (login or {}).get("claudeAiOauth") or {}
+    access, refresh = _moment(o.get("expiresAt")), refresh_ends(login)
+    return {"login": bool(o.get("accessToken") or o.get("refreshToken")),
+            "access_ends": access.isoformat() if access else None,
+            "refresh_ends": refresh.isoformat() if refresh else None,
+            "renewable": renewable(login, now) if login else False}
+
+
 def stop_for(limits: "Limits | None", account: str, name: str, threshold: float = THRESHOLD) -> float:
     """The share at which `account`'s `name` limit ("session" or "weekly") counts as full: its own
     in `limits`, else `threshold`."""
