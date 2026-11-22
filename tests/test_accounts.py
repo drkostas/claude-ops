@@ -147,6 +147,44 @@ def test_renew_keeps_the_rest_and_dates_the_new_token():
     assert calls[0].get_header("User-agent") == ac.USER_AGENT and "urllib" not in ac.USER_AGENT
 
 
+def _login(**o):
+    return {"claudeAiOauth": {"accessToken": "secret-access", "refreshToken": "secret-refresh", **o}}
+
+
+def test_refresh_ends_reads_the_refresh_tokens_own_end():
+    ends = NOW + 3 * 24 * H
+    assert ac.refresh_ends(_login(refreshTokenExpiresAt=int(ends.timestamp() * 1000))) == ends
+    # a login that does not say, or says it in a shape that is no time, gives no time
+    for bad in (None, 0, -5, "1795000000000", True, [], {}):
+        assert ac.refresh_ends(_login(refreshTokenExpiresAt=bad)) is None, bad
+    assert ac.refresh_ends(_login()) is None
+    assert ac.refresh_ends({}) is None and ac.refresh_ends(None) is None
+
+
+def test_renewable_needs_a_refresh_token_whose_end_has_not_passed():
+    ms = lambda at: int(at.timestamp() * 1000)   # noqa: E731
+    assert ac.renewable(_login(refreshTokenExpiresAt=ms(NOW + H)), NOW) is True
+    assert ac.renewable(_login(refreshTokenExpiresAt=ms(NOW - H)), NOW) is False
+    assert ac.renewable(_login(refreshTokenExpiresAt=ms(NOW)), NOW) is False
+    # one that holds a refresh token but does not say when it ends cannot be told, never True
+    assert ac.renewable(_login(), NOW) is None
+    assert ac.renewable({"claudeAiOauth": {"accessToken": "a"}}, NOW) is False
+    assert ac.renewable(None, NOW) is False
+    # the access token's own end says nothing about it: a lapsed access token is renewed
+    assert ac.renewable(_login(expiresAt=ms(NOW - H), refreshTokenExpiresAt=ms(NOW + H)), NOW) is True
+
+
+def test_describe_never_carries_a_token():
+    ms = lambda at: int(at.timestamp() * 1000)   # noqa: E731
+    login = _login(expiresAt=ms(NOW + 8 * H), refreshTokenExpiresAt=ms(NOW + 30 * 24 * H), scopes=["user:inference"])
+    d = ac.describe(login, NOW)
+    assert d == {"login": True, "access_ends": (NOW + 8 * H).isoformat(),
+                 "refresh_ends": (NOW + 30 * 24 * H).isoformat(), "renewable": True}
+    assert "secret" not in json.dumps(d)
+    assert ac.describe(None, NOW) == {"login": False, "access_ends": None, "refresh_ends": None, "renewable": False}
+    assert ac.describe(_login(), NOW)["renewable"] is None
+
+
 def test_usable_at():
     assert ac.usable_at({"session": (50.0, NOW + H), "weekly": (10.0, NOW + 100 * H)}, NOW) == NOW
     assert ac.usable_at({"session": (98.0, NOW + 2 * H), "weekly": (10.0, NOW + 100 * H)}, NOW) == NOW + 2 * H
