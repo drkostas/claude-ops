@@ -322,10 +322,14 @@ def expired(login: dict, now: dt.datetime, margin_s: int = 600) -> bool:
 
 
 def _moment(ms) -> "dt.datetime | None":
-    """A time in milliseconds since the epoch as an aware UTC datetime, or None for anything else."""
-    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms <= 0:
+    """A time in milliseconds since the epoch as an aware UTC datetime, or None for anything else,
+    including a number no datetime can hold (1e20, infinity, NaN), so a corrupt field never stops a read."""
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not ms > 0:
         return None
-    return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc)
+    try:
+        return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
 
 
 def refresh_ends(login: "dict | None") -> "dt.datetime | None":

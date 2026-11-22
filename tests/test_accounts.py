@@ -155,8 +155,11 @@ def test_refresh_ends_reads_the_refresh_tokens_own_end():
     ends = NOW + 3 * 24 * H
     assert ac.refresh_ends(_login(refreshTokenExpiresAt=int(ends.timestamp() * 1000))) == ends
     # a login that does not say, or says it in a shape that is no time, gives no time
-    for bad in (None, 0, -5, "1795000000000", True, [], {}):
+    for bad in (None, 0, -5, "1795000000000", True, [], {}, 1e20, float("inf"), float("nan")):
         assert ac.refresh_ends(_login(refreshTokenExpiresAt=bad)) is None, bad
+    # and a corrupt number never stops a read of the whole login
+    assert ac.describe(_login(expiresAt=1e20, refreshTokenExpiresAt=float("inf")), NOW) == {
+        "login": True, "access_ends": None, "refresh_ends": None, "renewable": None}
     assert ac.refresh_ends(_login()) is None
     assert ac.refresh_ends({}) is None and ac.refresh_ends(None) is None
 
