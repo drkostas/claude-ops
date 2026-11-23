@@ -288,6 +288,10 @@ def test_the_remote_control_menu_is_seen_and_reads_as_a_question():
     other = "Pick one\n❯ First\n  Second\nEnter to select · Esc to continue"
     assert not cu.rc_menu(other) and cu.empty_prompt(other) == (False, cu.ASKING)
     assert not cu.rc_menu(None) and not cu.rc_menu("")
+    # newer Claude Code ends the same menu with "Esc to close"
+    newer = RC_MENU_SCREEN.replace("Enter to select · Esc to continue", "↑/↓ to navigate · Enter to select · Esc to close")
+    assert cu.rc_menu(newer)
+    assert not cu.rc_menu("Pick one\n❯ First\n  Second\n↑/↓ to navigate · Enter to select · Esc to close")
 
 
 RULE = "\x1b[38;5;244m" + "─" * 40

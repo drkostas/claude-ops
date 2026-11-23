@@ -902,6 +902,8 @@ RC_ACTIVE = ("/remote-control is active",)
 #: the session's link, then "Disconnect this session", "Show QR code" and "Continue". Its Escape
 #: continues, which closes the menu and leaves Remote Control on
 RC_MENU = ("Disconnect this session", "esc to continue")
+#: newer Claude Code versions end the same menu with "Esc to close", after "↑/↓ to navigate · Enter to select"
+RC_MENU_ENDS = ("esc to continue", "esc to close")
 
 
 def rc_menu(screen: str | None) -> bool:
@@ -911,7 +913,7 @@ def rc_menu(screen: str | None) -> bool:
     /remote-control and waits for a new link waits in vain, because the link the menu shows is the
     one the session already had. Close it with `inject.press(target, "Escape")`."""
     lines = [ln.strip() for ln in (screen or "").splitlines() if ln.strip()]
-    return (bool(lines) and RC_MENU[1] in lines[-1].lower()
+    return (bool(lines) and any(end in lines[-1].lower() for end in RC_MENU_ENDS)
             and any(RC_MENU[0] in ln for ln in lines[-8:-1]))
 #: what precedes the words on such a line: spaces and the bullets and rules Claude Code draws
 _LEAD = re.compile(r"^[\s\u2300-\u23ff\u2500-\u27bf]+")
