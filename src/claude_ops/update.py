@@ -908,15 +908,29 @@ RC_MENU = ("Disconnect this session", "esc to continue")
 RC_MENU_HINTS = (RC_MENU[1], "esc to close")
 
 
+#: the menu's last line, read loosely: "Esc to" and one word, whatever the word. Claude Code has renamed
+#: it once already ("continue", then "close"), and a reader that knew only the old word left the menu open.
+#: "Esc to interrupt" is excluded, since that is a running turn's hint and never this menu's
+RC_MENU_HINT = re.compile(r"\besc to (?!interrupt\b)[a-z]+")
+#: a line drawn only of the box rule that frames the input line
+_RULE = re.compile(r"^[\u2500-\u257f]{3,}$")
+
+
 def rc_menu(screen: str | None) -> bool:
-    """Whether a session's screen shows that menu, still open: its "Esc to continue" or "Esc to close" hint as the last
-    line and its "Disconnect this session" choice among the lines above it. The menu stays until a
-    key closes it, and while it is open the session takes no message. A supervisor that sends
-    /remote-control and waits for a new link waits in vain, because the link the menu shows is the
-    one the session already had. Close it with `inject.press(target, "Escape")`."""
+    """Whether a session's screen shows that menu, still open: an "Esc to ..." hint as the last line
+    (any word but "interrupt", see `RC_MENU_HINT`) and its "Disconnect this session" choice among
+    the lines above it, with no input box drawn between the two. The menu takes the input line's
+    place, so a box rule below the words means they are text in the conversation above the input
+    line, not the menu. The menu stays until a key closes it, and while it is open the session
+    takes no message. A supervisor that sends /remote-control and waits for a new link waits in
+    vain, because the link the menu shows is the one the session already had. Close it with
+    `inject.press(target, "Escape")`."""
     lines = [ln.strip() for ln in (screen or "").splitlines() if ln.strip()]
-    return (bool(lines) and any(h in lines[-1].lower() for h in RC_MENU_HINTS)
-            and any(RC_MENU[0] in ln for ln in lines[-8:-1]))
+    if not lines or not RC_MENU_HINT.search(lines[-1].lower()):
+        return False
+    window = lines[-8:-1]
+    at = [i for i, ln in enumerate(window) if RC_MENU[0] in ln]
+    return bool(at) and not any(_RULE.match(ln) for ln in window[at[-1] + 1:])
 #: what precedes the words on such a line: spaces and the bullets and rules Claude Code draws
 _LEAD = re.compile(r"^[\s\u2300-\u23ff\u2500-\u27bf]+")
 #: seconds without a keyboard, mouse or trackpad event before nobody is taken to be at this computer
