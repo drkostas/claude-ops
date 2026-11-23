@@ -290,6 +290,18 @@ def test_the_remote_control_menu_is_seen_and_reads_as_a_question():
     assert not cu.rc_menu(None) and not cu.rc_menu("")
 
 
+def test_the_remote_control_menu_with_the_newer_close_hint_is_seen():
+    """Newer versions end the same menu with "Esc to close". A reader that knew only "Esc to continue"
+    left it open, and the session took no message until a person pressed Escape."""
+    newer = RC_MENU_SCREEN.replace("Enter to select · Esc to continue", "Esc to close")
+    assert cu.rc_menu(newer)
+    assert cu.empty_prompt(newer) == (False, cu.ASKING)
+    assert cu.rc_menu(RC_MENU_SCREEN.replace("Esc to continue", "Esc to close"))
+    # the words in a conversation, above an input line, are still no menu
+    talk = "⏺ The menu offers Disconnect this session, Esc to close.\n───\n❯ \n───\n  ⏵⏵ accept edits on"
+    assert not cu.rc_menu(talk) and cu.empty_prompt(talk)[0]
+
+
 RULE = "\x1b[38;5;244m" + "─" * 40
 FOOTER = "\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m"
 
