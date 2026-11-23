@@ -931,6 +931,47 @@ def rc_menu(screen: str | None) -> bool:
     window = lines[-8:-1]
     at = [i for i, ln in enumerate(window) if RC_MENU[0] in ln]
     return bool(at) and not any(_RULE.match(ln) for ln in window[at[-1] + 1:])
+
+
+#: the rating question Claude Code shows above the input line now and then. It does not take the place of
+#: the input line, but while it shows, a digit typed first is read as a rating
+SURVEY = "how is claude doing this session"
+#: the dialogs `dialog` names, each by words its own lines carry, in the order they are tried: the
+#: Remote Control menu first, then the folder trust prompt, the exit dialog that offers unsent
+#: feedback, a permission question, and a list to pick from (a question asked of the user)
+DIALOG_NAMES = (("trust_folder", ("trust this folder",)),
+                ("exit_feedback", ("enter to review", "esc to discard")),
+                ("permission", ("do you want",)),
+                ("question", ("enter to select", "esc to cancel")))
+
+
+def dialog(screen: str | None) -> str | None:
+    """The dialog a session's screen holds open, by name, or None when it holds none.
+
+    A dialog holds a session when its words are on screen and no input line sits below them, the
+    rule `empty_prompt` reads as ASKING. That is how a session waiting on a dialog differs from one
+    busy with a turn: a running turn keeps its input line under the spinner, and a dialog takes its
+    place. The rating question (`SURVEY`) is the one exception, since it sits above the input line,
+    and it is named while it shows. Names are "remote_control_menu", "trust_folder", "exit_feedback",
+    "permission", "question" and "survey". A dialog none of them matches is "other: " and its last
+    line, so a new one is still seen and can be told apart. Reading presses nothing."""
+    if not screen:
+        return None
+    lines = [ln.strip() for ln in screen.splitlines() if ln.strip()]
+    tail = lines[-15:]
+    if empty_prompt(screen)[1] == ASKING:
+        if rc_menu(screen):
+            return "remote_control_menu"
+        low = [ln.lower() for ln in tail]
+        for name, words in DIALOG_NAMES:
+            if any(w in ln for ln in low for w in words):
+                return name
+        return "other: " + tail[-1][:80]
+    inputs = [i for i, ln in enumerate(tail) if ln.startswith("❯") and not OPTION.match(ln)]
+    above = tail[:inputs[-1]] if inputs else []
+    if any(SURVEY in ln.lower() for ln in above[-6:]):
+        return "survey"
+    return None
 #: what precedes the words on such a line: spaces and the bullets and rules Claude Code draws
 _LEAD = re.compile(r"^[\s\u2300-\u23ff\u2500-\u27bf]+")
 #: seconds without a keyboard, mouse or trackpad event before nobody is taken to be at this computer

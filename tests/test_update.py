@@ -1498,3 +1498,34 @@ def test_the_remote_control_menu_is_seen_whatever_its_escape_word():
     assert not cu.rc_menu(talk)
     # another menu with an escape hint and no Disconnect line is not this one
     assert not cu.rc_menu("Pick one\n❯ First\n  Second\nEnter to select · Esc to close")
+def test_dialog_names_what_holds_the_screen_and_presses_nothing():
+    """Each dialog that takes the place of the input line is named, the rating question above the input
+    line is named too, and a busy or idle session with its input line on screen holds none."""
+    assert cu.dialog(RC_MENU_SCREEN) == "remote_control_menu"
+    assert cu.dialog(RC_MENU_SCREEN.replace("Enter to select · Esc to continue", "Esc to close")) == \
+        "remote_control_menu"
+    trust = ("Do you trust the files in this folder?\n\n/home/user/project\n\n"
+             "❯ 1. Yes, I trust this folder\n  2. No, exit\n\nEnter to confirm · Esc to cancel")
+    assert cu.dialog(trust) == "trust_folder"
+    leaving = "You have 1 unsent feedback draft.\n\nEnter to review & send, Esc to discard and exit"
+    assert cu.dialog(leaving) == "exit_feedback"
+    allow = ("Bash command\n  rm -rf build\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\n"
+             "Esc to cancel")
+    assert cu.dialog(allow) == "permission"
+    pick = "Which branch?\n❯ 1. main\n  2. develop\nEnter to select · ↑/↓ to navigate · Esc to cancel"
+    assert cu.dialog(pick) == "question"
+    unknown = "Something new\n❯ 1. Keep\n  2. Drop\nPress enter to go on"
+    assert cu.dialog(unknown) == "other: Press enter to go on"
+    survey = ("⏺ Done.\n\n● How is Claude doing this session? (optional)\n  1: Bad    2: Fine   3: Good   "
+              "0: Dismiss\n───\n❯ \n───\n  ⏵⏵ accept edits on")
+    assert cu.dialog(survey) == "survey"
+    # a session busy with a turn keeps its input line below the spinner: no dialog
+    busy = ("⏺ Running the tests\n✢ Working… (13s · esc to interrupt)\n───\n❯ \n───\n"
+            "  ⏵⏵ accept edits on · esc to interrupt")
+    assert cu.dialog(busy) is None
+    idle = "⏺ Done, the tests pass.\n───\n❯ \n───\n  ⏵⏵ accept edits on"
+    assert cu.dialog(idle) is None
+    # words of a dialog in the conversation, with the input line below them, are no dialog
+    talk = "⏺ It asked: Do you want to proceed? Enter to select.\n───\n❯ \n───\n  ⏵⏵ accept edits on"
+    assert cu.dialog(talk) is None
+    assert cu.dialog(None) is None and cu.dialog("") is None
