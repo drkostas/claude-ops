@@ -1481,3 +1481,20 @@ def test_ready_says_no_while_a_session_compacts(monkeypatch):
     ended = now - dt.timedelta(minutes=5)
     assert cu.ready(1, {1: {"ppid": 0}}, "x", SPINNING, ended, now, commands={}) == (False, cu.COMPACTS)
     assert cu.ready(1, {1: {"ppid": 0}}, "x", "\u276f\n", ended, now, commands={})[0]
+
+
+def test_the_remote_control_menu_is_seen_whatever_its_escape_word():
+    """The menu's last line is read loosely, so a third renaming of its hint is still the menu. A
+    running turn's "esc to interrupt" is never the hint, and the menu's words in the conversation,
+    above an input box, are never the menu, so a busy session is never sent an Escape."""
+    assert cu.rc_menu(RC_MENU_SCREEN.replace("Esc to continue", "Esc to dismiss"))
+    assert cu.rc_menu(RC_MENU_SCREEN.replace("Enter to select · Esc to continue", "Esc to go back"))
+    # a busy session whose conversation mentions the menu, with the running turn's hint as the last line
+    busy = ("⏺ The menu offers Disconnect this session and Show QR code.\n✢ Working… (13s)\n───\n❯ \n───\n"
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt")
+    assert not cu.rc_menu(busy)
+    # the same words above an input box, with any other last line, are text in the conversation
+    talk = ("⏺ It offers Disconnect this session.\n───\n❯ \n───\n  ⏵⏵ accept edits on · esc to undo")
+    assert not cu.rc_menu(talk)
+    # another menu with an escape hint and no Disconnect line is not this one
+    assert not cu.rc_menu("Pick one\n❯ First\n  Second\nEnter to select · Esc to close")
