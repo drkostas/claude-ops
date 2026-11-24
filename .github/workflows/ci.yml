@@ -20,8 +20,8 @@ jobs:
       - run: python -m compileall -q src
       - run: pytest -q
       # --hosted-only because this repository is public, so every job of it belongs on a runner
-      # GitHub hosts. It runs here rather than in fork-guard.yml, whose install is pinned to the
-      # commit that added that check and so does not know this flag yet.
+      # GitHub hosts. This run uses the working tree's own lint, and fork-guard.yml runs the same
+      # check from the commit it pins.
       - run: claude-ops fork-guard .github/workflows --hosted-only
       - run: bash -n src/claude_ops/rover/harness.sh && bash -n src/claude_ops/rover/netwatchdog.sh
 

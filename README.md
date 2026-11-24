@@ -334,7 +334,16 @@ runs-on: ${{ matrix.os }}                        # fine when the job's own matri
 
 Pass the flag in the repository's own workflow rather than deciding from the event, so the file a
 reader opens states the rule and the same command can be run by hand before a push. A job that calls
-another workflow has no runner of its own and is not checked.
+another workflow has no runner of its own and is not checked. This repository passes it in both of its
+own workflows, the fork guard and its CI, so the rule is stated where a reader looks for it and
+checked from the working tree on every pull request.
+
+Three shapes that GitHub does host are refused as well, deliberately: the hyphenated ARM labels
+(`ubuntu-24.04-arm`), the larger-runner labels (`ubuntu-latest-4-cores`) and a single-element list
+(`[ubuntu-latest]`). A safety check should refuse something safe rather than permit something
+unsafe, and a list of labels is genuinely the shape a runner of one's own takes. A repository that
+needs one of those three states it plainly, by leaving the flag off that workflow or by naming the
+label in a wider pattern of its own.
 
 It reads the shell of a `run` step and the script of an actions/github-script step, and it knows a
 few third party actions that act on the repository through their own inputs (`actions/stale`,
