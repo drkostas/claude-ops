@@ -1,4 +1,4 @@
-"""Refuse a command that would overwrite a file nothing can bring back (a PreToolUse hook).
+"""Refuse a command that would overwrite a file git cannot bring back (a PreToolUse hook).
 
 Some programs write a file of their own choosing, with no path on the command line and no question
 asked. When that file is hand-written and no repository tracks it, one such command is an
@@ -10,8 +10,12 @@ This hook refuses such a command before it runs (exit 2, with the reason sent ba
 reads the Bash tool call's command line, finds every simple command on it (after `&&`, in a pipeline,
 on a later line), and refuses when a rule's words stand at the start of one AND at least one of the
 files that rule names exists and is not tracked by git. A file git tracks goes through, because a
-checkout brings it back, so the rule narrows itself to the case that cannot be undone. A dated copy
-beside the file is not history and does not count.
+checkout brings it back, so the rule narrows itself to the case that cannot be undone. A folder that is
+no repository at all counts as unrecoverable too, because git answers that with a code rather than an
+error, and only when git cannot be run does the check give up and let the command through, since a
+broken hook must never stop work. A copy kept outside git, a dated one beside the file or one
+published somewhere else, is a point in time rather than history, so it leaves the loss recoverable
+by hand and never by a checkout, which is why it does not soften the refusal.
 
 The rules are in a JSON file:
 
@@ -114,7 +118,7 @@ def restorable(path: str) -> bool:
 
 
 def at_risk(rule: dict) -> list[str]:
-    """The rule's files that exist and that nothing can bring back."""
+    """The rule's files that exist and that git cannot bring back."""
     out = []
     for name in rule["files"]:
         path = os.path.expanduser(name)
@@ -140,8 +144,8 @@ def check(payload: dict, argv: list[str] | None = None) -> str | None:
                 continue
             said = " ".join(rule["words"])
             more = f" (and {len(files) - 1} more)" if len(files) > 1 else ""
-            why = (f"`{said}` writes {files[0]}{more} itself, and git does not track that file, so this "
-                   "would overwrite a hand-written file nothing can bring back")
+            why = (f"`{said}` writes {files[0]}{more} itself, and git does not track that file, "
+                   "so no checkout can bring it back")
             return f"{why}. {rule['message']}" if rule["message"] else why
     return None
 
