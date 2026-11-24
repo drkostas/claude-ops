@@ -14,6 +14,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      # Pinned to the commit that added this check, so every copy of this file runs the same lint.
-      - run: pip install "claude-ops[yaml] @ git+https://github.com/drkostas/claude-ops@aaf17d07715aea84a563640129aa8b6d97106184"
-      - run: claude-ops fork-guard .github/workflows
+      # The pin names a commit of the lint, and a repository moves it when it needs a newer check.
+      # This one knows --hosted-only, which the commit this file used to pin does not.
+      - run: pip install "claude-ops[yaml] @ git+https://github.com/drkostas/claude-ops@f6af86ea5cd08d1a26d25bd809fa69b2dfe42712"
+      # --hosted-only because this repository is public, so every job of it belongs on a runner
+      # GitHub hosts. The repository's own CI runs the same lint from the working tree as well.
+      - run: claude-ops fork-guard .github/workflows --hosted-only
