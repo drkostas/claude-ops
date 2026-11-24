@@ -297,8 +297,9 @@ def test_a_declared_need_is_held_between_its_floor_and_the_cap_and_the_gate_asks
     assert h.reasons(tight, 5) == [("memory", "only 4.4 GB of memory free (needs 5)")]
     note = h.held_note("only 0.4 GB of memory free (needs 1)", {"memory"}, 61, 0.9, 1.0,
                        ("--need-gb", "--need-gb 1"))
-    assert ("That is this job's own limit (--need-gb 1)" in note and "against the 1 GB it asks for" in note
+    assert ("That is this job's own limit (--need-gb 1)" in note and "short of the 1 GB it asks for" in note
             and "Lower --need-gb to what the job needs" in note), note
+    assert "would have started" not in note, "a job that declared its need has nothing left to declare"
     assert "--need-gb <GB>" not in note, "a job that declared its need is not told to declare one"
     monkeypatch.setenv("HEAVY_MIN_FREE_GB", "16")
     note = h.held_note("only 9 GB of memory free (needs 16)", {"memory"}, 61, 9, 16, None)
@@ -313,6 +314,42 @@ def test_a_declared_need_is_held_between_its_floor_and_the_cap_and_the_gate_asks
                          "peaked at 0.05 GB)"), note
     note = h.held_note("swap 19 GB used", {"swap"}, 61, 20, None, None)
     assert "--need-gb" not in note, "and a job the machine's disk holds is told nothing about memory"
+
+
+def test_the_ceiling_of_a_wait_says_the_gap_and_never_that_waiting_is_hopeless(monkeypatch, tmp_path):
+    """A gate that has held a job keeps the most memory it saw free, and the words say how far that got
+    from what the job asks, how long it has been that way, and the whole number of GB a job could ask for
+    instead and start at once.
+
+    ⛔ They never say that waiting cannot help, and the absence is asserted here on purpose. Measured over
+    nine days of one busy machine's gate log, of the eight waits that reached the hour note every ceiling
+    was 0.1 to 0.6 GB short of the ask and five of the eight ran anyway, three within 46 minutes, so a
+    line telling a job to give up would have been wrong five times out of eight. The gap is true of every
+    case and needs no stretch of time chosen for it.
+    """
+    h = _fresh(monkeypatch, tmp_path, HEAVY_MIN_FREE_GB="6")
+    said = h.ceiling_words(5.7, 6, 60)
+    assert "in that time was 5.7 GB, 0.3 GB short of the 6 GB it asks for" in said, said
+    assert "which it has not reached in 1 h 0 min" in said, said
+    assert "a job that asked for 5 GB would have started" in said, said
+    assert "free and reclaimable, which is what this gate counts" in said, \
+        "the words name which measure of free they are, so a reader meeting another one knows they differ"
+    for claim in ("hopeless", "give up", "cannot", "will not", "pointless", "no use"):
+        assert claim not in said, f"⛔ the words must not tell a job to stop waiting ({claim!r} in {said!r})"
+
+    # a ceiling under one whole GB leaves nothing honest to declare, and a job that already declared its
+    # need has nothing left to declare either
+    assert "would have started" not in h.ceiling_words(0.9, 1.0, 61)
+    assert "0.1 GB short of the 1 GB it asks for" in h.ceiling_words(0.9, 1.0, 61)
+    assert "would have started" not in h.ceiling_words(5.7, 6, 60, can_declare=False)
+
+    # ⭐ a ceiling that reached the ask says the other thing worth knowing: memory HAS been free in this
+    # wait, so the gate can open again with nothing on the machine changing, and the job was held by
+    # something else at the moment it looked
+    reached = h.ceiling_words(10.6, 6, 70)
+    assert "reached 10.6 GB, at or above the 6 GB it asks for" in reached, reached
+    assert "the gate can open again with nothing changing" in reached, reached
+    assert "short of" not in reached and "would have started" not in reached, reached
 
 
 def test_last_peak_is_the_newest_run_of_that_name_that_exited_0(monkeypatch, tmp_path):
@@ -630,13 +667,15 @@ def test_heavy_queue(monkeypatch):
     h = module(HEAVY_MIN_FREE_GB="50")
     note = h.held_note(h.short((10.6, 2, 50, 1, 500)), {"memory"}, 70, 10.6)
     check("this job's own limit (HEAVY_MIN_FREE_GB=50)" in note
-          and "the most memory free in that time was 10.6 GB against the 50 GB it asks for" in note
+          and "in that time was 10.6 GB, 39.4 GB short of the 50 GB it asks for" in note
+          and "a job that asked for 10 GB would have started" in note
           and "Lower HEAVY_MIN_FREE_GB" in note,
           f"⭐ a job held by a limit set in its own environment is told that, and which setting to lower ({note})")
     monkeypatch.delenv("HEAVY_MIN_FREE_GB")
     h = module()
     note = h.held_note(h.short((3, 2, 50, 1, 500)), {"memory"}, 70, 3.4)
-    check("That is the machine" in note and "against the 6 GB it asks for" in note and "more free memory" in note,
+    check("That is the machine" in note and "short of the 6 GB it asks for" in note and "more free memory" in note
+          and "a job that asked for 3 GB would have started" in note,
           f"and a machine short of memory with the default limit is the machine ({note})")
     rc, out = heavy("t", "swap-history", "--", "echo", "ran-with-swap", HEAVY_FAKE_MACHINE="20 19 50")
     check(rc == 0 and "ran-with-swap" in out, "and such a job runs")
@@ -786,16 +825,19 @@ def test_heavy_queue(monkeypatch):
     # --- a limit out of reach is said once ----------------------------------------------------------
     out_of_reach = start("big-chat", "needs 50 GB", "--", "true", HEAVY_MIN_FREE_GB="50",
                          HEAVY_OWN_LIMIT_NOTE_MIN="0.03", HEAVY_FAKE_MACHINE="10.6 2 50")
-    st = status_until(lambda s: "the most memory free in that time 10.6 GB" in s)
+    st = status_until(lambda s: "in that time was 10.6 GB" in s)
     # the note is said at the first poll 1.8 s (0.03 min) after its limits began to hold it, which
     # its ticket names: timed from its start instead, a loaded machine had not reached it yet
     at = held_since("needs 50 GB") or time.time()
     time.sleep(max(0.0, at + 1.8 + 4.0 - time.time()))
-    check("held by its gate" in st and "the most memory free in that time 10.6 GB" in st,
+    check("held by its gate" in st and "in that time was 10.6 GB, 39.4 GB short of the 50 GB it asks for" in st,
           f"status shows how long and the most memory free beside the waiter: {st.strip()[-190:]!r}")
+    check("the 6 GB" not in st,
+          "⭐ and it names the WAITER's ask (50), never its own HEAVY_MIN_FREE_GB: status runs in another "
+          f"process, so a reader that took its own default would print the wrong number: {st.strip()[-190:]!r}")
     out_of_reach.terminate()
     said = out_of_reach.communicate(timeout=10)[0]
-    check(said.count("the most memory free in that time was 10.6 GB against the 50 GB it asks for") == 1
+    check(said.count("in that time was 10.6 GB, 39.4 GB short of the 50 GB it asks for") == 1
           and "Lower HEAVY_MIN_FREE_GB" in said,
           f"⭐ the waiter is told once the most memory it saw free and how to act: {said.strip()[-230:]!r}")
 
