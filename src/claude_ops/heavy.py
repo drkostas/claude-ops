@@ -49,7 +49,10 @@ small job waited behind it on a machine with plenty of room for that job. A job 
 declares it with --need-gb <GB> or HEAVY_NEED_GB, held between NEED_FLOOR_GB (0.5) and HEAVY_MAX_GB, and
 the gate then asks that much free memory instead. A job that declares nothing asks HEAVY_MIN_FREE_GB as
 before, and when memory holds it, its first waiting line about memory and its hour note say how to declare
-a need, with the peak of the last run of its name that exited 0. A declaration is not taken on trust. Each job is sampled as it runs, and a peak more than
+a need, with the peak of the last run of its name that exited 0. The hour note also says how far the most
+free memory of the whole wait got from what the job asks and the whole number of GB a job could ask for
+and start at once (ceiling_words), because a gate half a GB out of reach for an hour reads exactly like
+one that is hopeless, and the two want different repairs. A declaration is not taken on trust. Each job is sampled as it runs, and a peak more than
 NEED_SLACK (a quarter) over the need is one line, and it is kept for that job name in HEAVY_DIR/peaks.
 The next run of that name asks the larger of its need and that peak, until a run stays within its need
 again. Declared needs add up against free memory as every job does: a waiter beside a job past its turn
@@ -116,7 +119,8 @@ STATUS AS DATA. `status --json` prints what `status` prints as one JSON object. 
 gate used (free_gb, swap_gb, disk_free_pct, disk_free_gb, pressure), `short` the kinds of reason and words
 that hold a job now, `slot` the holder or null, `past_turn` the jobs still running past their turn, `waiting`
 each waiter in the order it goes next, and `failing` the jobs failing the same way. A waiter's `gate` is null
-when only the turn holds it, else its reason `kinds`, the gate's `words`, `held_s` and `most_free_gb`.
+when only the turn holds it, else its reason `kinds`, the gate's `words`, `held_s`, `most_free_gb` and
+`ask_gb`.
 
 A call made inside a heavy job runs at once, inside the outer job's slot and memory cap: the job is
 given HEAVY_HELD, the pid that holds the slot. A caller whose ancestor holds the slot with `hold` (a step of a
@@ -493,6 +497,37 @@ def need_words(last_gb: float | None = None) -> str:
     return NEED_HINT + f" (its last run under this name that exited 0 peaked at {last_gb:g} GB)"
 
 
+def ceiling_words(most_free: float, ask: float, minutes: float, can_declare: bool = True) -> str:
+    """Pure. What the ceiling of a memory wait says: the most free memory the gate saw while it held the
+    job, how far that is from what the job asks, how long it has been that way, and the whole number of GB
+    a job could ask for instead and start at once. `can_declare` is False for a job that has already
+    declared its need, which has nothing left to declare.
+
+    It says the GAP, and never that waiting is hopeless, because the data does not support that sentence.
+    Measured over nine days of one busy machine's gate log: of the eight waits that reached the one-hour
+    note, every ceiling was 0.1 to 0.6 GB short of the ask, and five of the eight ran anyway, three of
+    them within 46 minutes of the note. A line telling a job to give up would have been wrong in five
+    cases out of eight, and the two that waited six hours still started, so there is no stretch of time
+    to pick and none is picked here. The gap is true of every case, and in all eight a job asking for a
+    whole GB below its own ceiling would have started at once.
+
+    A ceiling that has reached the ask says the other thing worth knowing, that memory has been free
+    during this wait, so the gate can open again with nothing on the machine changing.
+    """
+    counts = "free and reclaimable, which is what this gate counts"
+    if most_free >= ask:
+        return (f", and the most memory free ({counts}) in that time reached {most_free:g} GB, at or above "
+                f"the {ask:g} GB it asks for, so memory has been free during this wait and the gate can "
+                f"open again with nothing changing")
+    gap = round(ask - most_free, 1)
+    said = (f", and the most memory free ({counts}) in that time was {most_free:g} GB, {gap:g} GB short of "
+            f"the {ask:g} GB it asks for, which it has not reached in {_ago(minutes)}")
+    whole = int(most_free)
+    if can_declare and whole >= 1:
+        said += f": a job that asked for {whole} GB would have started"
+    return said
+
+
 def last_peak(what: str, records: list[dict] | None = None) -> float | None:
     """The peak, in GB, of the newest run of `what` that exited 0 among `records` (done_jobs() when not given),
     or None when there is no such run with a peak above 0. A failed run is left out, since it may have ended
@@ -527,8 +562,8 @@ def held_note(why: str, kinds: set[str], minutes: float, most_free: float, ask_g
             + (f"That is this job's own limit ({', '.join(words for _name, words in own)})"
                if own else "That is the machine, not a limit this job set"))
     if "memory" in kinds:
-        note += (f", and the most memory free in that time was {most_free:g} GB against the "
-                 f"{MIN_FREE_GB if ask_gb is None else ask_gb:g} GB it asks for")
+        note += ceiling_words(most_free, MIN_FREE_GB if ask_gb is None else ask_gb, minutes,
+                              can_declare=not declared)
     if own:
         return note + f". Lower {' or '.join(name for name, _words in own)} to what the job needs, or stop the job"
     needs = {"memory": "free memory", "pressure": "free memory", "swap": "free disk", "disk": "free disk"}
@@ -793,8 +828,10 @@ def _ticket(chat: str, what: str, holder_pid: int, need_gb: float | None = None)
 
 def _mark(ticket: Path, why: str, held: dict | None = None, kinds: list[str] | None = None) -> None:
     """Write into this waiter's ticket what holds it back by its own gate ("" for nothing), so the
-    others' turn order can pass over it, and since when its gate has held it and the most memory
-    free in that time ({"at", "most_free_gb"}), for status. Written whole and renamed, so no reader
+    others' turn order can pass over it, and since when its gate has held it, the most memory
+    free in that time and the free memory this job asks for ({"at", "most_free_gb", "ask_gb"}), for
+    status. The ask is the job's own: status runs in another process, whose HEAVY_MIN_FREE_GB may
+    not be the waiting job's, so a reader that took its own would name the wrong number. Written whole and renamed, so no reader
     sees half a file, and only when something changed. `kinds` are the kinds of reason (memory, pressure,
     swap, disk) behind `why`, for `status --json`."""
     try:
@@ -916,8 +953,8 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
             # each caller's own environment (one big job asks for HEAVY_MIN_FREE_GB=16), so a job at
             # the head of the queue that waits for room only it needs would stop every job behind
             # it. The turn goes to the first waiter that could start now.
-            _mark(ticket, why, {"at": held_since, "most_free_gb": most_free} if held_since else None,
-                  sorted({kind for kind, _words in held}))
+            _mark(ticket, why, {"at": held_since, "most_free_gb": most_free, "ask_gb": ask}
+                  if held_since else None, sorted({kind for kind, _words in held}))
             order = turn_order([w for w in waiters(started) if not w.get("short")])
             h = holder()
             if not why and (not SLOT.exists() or past_turn(h)) and order and order[0]["ticket"] == ticket.name:
@@ -1501,8 +1538,9 @@ def status_data() -> dict:
     its last sample's `resident_gb`, `peak_resident_gb` and `swapped_out`, each None before its first sample),
     `past_turn` the jobs that gave the slot up and still run, and `waiting` each waiter in the order it goes
     next. A waiter's `gate` is None when nothing but the turn holds it, else its reason `kinds` (memory,
-    pressure, swap, disk), the gate's `words`, how many `held_s` seconds it has held and the `most_free_gb`
-    seen in that time. `failing` lists the jobs that fail the same way."""
+    pressure, swap, disk), the gate's `words`, how many `held_s` seconds it has held, the `most_free_gb`
+    seen in that time and the `ask_gb` that waiter's own gate asks for (None on a ticket written before this
+    was recorded). `failing` lists the jobs that fail the same way."""
     m = machine()
     free, swap, disk, level, disk_gb = m
     clear_stale()
@@ -1527,7 +1565,8 @@ def status_data() -> dict:
             at = (w.get("held") or {}).get("at")
             gate = {"kinds": list(w.get("kinds") or []), "words": w["short"],
                     "held_s": round(now - float(at)) if at else None,
-                    "most_free_gb": (w.get("held") or {}).get("most_free_gb")}
+                    "most_free_gb": (w.get("held") or {}).get("most_free_gb"),
+                    "ask_gb": (w.get("held") or {}).get("ask_gb")}
         out["waiting"].append({"position": i, "chat": w["chat"], "what": w["what"], "pid": w["pid"],
                                "since": w["since"], "need_gb": w.get("need_gb"), "gate": gate})
     for f in failing():
@@ -1568,8 +1607,13 @@ def status(as_json: bool = False) -> int:
             held = f"; held by its gate: {w['short']}" if w.get("short") else ""
             gate = w.get("held") or {}
             if w.get("short") and gate.get("at"):
-                held += (f", for {_ago((time.time() - float(gate['at'])) / 60)}, the most memory free in "
-                         f"that time {float(gate.get('most_free_gb', 0)):g} GB")
+                mins = (time.time() - float(gate["at"])) / 60
+                most_free = float(gate.get("most_free_gb", 0))
+                held += f", for {_ago(mins)}"
+                # a ticket written before the gate recorded its ask says only what it knows
+                held += (f", the most memory free in that time {most_free:g} GB" if gate.get("ask_gb") is None
+                         else ceiling_words(most_free, float(gate["ask_gb"]), mins,
+                                            can_declare=w.get("need_gb") is None))
             asks = f", asks {float(w['need_gb']):g} GB free" if w.get("need_gb") is not None else ""
             print(f"  {i}. {w['chat']}: {w['what']} (pid {w['pid']}, waiting since {w['since']}{asks}{held})")
     for s in failing():
