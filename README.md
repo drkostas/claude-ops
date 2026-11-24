@@ -281,6 +281,7 @@ have it:
 ```bash
 claude-ops fork-guard .github/workflows      # exits 1 on a hit
 claude-ops fork-guard . --json
+claude-ops fork-guard .github/workflows --hosted-only   # and every job on a hosted runner
 ```
 
 The guard limits the job to the original repository, so every fork skips it:
@@ -316,6 +317,24 @@ jobs:
       - run: pip install 'claude-ops[yaml]'
       - run: claude-ops fork-guard .github/workflows
 ```
+
+### Keep every job on a runner GitHub hosts
+
+A repository anyone can read usually wants all of its jobs on hosted runners, because a pull request
+from a fork would otherwise run on a machine of the project's own. `--hosted-only` adds that check,
+and what it looks for is not only the word `self-hosted`. A `runs-on` the workflow file does not fix,
+such as one reading a repository variable, is reported too, because a variable set once sends every
+job of the repository elsewhere without the workflow changing:
+
+```yaml
+runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}   # reported: the file does not fix the runner
+runs-on: ubuntu-latest                           # fine
+runs-on: ${{ matrix.os }}                        # fine when the job's own matrix lists hosted labels
+```
+
+Pass the flag in the repository's own workflow rather than deciding from the event, so the file a
+reader opens states the rule and the same command can be run by hand before a push. A job that calls
+another workflow has no runner of its own and is not checked.
 
 It reads the shell of a `run` step and the script of an actions/github-script step, and it knows a
 few third party actions that act on the repository through their own inputs (`actions/stale`,

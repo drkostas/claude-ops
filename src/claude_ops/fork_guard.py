@@ -23,6 +23,14 @@ while neither the job nor the acting step carries a `github.repository ==` guard
 The exit status is 1 when it finds an unguarded job, so a continuous integration step can fail a
 pull request that adds one. It needs PyYAML (pip install 'claude-ops[yaml]').
 
+With `--hosted-only` it also reports a job whose `runs-on` is not a runner GitHub hosts, fixed by
+the file itself. A repository whose code anyone can read usually wants every job on a hosted
+runner, because a pull request from a fork would otherwise run on a machine of its own, and a value
+the file leaves open, such as a repository variable, is enough to send it there without the
+workflow changing. A matrix of hosted labels still passes, since the file fixes those values.
+
+    claude-ops fork-guard .github/workflows --hosted-only
+
 It reads the shell of a `run` step and the script of an actions/github-script step, and it knows a
 few third party actions that act on the repository through their own inputs (actions/stale,
 dessant/lock-threads, peter-evans/create-issue-from-file). Another such action is not seen.
@@ -54,6 +62,13 @@ ACTS_ON_REPO_ACTIONS = re.compile(
 
 #: an `if:` that limits a job or step to one repository (github.repository or github.repository_owner)
 UPSTREAM_GUARD = re.compile(r"github\.repository(_owner)?\s*==")
+
+#: a label of a runner GitHub hosts, as a workflow names it (ubuntu-latest, ubuntu-24.04, macos-14)
+HOSTED_LABEL = re.compile(r"^(ubuntu|macos|windows)-[0-9a-z._]+$", re.IGNORECASE)
+
+#: a `${{ ... }}` expression, and the one shape of it a workflow file fixes by itself
+EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+MATRIX_READ = re.compile(r"^\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*$")
 
 
 def _triggers(on_value) -> set:
@@ -113,6 +128,55 @@ def unguarded(doc: dict) -> list:
     return hits
 
 
+def _matrix_values(job: dict, key: str) -> list | None:
+    """The values this job's own matrix gives `key`, or None when the file does not fix them."""
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    values = matrix.get(key) if isinstance(matrix, dict) else None
+    if isinstance(values, list) and values and all(isinstance(v, (str, int, float)) for v in values):
+        return [str(v) for v in values]
+    return None
+
+
+def hosted_runner(runs_on, job: dict) -> bool:
+    """Pure. Whether `runs-on` names a runner GitHub hosts and the workflow file fixes which one.
+
+    A list or a map of labels is a runner group or a self-hosted set, so it is not one. An
+    expression is one only when it reads this job's own matrix and every value there is a hosted
+    label, because then the file still says which runners the job can use."""
+    if not isinstance(runs_on, str):
+        return False
+    text = runs_on.strip()
+    found = EXPRESSION.findall(text)
+    if not found:
+        return bool(HOSTED_LABEL.match(text))
+    if len(found) != 1 or EXPRESSION.sub("", text).strip():
+        return False                      # several expressions, or one mixed with other text
+    key = MATRIX_READ.match(found[0])
+    if not key:
+        return False                      # it reads something the file does not fix
+    values = _matrix_values(job, key.group(1))
+    return bool(values) and all(HOSTED_LABEL.match(v) for v in values)
+
+
+def not_hosted(doc: dict) -> list:
+    """The jobs in one parsed workflow that do not run on a hosted runner the file fixes, as
+    [{"job", "runs_on"}]. A job with no `runs-on` of its own (one that calls another workflow) is
+    not one of them."""
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return []
+    out = []
+    for name, job in jobs.items():
+        if not isinstance(job, dict) or job.get("runs-on") is None:
+            continue
+        runs_on = job["runs-on"]
+        if not hosted_runner(runs_on, job):
+            out.append({"job": str(name),
+                        "runs_on": runs_on if isinstance(runs_on, str) else json.dumps(runs_on)})
+    return out
+
+
 def workflow_files(path: Path) -> list:
     """The workflow files at `path`: the file itself, the yaml files in the folder, or, when the
     folder holds none, the yaml files in its .github/workflows."""
@@ -129,10 +193,11 @@ def workflow_files(path: Path) -> list:
     return []
 
 
-def scan(path: Path) -> dict:
-    """{"hits": [{"file", "job"}], "unreadable": [{"file", "error"}]} for the workflows at `path`."""
+def scan(path: Path, hosted_only: bool = False) -> dict:
+    """{"hits": [{"file", "job"}], "runners": [{"file", "job", "runs_on"}], "unreadable":
+    [{"file", "error"}]} for the workflows at `path`. `runners` is empty unless `hosted_only`."""
     import yaml   # lazy, so the rest of the package needs no yaml
-    hits, unreadable = [], []
+    hits, runners, unreadable = [], [], []
     for f in workflow_files(path):
         try:
             doc = yaml.safe_load(f.read_text(errors="replace"))
@@ -143,7 +208,10 @@ def scan(path: Path) -> dict:
             continue
         for job in unguarded(doc):
             hits.append({"file": str(f), "job": job})
-    return {"hits": hits, "unreadable": unreadable}
+        if hosted_only:
+            for r in not_hosted(doc):
+                runners.append({"file": str(f), **r})
+    return {"hits": hits, "runners": runners, "unreadable": unreadable}
 
 
 def main(argv=None) -> int:
@@ -154,24 +222,32 @@ def main(argv=None) -> int:
     p.add_argument("path", nargs="?", default=".github/workflows",
                    help="a workflow file, a folder of them, or a repository root")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--hosted-only", action="store_true",
+                   help="also fail a job whose runs-on is not a hosted runner this file fixes")
     a = p.parse_args(argv)
     try:
         import yaml   # noqa: F401
     except ImportError:
         print("fork-guard needs PyYAML (pip install 'claude-ops[yaml]')")
         return 2
-    out = scan(Path(a.path))
+    out = scan(Path(a.path), a.hosted_only)
+    bad = out["hits"] or out["runners"]
     if a.json:
         print(json.dumps(out, indent=1))
-        return 1 if out["hits"] else 0
+        return 1 if bad else 0
     for h in out["hits"]:
         print(f"{h['file']}::{h['job']} acts on issues, pull requests or comments with no "
               f"`github.repository ==` guard")
+    for r in out["runners"]:
+        print(f"{r['file']}::{r['job']} runs on {r['runs_on']}, which this file does not fix as a "
+              f"runner GitHub hosts, so the job can be sent to a machine of its own without the "
+              f"workflow changing")
     for u in out["unreadable"]:
         print(f"unreadable: {u['file']} ({u['error']})")
-    if not out["hits"]:
-        print("no unguarded scheduled jobs found")
-    return 1 if out["hits"] else 0
+    if not bad:
+        print("no unguarded scheduled jobs found"
+              + (" and every job runs on a hosted runner" if a.hosted_only else ""))
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
