@@ -10,12 +10,15 @@ This reads how the running container was made and makes the new one the same way
 
 1. Read the container (`docker inspect`) and the image it runs. Refuse a container a compose project
    manages (recreate it with compose), and one that sets something this does not copy, naming each.
+   The check is a list of what is accounted for. Every setting is copied, docker's own default, the
+   image's own value, or refused by name, so a setting docker adds later is refused, never dropped.
 2. Pull its image reference. When the reference still names the image the container runs, stop:
    nothing is new.
 3. Stop the old container and rename it to `<name>-old`, so its name is free and it can come back.
 4. Run the new one with the same name, published ports, environment the user set (the image's own
-   defaults are left to the new image), shared memory size, restart policy, labels, network, command
-   and every mount: a named or anonymous volume by its name, a bind mount by its path.
+   defaults are left to the new image), shared memory size, restart policy, labels, network, command,
+   log settings, tmpfs mounts, `--rm`, `-i` and `-t`, and every mount: a named or anonymous volume by
+   its name, a bind mount by its path.
 5. Check that it answers: its health check when the image has one, else a TCP connection to its first
    published port, else that it is still running after a few seconds.
 6. Remove the old container (its volumes stay, since `docker rm` without `-v` keeps them). If the new
@@ -51,10 +54,17 @@ COMPOSE_LABEL = "com.docker.compose.project"
 WAIT_S = 90.0
 #: how long a container with no health check and no published port must keep running
 SETTLE_S = 5.0
-#: HostConfig fields this does not copy, with the value docker reports when the user did not set them
-NOT_COPIED = {"Privileged": False, "CapAdd": None, "CapDrop": None, "Devices": None, "ExtraHosts": None,
-              "Dns": None, "SecurityOpt": None, "PidMode": "", "IpcMode": "private", "Runtime": "runc",
-              "VolumesFrom": None, "Links": None, "Init": None}
+#: HostConfig fields plan() copies into the new container's `docker run`
+HOST_COPIED = frozenset({"RestartPolicy", "PortBindings", "ShmSize", "NetworkMode", "Binds", "Mounts", "Tmpfs",
+                         "LogConfig", "AutoRemove"})
+#: HostConfig fields docker fills in itself, with the values it uses when the user set nothing
+HOST_DEFAULTS = {"IpcMode": ("private", "shareable"), "CgroupnsMode": ("private", "host"), "Runtime": ("runc",),
+                 "MaskedPaths": None, "ReadonlyPaths": None}     # None: any value, docker's own path lists
+#: Config fields plan() copies, compares with the image, or that only say how a client attached
+CONFIG_HANDLED = frozenset({"Image", "Env", "Labels", "Cmd", "Entrypoint", "User", "WorkingDir", "Hostname",
+                            "ExposedPorts", "Volumes", "StopSignal", "Healthcheck", "Tty", "OpenStdin",
+                            "AttachStdin", "AttachStdout", "AttachStderr", "StdinOnce", "ArgsEscaped", "OnBuild",
+                            "Shell"})
 
 
 def _docker(args: list[str], run: Runner, env: Mapping[str, str] | None, timeout: float = 120
@@ -77,8 +87,56 @@ def _inspect(what: list[str], run: Runner, env) -> dict | None:
     return got[0] if isinstance(got, list) and got else None
 
 
-def _empty(value, default) -> bool:
-    return value in (None, [], {}, "") or value == default
+def _empty(value) -> bool:
+    return value in (None, False, 0, "", [], {}) or value == [0, 0]
+
+
+def unaccounted(container: dict, image: dict) -> list[str]:
+    """Each setting of `container` the new one would not get, in words. Every HostConfig and Config field is
+    either copied by plan(), docker's own default, the image's own value, or named here, so a field docker adds
+    later is refused rather than dropped without a word."""
+    cfg, host = container.get("Config") or {}, container.get("HostConfig") or {}
+    icfg = image.get("Config") or {}
+    out = []
+    for key, value in sorted(host.items()):
+        if key in HOST_COPIED or _empty(value):
+            continue
+        if key in HOST_DEFAULTS and (HOST_DEFAULTS[key] is None or value in HOST_DEFAULTS[key]):
+            continue
+        out.append(f"it sets {key} ({json.dumps(value)[:80]}), which this does not copy")
+    for key, value in sorted(cfg.items()):
+        if key not in CONFIG_HANDLED and not _empty(value):
+            out.append(f"it sets {key} ({json.dumps(value)[:80]}), which this does not copy")
+    for key, words in (("Entrypoint", "its own entrypoint"), ("User", "its own user"),
+                       ("WorkingDir", "its own working folder"), ("StopSignal", "its own stop signal"),
+                       ("Healthcheck", "its own health check")):
+        if (cfg.get(key) or None) != (icfg.get(key) or None):
+            out.append(f"it sets {words} ({json.dumps(cfg.get(key))[:80]}), which this does not copy")
+    host_name, cid = cfg.get("Hostname") or "", container.get("Id") or ""
+    if host_name and not cid.startswith(host_name):
+        out.append(f"it sets its own host name ({host_name}), which this does not copy")
+    published = set((host.get("PortBindings") or {}))
+    extra = sorted(set(cfg.get("ExposedPorts") or {}) - set(icfg.get("ExposedPorts") or {}) - published)
+    if extra:
+        out.append(f"it exposes ports its image does not ({', '.join(extra)}), which this does not copy")
+    dests = {m.get("Destination") for m in container.get("Mounts") or []} | set(host.get("Tmpfs") or {})
+    extra = sorted(set(cfg.get("Volumes") or {}) - set(icfg.get("Volumes") or {}) - dests)
+    if extra:
+        out.append(f"it declares volumes its image does not ({', '.join(extra)}), which this does not copy")
+    mode = host.get("NetworkMode") or "default"
+    if mode.startswith("container:"):
+        out.append(f"it shares another container's network ({mode}), which this does not copy")
+    nets = ((container.get("NetworkSettings") or {}).get("Networks") or {})
+    if len(nets) > 1:
+        out.append(f"it is on {len(nets)} networks ({', '.join(sorted(nets))}), and this copies one")
+    own = {(container.get("Name") or "").lstrip("/"), cid[:12]}
+    for net, n in sorted(nets.items()):
+        if not _empty((n or {}).get("IPAMConfig")):
+            out.append(f"it has a fixed address on {net}, which this does not copy")
+        aliases = set((n or {}).get("Aliases") or []) - own
+        if aliases:
+            out.append(f"it has its own names on {net} ({', '.join(sorted(aliases))}), which this does not copy")
+    return out
 
 
 def plan(container: dict, image: dict) -> dict:
@@ -92,23 +150,8 @@ def plan(container: dict, image: dict) -> dict:
     labels = cfg.get("Labels") or {}
     if COMPOSE_LABEL in labels:
         refused.append(f"a compose project manages it ({labels[COMPOSE_LABEL]}), so recreate it with compose")
-    for key, default in NOT_COPIED.items():
-        value = host.get(key)
-        if key == "IpcMode" and value in ("private", "shareable", ""):
-            continue
-        if key == "Runtime" and value in ("runc", "", None):
-            continue
-        if not _empty(value, default):
-            refused.append(f"it sets {key} ({value!r}), which this does not copy")
-    if (cfg.get("Entrypoint") or None) != (icfg.get("Entrypoint") or None):
-        refused.append(f"it sets its own entrypoint ({cfg.get('Entrypoint')!r}), which this does not copy")
-    if (cfg.get("User") or "") != (icfg.get("User") or ""):
-        refused.append(f"it runs as its own user ({cfg.get('User')!r}), which this does not copy")
-    if (cfg.get("WorkingDir") or "") != (icfg.get("WorkingDir") or ""):
-        refused.append(f"it sets its own working folder ({cfg.get('WorkingDir')!r}), which this does not copy")
+    refused += unaccounted(container, image)
     mode = host.get("NetworkMode") or "default"
-    if mode.startswith("container:"):
-        refused.append(f"it shares another container's network ({mode}), which this does not copy")
 
     args = ["run", "-d", "--name", name]
     policy = host.get("RestartPolicy") or {}
@@ -123,6 +166,19 @@ def plan(container: dict, image: dict) -> dict:
             args += ["-p", spec]
             if hport:
                 ports.append((ip if ip not in ("", "0.0.0.0", "::") else "127.0.0.1", int(hport)))
+    if host.get("AutoRemove"):
+        args.append("--rm")
+    if cfg.get("OpenStdin"):
+        args.append("-i")
+    if cfg.get("Tty"):
+        args.append("-t")
+    log = host.get("LogConfig") or {}
+    if log.get("Type"):
+        args += ["--log-driver", log["Type"]]
+        for key, value in sorted((log.get("Config") or {}).items()):
+            args += ["--log-opt", f"{key}={value}"]
+    for dest, opts in sorted((host.get("Tmpfs") or {}).items()):
+        args += ["--tmpfs", f"{dest}:{opts}" if opts else dest]
     shm = host.get("ShmSize") or DEFAULT_SHM
     if shm != DEFAULT_SHM:
         args += ["--shm-size", str(shm)]
@@ -143,7 +199,8 @@ def plan(container: dict, image: dict) -> dict:
         elif m.get("Type") == "bind" and m.get("Source"):
             args += ["-v", f"{m['Source']}:{dest}{ro}"]
         elif m.get("Type") == "tmpfs":
-            args += ["--tmpfs", dest]
+            if dest not in (host.get("Tmpfs") or {}):
+                args += ["--tmpfs", dest]
         else:
             refused.append(f"it has a {m.get('Type')} mount at {dest}, which this does not copy")
     reference = cfg.get("Image") or ""

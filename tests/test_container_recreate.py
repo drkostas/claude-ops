@@ -144,11 +144,73 @@ def test_a_new_container_that_exits_is_removed_and_the_old_one_comes_back():
 
 
 def test_a_health_check_decides_when_the_image_has_one():
+    hc = {"Test": ["CMD", "true"]}
+    for health, connect, want in (("healthy", lambda h, p: False, "recreated"), ("unhealthy", lambda h, p: True, "restored")):
+        c = _container()
+        c["Config"]["Healthcheck"] = hc
+        d = Docker(c, health=health)
+        d.images[OLD]["Config"]["Healthcheck"] = hc
+        out = _recreate(d, connect=connect)
+        assert out["outcome"] == want, out
+    assert "unhealthy" in out["said"]
+
+
+def test_a_health_check_the_user_set_is_refused():
     c = _container()
     c["Config"]["Healthcheck"] = {"Test": ["CMD", "true"]}
-    assert _recreate(Docker(copy.deepcopy(c), health="healthy"), connect=lambda h, p: False)["outcome"] == "recreated"
-    out = _recreate(Docker(copy.deepcopy(c), health="unhealthy"))
-    assert out["outcome"] == "restored" and "unhealthy" in out["said"]
+    out = _recreate(Docker(c))
+    assert out["outcome"] == "refused" and "its own health check" in out["said"]
+
+
+def _refused_for(**host):
+    c = _container()
+    c["HostConfig"].update(host)
+    d = Docker(c)
+    out = _recreate(d)
+    assert out["outcome"] == "refused", out
+    assert not any(x.split()[0] in ("pull", "stop") for x in d.calls)
+    return out["said"]
+
+
+def test_settings_a_new_container_would_lose_are_refused_by_name():
+    assert "Memory" in _refused_for(Memory=4294967296, MemorySwap=8589934592)
+    assert "Ulimits" in _refused_for(Ulimits=[{"Name": "core", "Soft": 0, "Hard": 0}])
+    assert "ExtraHosts" in _refused_for(ExtraHosts=["db.example.org:192.0.2.10"])
+
+
+def test_a_field_docker_adds_later_is_refused_not_dropped():
+    assert "SomeFutureLimit" in _refused_for(SomeFutureLimit=7)
+
+
+def test_docker_s_own_defaults_are_not_refused():
+    c = _container()
+    c["HostConfig"].update({"CgroupnsMode": "private", "MaskedPaths": ["/proc/acpi"], "ReadonlyPaths": ["/proc/bus"],
+                            "ConsoleSize": [0, 0], "OomScoreAdj": 0, "Dns": []})
+    assert cr.plan(c, _image())["refused"] == []
+
+
+def test_a_stop_timeout_the_user_set_is_refused():
+    c = _container()
+    c["Config"]["StopTimeout"] = 30
+    assert "StopTimeout" in " ".join(cr.plan(c, _image())["refused"])
+
+
+def test_a_second_network_and_a_fixed_address_are_refused():
+    c = _container()
+    c["NetworkSettings"] = {"Networks": {"bridge": {}, "back": {"IPAMConfig": {"IPv4Address": "192.0.2.5"}}}}
+    said = " ".join(cr.plan(c, _image())["refused"])
+    assert "2 networks" in said and "fixed address on back" in said
+
+
+def test_log_settings_tmpfs_and_rm_are_copied():
+    c = _container()
+    c["HostConfig"].update({"LogConfig": {"Type": "json-file", "Config": {"max-size": "10m", "max-file": "3"}},
+                            "Tmpfs": {"/scratch": "rw,size=2g"}, "AutoRemove": True})
+    c["Config"].update({"OpenStdin": True, "Tty": True})
+    p = cr.plan(c, _image())
+    run = " ".join(p["args"])
+    assert p["refused"] == []
+    assert "--rm -i -t --log-driver json-file --log-opt max-file=3 --log-opt max-size=10m --tmpfs /scratch:rw,size=2g" in run
 
 
 def test_a_compose_container_is_refused_untouched():
