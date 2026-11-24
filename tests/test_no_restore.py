@@ -85,6 +85,28 @@ def test_a_file_git_tracks_goes_through(home, tmp_path, monkeypatch):
     assert nr.check(call("sometool init -g"), ["--config", str(path)])
 
 
+def test_a_folder_that_is_no_repository_is_refused(config, home, tmp_path, monkeypatch):
+    """git answers a folder outside any repository with a code, not an error, so the file there is one
+    no checkout can bring back. The ceiling keeps the answer the same wherever the test runs."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    notes = home / ".config" / "sometool" / "NOTES.md"
+    done = subprocess.run(["git", "-C", str(notes.parent), "ls-files", "--error-unmatch", "--", notes.name],
+                          capture_output=True, text=True)
+    assert done.returncode == 128 and "repository" in done.stderr
+    assert nr.restorable(str(notes)) is False
+    assert nr.check(call("sometool init -g"), config)
+
+
+def test_a_git_that_cannot_be_run_lets_the_command_through(config, home, monkeypatch):
+    """The other half of the same sentence. A hook that cannot ask has nothing to say, and a hook that
+    cannot run must never stop work."""
+    def no_git(*args, **kwargs):
+        raise OSError("git is not installed here")
+    monkeypatch.setattr(nr.subprocess, "run", no_git)
+    assert nr.restorable(str(home / ".config" / "sometool" / "NOTES.md")) is True
+    assert nr.check(call("sometool init -g"), config) is None
+
+
 def test_a_missing_file_is_not_at_risk(config, home):
     (home / ".config" / "sometool" / "NOTES.md").unlink()
     assert nr.check(call("sometool init -g"), config) is None
