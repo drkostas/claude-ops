@@ -274,3 +274,122 @@ def test_an_action_that_does_not_touch_the_repo_is_not_flagged():
 
 def test_the_job_guard_clears_a_stale_action():
     assert fork_guard.unguarded(yaml.safe_load(STALE_GUARDED)) == []
+
+
+# --hosted-only: a job whose runner the workflow file does not fix as one GitHub hosts.
+# The shape that asked for this check reads a repository variable, so the file says ubuntu-latest
+# while a variable set once sends every job somewhere else.
+VARIABLE_RUNNER = """
+name: Check
+on: pull_request
+jobs:
+  check:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - run: echo hello
+"""
+
+MATRIX_RUNNER = """
+name: Test
+on: pull_request
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - run: echo hello
+"""
+
+MATRIX_WITH_A_MACHINE_OF_ITS_OWN = """
+name: Test
+on: pull_request
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, my-own-runner]
+    steps:
+      - run: echo hello
+"""
+
+LABELS_RUNNER = """
+name: Test
+on: pull_request
+jobs:
+  test:
+    runs-on: [self-hosted, macos]
+    steps:
+      - run: echo hello
+"""
+
+CALLS_ANOTHER_WORKFLOW = """
+name: Release
+on: pull_request
+jobs:
+  release:
+    uses: ./.github/workflows/publish.yml
+"""
+
+
+def test_a_variable_runner_is_not_a_fixed_hosted_one():
+    doc = yaml.safe_load(VARIABLE_RUNNER)
+    assert [r["job"] for r in fork_guard.not_hosted(doc)] == ["check"]
+    assert "vars.RUNS_ON" in fork_guard.not_hosted(doc)[0]["runs_on"]
+
+
+def test_a_plain_hosted_label_passes():
+    for label in ("ubuntu-latest", "ubuntu-24.04", "macos-14", "windows-2022"):
+        doc = yaml.safe_load(VARIABLE_RUNNER.replace("${{ vars.RUNS_ON || 'ubuntu-latest' }}", label))
+        assert fork_guard.not_hosted(doc) == [], label
+
+
+def test_a_runner_of_its_own_is_flagged_by_its_label_too():
+    doc = yaml.safe_load(VARIABLE_RUNNER.replace("${{ vars.RUNS_ON || 'ubuntu-latest' }}", "self-hosted"))
+    assert [r["job"] for r in fork_guard.not_hosted(doc)] == ["check"]
+    doc = yaml.safe_load(VARIABLE_RUNNER.replace("${{ vars.RUNS_ON || 'ubuntu-latest' }}", "a-machine-label"))
+    assert [r["job"] for r in fork_guard.not_hosted(doc)] == ["check"]
+
+
+def test_a_matrix_of_hosted_labels_passes_and_one_with_another_machine_does_not():
+    assert fork_guard.not_hosted(yaml.safe_load(MATRIX_RUNNER)) == []
+    hits = fork_guard.not_hosted(yaml.safe_load(MATRIX_WITH_A_MACHINE_OF_ITS_OWN))
+    assert [r["job"] for r in hits] == ["test"]
+
+
+def test_a_matrix_the_file_does_not_fix_is_flagged():
+    doc = yaml.safe_load(MATRIX_RUNNER.replace("        os: [ubuntu-latest, macos-14]",
+                                               "        include:\n          - os: ubuntu-latest"))
+    assert [r["job"] for r in fork_guard.not_hosted(doc)] == ["test"]
+
+
+def test_a_list_of_labels_is_a_set_of_its_own_machines():
+    hits = fork_guard.not_hosted(yaml.safe_load(LABELS_RUNNER))
+    assert [r["job"] for r in hits] == ["test"]
+    assert "self-hosted" in hits[0]["runs_on"]
+
+
+def test_a_job_that_calls_another_workflow_has_no_runner_to_check():
+    assert fork_guard.not_hosted(yaml.safe_load(CALLS_ANOTHER_WORKFLOW)) == []
+
+
+def test_the_runner_check_only_runs_when_it_is_asked_for(tmp_path):
+    write(tmp_path, "check.yml", VARIABLE_RUNNER)
+    assert fork_guard.scan(tmp_path)["runners"] == []
+    assert [r["job"] for r in fork_guard.scan(tmp_path, hosted_only=True)["runners"]] == ["check"]
+    assert fork_guard.scan(tmp_path, hosted_only=True)["hits"] == []
+
+
+def test_main_hosted_only_exits_one_and_says_what_it_found(tmp_path, capsys):
+    write(tmp_path, "check.yml", VARIABLE_RUNNER)
+    assert fork_guard.main([str(tmp_path)]) == 0
+    assert "no unguarded" in capsys.readouterr().out
+    assert fork_guard.main([str(tmp_path), "--hosted-only"]) == 1
+    said = capsys.readouterr().out
+    assert "check.yml::check" in said and "vars.RUNS_ON" in said and "machine of its own" in said
+    clean = tmp_path / "clean"
+    write(clean, "test.yml", MATRIX_RUNNER)
+    assert fork_guard.main([str(clean), "--hosted-only"]) == 0
+    assert "every job runs on a hosted runner" in capsys.readouterr().out
