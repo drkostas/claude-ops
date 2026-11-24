@@ -18,6 +18,16 @@ What it changes, and what it leaves alone:
   `cd` after the first run as written. A plain grep's relative path is read against that folder.
 - A first line that already runs rtk (`rtk ...`, or a path ending in `/rtk `) is left alone, and so is
   any command with a here-document (`<<`), whose body is data the rules must not read.
+- A first line whose own output is consumed on that line is left alone: a pipe into another program
+  (`cmd | wc -l`) or a redirection of stdout to a file (`cmd > out`). The proxy's value is a shorter
+  output for the session to read, and in both of those the reader is a program or a file instead, so
+  the rewrite saves nothing and changes the bytes that program or file receives. It is measurable and
+  silent: `git diff A B | grep "^+" | grep -v "^+++" | wc -l` answered 135 added lines through the
+  proxy where the diff has 182, with no error and nothing in the output saying it had been rewritten,
+  and that shape is how a session checks a rebase, counts failures or compares two diffs. `||` is not
+  a pipe, a `|` or `>` inside quotes is not a redirection, and `2>` moves only stderr, so those are
+  still rewritten. Anything else that reads like a consumer counts as one, because a rewrite skipped
+  for no reason costs a few tokens while one taken here costs a wrong number.
 - `grep` and `rg` are rewritten only in the plain `grep PATTERN [PATH]` form: no word of the first
   simple command may start with `-`. `rtk grep` takes `PATTERN [PATH] [EXTRA_ARGS]` and has its own
   `-c -l -m -t -v -u -h` with other meanings, and rejects most of the others, so a flagged grep goes
@@ -118,6 +128,50 @@ def has_option(line: str) -> bool:
     return any(len(w) > 1 and w[0] == "-" for w in _first_command(line))
 
 
+def output_goes_elsewhere(line: str) -> bool:
+    """The line hands this command's own output to a program or a file instead of the session.
+
+    True for a pipe into another program (`cmd | wc -l`, `cmd |& less`) and for a redirection of
+    stdout (`cmd > out`, `cmd >> out`, `cmd 1> out`, `cmd &> out`). False for `||`, which is an
+    or-list, for a `|` or `>` inside quotes or escaped, and for `2>` and the other stream numbers,
+    which move stderr and leave the output where it was. A redirection it cannot read as another
+    stream's counts as this command's, so `x2>f` (a word, then stdout to a file) counts.
+    """
+    quote = ""
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == quote:
+                quote = ""
+            elif c == "\\" and quote == '"':
+                i += 1
+        elif c in "\"'":
+            quote = c
+        elif c == "\\":
+            i += 1
+        elif c == "|":
+            if line[i + 1:i + 2] == "|":
+                i += 1                              # an or-list, not a pipe
+            else:
+                return True
+        elif c == ">" and _stream_before(line, i) in ("", "1"):
+            return True
+        i += 1
+    return False
+
+
+def _stream_before(line: str, at: int) -> str:
+    """The stream number written as its own word before the `>` at `at` ("2" in `cmd 2>f`), or "" when
+    none is, which is stdout."""
+    start = at
+    while start and line[start - 1].isdigit():
+        start -= 1
+    if start == at or (start and line[start - 1] not in " \t"):
+        return ""
+    return line[start:at]
+
+
 def takes_message_file(line: str) -> bool:
     """`git commit` here is given its message in a file (-F, -aF, -Ffile, --file, --file=...)."""
     return any(w.startswith("--file") or re.match(r"-[A-Za-z]*F", w) for w in _first_command(line)[2:])
@@ -169,6 +223,8 @@ def _rewrite(command: str, cwd: str, major: Callable[[], int | None]) -> str | N
     """rewrite() for a command with no leading cd."""
     first = command.split("\n", 1)[0]
     if not command or first.startswith("rtk ") or "/rtk " in first or "<<" in command:
+        return None
+    if output_goes_elsewhere(first):
         return None
     for match, pattern, replacement in _RULES:
         if not match.search(first):

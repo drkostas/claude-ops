@@ -3,6 +3,11 @@
 The cases are the ones a shell version of this hook was tested with, so the two give the same
 rewrites, plus the message-file commit, which goes to git itself here, and a leading `cd <folder> &&`,
 which the shell version never looked past.
+
+Two of those inherited cases changed when the pipe rule landed: a command whose output is consumed on
+its own line is now left alone, so `grep foo file | grep -v bar` runs as written. The shorter output
+never reached the session in that shape, and the program at the end of the pipe was reading the
+proxy's summary instead of the command's own bytes.
 """
 import io
 import json
@@ -19,9 +24,8 @@ def rewrite(command, cwd="", major=1):
 @pytest.mark.parametrize("command,want", [
     # plain grep / rg: rewritten
     ("grep foo file", "rtk grep foo file"),
-    ("grep foo file | grep -v bar", "rtk grep foo file | grep -v bar"),
     ("rg foo src", "rtk grep foo src"),
-    ("grep foo file 2>/dev/null | head", "rtk grep foo file 2>/dev/null | head"),
+    ("grep foo file 2>/dev/null", "rtk grep foo file 2>/dev/null"),
     # gh: reads go through rtk
     ("gh pr list", "rtk gh pr list"),
     ("gh pr view 12", "rtk gh pr view 12"),
@@ -104,6 +108,24 @@ def test_rewritten(command, want, tmp_path, monkeypatch):
     "/usr/local/bin/rtk git status",
     "echo hi",
     "git -C repo status",
+    # the output is consumed on the same line, by a program or by a file
+    "git diff a b | wc -l",
+    "git log | grep x",
+    "cat f | head",
+    "grep foo file | grep -v bar",
+    "grep foo file 2>/dev/null | head",
+    "git log 2>&1 | head",
+    "ls |& less",
+    "git diff > /tmp/out",
+    "git diff >> /tmp/out",
+    "git status 1> out",
+    "ls &> out",
+    "git diff >| out",
+    "git diff > /dev/null",
+    "cat f > g",
+    "grep foo x2>f",
+    "cd /tmp && git diff | wc -l",
+    "cd /tmp && git status > out",
     # a here-document anywhere
     "grep -n foo <<EOF",
     "echo a\ncat <<EOF\nx\nEOF",
@@ -147,7 +169,7 @@ def test_a_plain_grep_on_a_folder_gets_r_from_rtk_1(tmp_path):
     folder.mkdir()
     (tmp_path / "plain.txt").write_text("x")
     assert rewrite(f"grep foo {folder}") == f"rtk grep -r foo {folder}"
-    assert rewrite(f"grep foo {folder} | head") == f"rtk grep -r foo {folder} | head"
+    assert rewrite(f"grep foo {folder} | head") is None       # the pipe rule comes first
     assert rewrite(f"grep foo '{folder}'") == f"rtk grep -r foo '{folder}'"
     assert rewrite(f"grep foo {folder}/missing") == f"rtk grep foo {folder}/missing"
     assert rewrite(f"grep foo {tmp_path}/plain.txt") == f"rtk grep foo {tmp_path}/plain.txt"
@@ -156,8 +178,9 @@ def test_a_plain_grep_on_a_folder_gets_r_from_rtk_1(tmp_path):
     # rtk 0.x searched a folder by itself and rejects -r
     assert rewrite(f"grep foo {folder}", major=0) == f"rtk grep foo {folder}"
     assert rewrite(f"grep foo {folder}", major=None) == f"rtk grep foo {folder}"
-    # a redirection in the path's place is not a path
-    assert rewrite(f"grep foo >{folder}") == f"rtk grep foo >{folder}"
+    # a redirection in the path's place is not a path, and the whole line is left alone for it
+    assert hook.path_is_folder(f"grep foo >{folder}", "") is False
+    assert rewrite(f"grep foo >{folder}") is None
 
 
 def test_a_grep_after_cd_reads_its_path_against_that_folder(tmp_path, monkeypatch):
@@ -189,6 +212,44 @@ def test_rtk_major_reads_the_version_line(tmp_path):
     fake.write_text("#!/bin/sh\necho 'something else'\n")
     assert hook.rtk_major(str(fake)) is None
     assert hook.rtk_major(str(tmp_path / "missing")) is None
+
+
+@pytest.mark.parametrize("line,consumed", [
+    ("git diff a b | wc -l", True),
+    ("ls | head", True),
+    ("ls |& less", True),                       # a pipe that takes stderr too is still a pipe
+    ("git diff > out", True),
+    ("git diff >> out", True),
+    ("git diff 1> out", True),
+    ("git diff &> out", True),
+    ("git diff >| out", True),                  # a clobbering redirection
+    ("grep foo x2>f", True),                    # a word ending in a digit, then stdout to a file
+    ("git status", False),
+    ("cd /tmp || git status", False),           # an or-list is not a pipe
+    ("test -f a || test -f b || ls", False),
+    ('grep "a|b" f', False),                    # a pipe inside quotes is an argument
+    ("grep 'a|b' f", False),
+    ('grep "a>b" f', False),
+    ("grep a\\|b f", False),                     # and an escaped one is too
+    ("git log 2>/dev/null", False),             # only stderr moves
+    ("git log 3>/dev/null", False),
+    ("git log < in", False),                    # input says nothing about the output
+    ("", False),
+])
+def test_output_goes_elsewhere(line, consumed):
+    assert hook.output_goes_elsewhere(line) is consumed
+
+
+@pytest.mark.parametrize("line,number", [
+    ("ls 2> f", "2"),
+    ("ls 12> f", "12"),
+    ("ls > f", ""),
+    ("ls 1> f", "1"),
+    ("ls x2> f", ""),       # the digit is part of a word, so the redirection is this command's own
+    ("ls &> f", ""),
+])
+def test_a_stream_number_is_read_as_its_own_word(line, number):
+    assert hook._stream_before(line, line.index(">")) == number
 
 
 @pytest.fixture
