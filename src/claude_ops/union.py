@@ -32,6 +32,16 @@ without a person, and a real conflict still stops it:
 - anything else, a block that changes a line both sides had, exits 1 so the caller aborts the
   rebase and a person resolves it.
 
+It also reads a branch before any rebase, for the one doubling a union cannot be stopped from making:
+
+    claude-ops union <worktree> --replay-risk FILE [--base REF]    # exit 1 when a rebase can double a line
+
+A union keeps both sides of a block, so when a later commit of a branch rewrites or removes a line one
+of its own earlier commits added, the replay keeps both versions and the branch arrives with that line
+twice. A merge of the two heads is clean, because a merge compares end states and replays nothing, so
+no check made on the heads can see this. Squashing the file's commits answers it, since one commit
+cannot hold two versions of a line.
+
 It needs three-way markers (`git -c merge.conflictStyle=diff3 rebase`): without the base section a
 block cannot be told apart from one that changed existing lines, so such a block is refused.
 
@@ -59,6 +69,8 @@ BLOCK = re.compile(r"^<<<<<<< [^\n]*\n(.*?)(?:^\|\|\|\|\|\|\|[^\n]*\n(.*?))?^===
 #: a line a conflict leaves behind. `=======` alone is left out: markdown underlines a heading with
 #: it. The base marker counts too: a hand resolution that deleted only the other three leaves it.
 MARKER_LINE = re.compile(r"^(<<<<<<< |\|\|\|\|\|\|\| |>>>>>>> )", re.M)
+#: One commit per record in a `git log` read, so a subject that holds a newline cannot split a row.
+RECORD = "\x1e"
 
 
 class Refused(Exception):
@@ -233,6 +245,88 @@ def conflicted(wt: Path, env=None) -> list[str]:
                           capture_output=True, text=True, check=True, env=env).stdout.split()
 
 
+#: ⭐ WHAT A UNION KEEPS THAT NO MERGE SHOWS. A merge compares the two end states, so it cannot see a
+#: line a branch rewrote between two of its own commits. A rebase replays those commits one after
+#: another, and in a file that unions, the earlier commit's version of the line and the later one's
+#: are both kept, so the branch arrives with the line twice. `git merge-tree` of the same two heads is
+#: clean, and the branch's own end-to-end diff can read as a pure addition, so a check on either is
+#: blind to this whole class.
+
+
+def commits_touching(wt: Path, base: str, path: str, head: str = "HEAD", env=None) -> list[dict]:
+    """The commits of `base..head` that change `path`, oldest first. Each row holds its `sha`, its
+    `subject`, and the `added` and `removed` lines of that file, without the leading + or -. Merge
+    commits are left out, because a rebase replays the commits under them, and for the same reason
+    the read asks for the full history: git would otherwise leave out a commit whose change a merge
+    did not keep, which a rebase replays all the same."""
+    r = subprocess.run(["git", "-C", str(wt), "log", "--reverse", "--no-merges", "--full-history",
+                        "-p", "--unified=0", f"--format={RECORD}%H%x1f%s", f"{base}..{head}",
+                        "--", path],
+                       capture_output=True, text=True, env=env)
+    rows: list[dict] = []
+    for chunk in r.stdout.split(RECORD):
+        head_line, _, body = chunk.partition("\n")
+        sha, _, subject = head_line.partition("\x1f")
+        if not sha.strip():
+            continue
+        added, removed = [], []
+        for line in body.splitlines():
+            if line[:3] in ("+++", "---"):
+                continue
+            if line.startswith("+"):
+                added.append(line[1:])
+            elif line.startswith("-"):
+                removed.append(line[1:])
+        rows.append({"sha": sha.strip(), "subject": subject, "added": added, "removed": removed})
+    return rows
+
+
+def replay_doubles(wt: Path, base: str, path: str, head: str = "HEAD", env=None) -> list[dict]:
+    """Every line of `path` that a rebase of `base..head` can leave twice, as rows of `line`,
+    `added_by`, `removed_by` and `subject`. A line is in it when one commit of the range removes
+    what an earlier commit of the same range added, which is also the shape of a rewritten line.
+    A branch whose commits only add lines to the file cannot double one of them, and a line that
+    came with the base is a different question, which a three-way read of the two heads answers.
+    Blank lines are left out."""
+    added_by: dict[str, str] = {}
+    out: list[dict] = []
+    for c in commits_touching(wt, base, path, head, env):
+        for line in c["removed"]:
+            if line.strip() and line in added_by and added_by[line] != c["sha"]:
+                out.append({"line": line, "added_by": added_by[line], "removed_by": c["sha"],
+                            "subject": c["subject"]})
+        for line in c["added"]:
+            added_by.setdefault(line, c["sha"])
+    return out
+
+
+def report_replay_risk(wt: Path, base: str, path: str, head: str = "HEAD", env=None) -> int:
+    """Print what `base..head` does to `path` and whether a rebase can double a line of it. 1 when
+    it can, 0 when it cannot."""
+    rows = commits_touching(wt, base, path, head, env)
+    where = f"{base}..{head}"
+    if not rows:
+        print(f"{path}: no commit of {where} changes it")
+        return 0
+    print(f"{path}: {len(rows)} commit(s) of {where} change it")
+    for r in rows:
+        print(f"  {r['sha'][:9]} +{len(r['added'])} -{len(r['removed'])} {r['subject']}")
+    doubles = replay_doubles(wt, base, path, head, env)
+    for d in doubles:
+        print(f"a rebase can leave a line of {path} twice. {d['removed_by'][:9]} removes a line "
+              f"{d['added_by'][:9]} added, and a union keeps both versions")
+        print(f"  the line: {d['line'][:120]}")
+    if doubles:
+        print(f"squash this branch's commits on {path} into one, so its final text arrives once. "
+              f"A later commit that only removes the extra line is undone by the same union and "
+              f"comes out of the rebase empty")
+        return 1
+    if len(rows) > 1:
+        print("each of them only adds lines, so none of these can double one. Squashing them all "
+              "the same is the cheaper rule, because one commit cannot hold two versions of a line")
+    return 0
+
+
 def top_folder(path: Path, env=None) -> Path | None:
     """The top folder of the git worktree that holds `path` (a folder, or a file's folder), or None
     when no worktree holds it."""
@@ -301,7 +395,8 @@ def settle_tree(wt: Path, *, ordered: tuple = (), journals: tuple = (), sets: tu
     return 1 if refused else 0
 
 
-USAGE = "claude-ops union [<worktree> | <conflicted file>] [--ordered FILE] [--journal FILE] [--set FILE]"
+USAGE = ("claude-ops union [<worktree> | <conflicted file>] [--ordered FILE] [--journal FILE] [--set FILE]\n"
+         "       claude-ops union [<worktree>] --replay-risk FILE [--base REF] [--head REF]")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -317,12 +412,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="an append-only file (repeatable)")
     ap.add_argument("--set", action="append", default=[], metavar="FILE", dest="sets",
                     help="a ledger whose entry lines are an unordered set (repeatable)")
+    ap.add_argument("--replay-risk", metavar="FILE",
+                    help="read the branch instead of settling anything, and exit 1 when a rebase can "
+                         "leave a line of FILE twice")
+    ap.add_argument("--base", default="origin/main", metavar="REF",
+                    help="the branch's base, for --replay-risk (default origin/main)")
+    ap.add_argument("--head", default="HEAD", metavar="REF",
+                    help="the branch's head, for --replay-risk (default HEAD), so a branch can be "
+                         "read without checking it out")
     a = ap.parse_args(argv)
     path: Path = a.worktree
     top = top_folder(path) if path.exists() else None
     if top is None:
         print(f"claude-ops union: {path} is not in a git worktree. Usage: {USAGE}", file=sys.stderr)
         return 2
+    if a.replay_risk:
+        return report_replay_risk(top, a.base, a.replay_risk, a.head)
     only = None
     if not path.is_dir():
         only = path.resolve().relative_to(top).as_posix()
