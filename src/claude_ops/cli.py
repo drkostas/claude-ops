@@ -339,6 +339,11 @@ def cmd_mcp_containers(a) -> int:
     return mcp_containers.main(argv)
 
 
+def cmd_container_recreate(a) -> int:
+    from . import container_recreate
+    return container_recreate.main([a.name, "--wait", str(a.wait)] + (["--json"] if a.json else []))
+
+
 def cmd_stall(a) -> int:
     from . import watch
     r = watch.stall(Path(a.path), minutes=a.minutes, max_hours=a.max_hours,
@@ -505,6 +510,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="leave a container younger than this alone (default 120)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_mcp_containers)
+
+    s = sub.add_parser("container-recreate",
+                       help="create a container again from a fresh pull of its image, keeping its settings and data")
+    s.add_argument("name")
+    s.add_argument("--wait", type=float, default=90.0, help="seconds the new container gets to answer (default 90)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_container_recreate)
 
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
