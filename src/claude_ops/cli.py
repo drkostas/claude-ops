@@ -170,6 +170,9 @@ def cmd_hook(a) -> int:
     if a.name == "kept-out":
         from .hooks import kept_out
         return kept_out.main([])
+    if a.name == "no-restore":
+        from .hooks import no_restore
+        return no_restore.main([])
     if a.name == "stale-status":
         from .hooks import stale_status
         return stale_status.main([])
@@ -521,7 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("hook", help="run a Claude Code hook (reads the event on stdin)")
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
-                                    "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "mail-guard", "wide-kill",
+                                    "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "no-restore", "mail-guard", "wide-kill",
                                     "clock-ahead", "stale-status",
                                     "rtk-rewrite", "chain"))
     s.set_defaults(func=cmd_hook)
