@@ -252,3 +252,72 @@ def test_a_command_the_user_gave_follows_the_reference():
     c["Config"]["Cmd"] = ["serve", "--port", "3000"]
     p = cr.plan(c, _image())
     assert p["args"][-4:] == [REF, "serve", "--port", "3000"]
+
+
+def _stopped():
+    c = _container()
+    c["State"] = {"Running": False, "Status": "exited", "ExitCode": 0}
+    return c
+
+
+def test_a_stopped_container_is_made_again_stopped():
+    d = Docker(_stopped())
+    out = _recreate(d)
+    assert out["outcome"] == "recreated", out
+    assert d.containers["web"]["Image"] == NEW and d.containers["web"]["State"]["Running"] is False
+    assert d.calls.index("rm web-old") < d.calls.index("stop web", d.calls.index("rm web-old"))
+    assert "stopped again, as it was" in out["said"]
+
+
+def test_a_stopped_container_that_fails_its_check_comes_back_stopped():
+    d = Docker(_stopped())
+    out = _recreate(d, connect=lambda h, p: False)
+    assert out["outcome"] == "restored", out
+    assert d.containers["web"]["Image"] == OLD and d.containers["web"]["State"]["Running"] is False
+    assert "start web" not in d.calls and "stopped as it was" in out["said"]
+
+
+def _listener(on_accept):
+    """A local server on a free port that hands each connection to `on_accept`, and its port."""
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+
+    def serve():
+        conn, _ = srv.accept()
+        on_accept(conn)
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, srv.getsockname()[1]
+
+
+def test_a_connection_closed_at_once_is_not_an_answer():
+    # what Docker Desktop's port forwarder does on a published port when nothing in the container listens
+    srv, port = _listener(lambda conn: conn.close())
+    try:
+        assert cr._connects("127.0.0.1", port, read_s=2.0) is False
+    finally:
+        srv.close()
+
+
+def test_a_connection_held_open_or_greeted_is_an_answer():
+    import threading
+    hold = threading.Event()
+    for on_accept in (lambda conn: hold.wait(5), lambda conn: conn.sendall(b"220 ready\r\n") or hold.wait(5)):
+        srv, port = _listener(on_accept)
+        try:
+            assert cr._connects("127.0.0.1", port, read_s=0.3) is True
+        finally:
+            hold.set()
+            srv.close()
+        hold.clear()
+
+
+def test_a_port_nothing_listens_on_is_not_an_answer():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    assert cr._connects("127.0.0.1", port) is False

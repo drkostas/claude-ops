@@ -20,9 +20,12 @@ This reads how the running container was made and makes the new one the same way
    log settings, tmpfs mounts, `--rm`, `-i` and `-t`, and every mount: a named or anonymous volume by
    its name, a bind mount by its path.
 5. Check that it answers: its health check when the image has one, else a TCP connection to its first
-   published port, else that it is still running after a few seconds.
+   published port that stays open or brings data (Docker Desktop's forwarder accepts a connection on a
+   published port and closes it when nothing inside listens, so a connect alone proves nothing), else
+   that it is still running after a few seconds.
 6. Remove the old container (its volumes stay, since `docker rm` without `-v` keeps them). If the new
    one did not start or did not answer, remove it and start the old one again under its own name.
+   A container that was stopped ends stopped either way: the new one runs only for its check.
 
     from claude_ops import container_recreate
     out = container_recreate.recreate("web")
@@ -213,10 +216,24 @@ def plan(container: dict, image: dict) -> dict:
             "check": check, "port": ports[0] if ports else None, "refused": refused}
 
 
-def _connects(host: str, port: int, timeout: float = 2.0) -> bool:
+#: how long a connection must stay open, with nothing read, to count as a program listening
+READ_S = 0.5
+
+
+def _connects(host: str, port: int, timeout: float = 2.0, read_s: float = READ_S) -> bool:
+    """Whether a program in the container takes a connection on host:port. A connect alone proves only
+    that something on the host accepted it: Docker Desktop's port forwarder accepts on a published port
+    whenever the container runs, and closes the connection at once when nothing inside listens. So the
+    connection must also stay open for `read_s` (a server that waits for the client to speak) or bring
+    data (one that speaks first). A close or a reset before then is nothing answering. This cannot
+    tell the container's own program from another one listening on the same port: a health check can."""
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(read_s)
+            try:
+                return s.recv(1) != b""
+            except socket.timeout:
+                return True
     except OSError:
         return False
 
@@ -271,6 +288,8 @@ def recreate(name: str, *, run: Runner = subprocess.run, env: Mapping[str, str] 
     if not p["reference"]:
         return out("refused", "nothing was touched, because the container names no image reference")
     old = f"{name}-old"
+    #: a stopped container is made again stopped: the new one runs only for its check
+    was_running = bool((container.get("State") or {}).get("Running"))
     if _inspect(["inspect", old], run, env) is not None:
         return out("refused", f"nothing was touched, because a container called {old} is in the way")
 
@@ -290,6 +309,9 @@ def recreate(name: str, *, run: Runner = subprocess.run, env: Mapping[str, str] 
         code, _o, err = _docker(args, run, env)
         steps.append(f"{' '.join(args)}: exit {code}")
         if code != 0:
+            if not was_running:
+                return out("failed", f"docker {args[0]} failed ({err[-200:] or code}), and {name} was left stopped, "
+                                     "as it was")
             _docker(["start", name], run, env)
             return out("failed", f"docker {args[0]} failed ({err[-200:] or code}), and {name} was started again")
 
@@ -302,14 +324,20 @@ def recreate(name: str, *, run: Runner = subprocess.run, env: Mapping[str, str] 
         code, _o, err = _docker(["rm", old], run, env)
         steps.append(f"rm {old}: exit {code}")
         kept = "" if code == 0 else f", but docker did not remove {old} ({err[-200:] or code})"
+        if not was_running:
+            code, _o, err = _docker(["stop", name], run, env)
+            steps.append(f"stop {name}: exit {code}")
+            kept += ", and it was stopped again, as it was" if code == 0 else \
+                f", but docker did not stop it again as it was ({err[-200:] or code})"
         return out("recreated", f"{name} runs {new_id[:19]} from {p['reference']} and {why}{kept}",
                    image=new_id, previous=p["image_id"], args=p["args"])
 
     _docker(["rm", "-f", name], run, env)
-    back = [_docker(["rename", old, name], run, env)[0], _docker(["start", name], run, env)[0]]
-    steps.append(f"put back: rename exit {back[0]}, start exit {back[1]}")
+    back = [_docker(["rename", old, name], run, env)[0], _docker(["start", name], run, env)[0] if was_running else 0]
+    steps.append(f"put back: rename exit {back[0]}, " + (f"start exit {back[1]}" if was_running else "left stopped, as it was"))
     if back == [0, 0]:
-        return out("restored", f"the new {name} did not answer ({why}), so it was removed and the old one runs again",
+        again = "the old one runs again" if was_running else "the old one is back, stopped as it was"
+        return out("restored", f"the new {name} did not answer ({why}), so it was removed and {again}",
                    args=p["args"])
     return out("broken", f"the new {name} did not answer ({why}), and putting the old one back failed "
                          f"(rename exit {back[0]}, start exit {back[1]}); it is stopped as {old} or {name}",
