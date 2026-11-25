@@ -60,6 +60,16 @@ REFUSED_STREAM = "REFUSED_STREAM"
 #: some of them twice (a new issue) cannot be undone.
 UNAVAILABLE = re.compile(r"\bHTTP 50[234]\b")
 UNAVAILABLE_WRITE = re.compile(r"\bHTTP 503\b")
+#: ⭐ A READ WHOSE REQUEST NEVER COMPLETED, which has no status code to match on. The retry above
+#: reads HTTP statuses, and the failures that actually arrive are mostly below HTTP: the network
+#: timing out on the connection, the read or the TLS handshake, a body `gh` could not parse at all,
+#: and GitHub's own internal error, which carries a reference to quote when reporting it. Measured
+#: over one log of a sync that runs every five minutes: of 21 failures of one call site, 12 were
+#: these and not one was sent again, so each ended that whole pass, while the 8 with a gateway
+#: status were retried and 1 was a credential the retry rightly leaves alone.
+DROPPED_READ = re.compile(r"i/o timeout|operation timed out|TLS handshake timeout"
+                          r"|unexpected end of JSON input"
+                          r"|Something went wrong while executing your query")
 #: how many times a refused or unserved request is sent in all, and the seconds waited before each new
 #: try, times its number
 REFUSED_TRIES = 3
@@ -68,8 +78,16 @@ REFUSED_WAIT = 2.0
 
 def _try_again(stderr: str, write: bool) -> bool:
     """Whether a failed request may be sent again: one GitHub refused or no server took, and a read
-    GitHub's own servers failed to answer."""
-    return REFUSED_STREAM in stderr or bool((UNAVAILABLE_WRITE if write else UNAVAILABLE).search(stderr))
+    GitHub's own servers failed to answer or the network never carried.
+
+    ⛔ A WRITE KEEPS THE NARROW RULE. A timeout says nothing about whether the mutation reached
+    GitHub, and a second createIssue is a second issue, so only "no server took it" (503) and a
+    refused stream are sent again. A read can always be asked twice."""
+    if REFUSED_STREAM in stderr:
+        return True
+    if write:
+        return bool(UNAVAILABLE_WRITE.search(stderr))
+    return bool(UNAVAILABLE.search(stderr)) or bool(DROPPED_READ.search(stderr))
 
 
 class BoardError(RuntimeError):

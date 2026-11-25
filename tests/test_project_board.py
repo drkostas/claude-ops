@@ -391,6 +391,49 @@ def test_a_write_no_server_took_is_sent_again():
     assert len(calls) == 2
 
 
+#: ⭐ THE FAILURES THAT ACTUALLY ARRIVE, as gh and GitHub write them. Taken from one log of a sync
+#: that runs every five minutes, where 12 of 21 failures of one call site were these and none was
+#: sent again, so each ended that whole pass. The addresses are example ones.
+DROPPED = [
+    'Post "https://api.github.com/graphql": dial tcp 198.51.100.7:443: i/o timeout',
+    'Post "https://api.github.com/graphql": dial tcp 198.51.100.7:443: connect: operation timed out',
+    'Post "https://api.github.com/graphql": read tcp 192.0.2.5:53384->198.51.100.7:443: read: '
+    'operation timed out',
+    'Post "https://api.github.com/graphql": net/http: TLS handshake timeout',
+    "unexpected end of JSON input",
+    "Something went wrong while executing your query on 2026-11-24T23:02:00Z. Please include "
+    "`AAAA:BBBB:CCCC:DDDD:EEEEEEEE` when reporting this issue.",
+]
+
+
+@pytest.mark.parametrize("error", DROPPED)
+def test_a_read_the_network_dropped_is_sent_again(error):
+    # none of these carries an HTTP status, which is all the retry used to read
+    gh = FakeGitHub()
+    flaky, calls = failing(error, then=gh)
+    assert board(flaky, sleep=lambda s: None).ensure()["number"]
+    assert calls[0] == calls[1], "the same request is sent again, and the pass goes on"
+
+
+@pytest.mark.parametrize("error", DROPPED)
+def test_a_write_the_network_dropped_is_not_sent_again(error):
+    # a timeout says nothing about whether the mutation reached GitHub, and a second createIssue is
+    # a second issue
+    gh, calls = failing(error)
+    with pytest.raises(BoardError):
+        board(gh, sleep=lambda s: None).graphql("mutation { x }", write=True)
+    assert len(calls) == 1
+
+
+def test_a_credential_is_still_never_sent_again():
+    # the one failure of that log the retry rightly leaves alone, since asking twice with the same
+    # token answers the same way
+    gh, calls = failing("gh: Bad credentials (HTTP 401)")
+    with pytest.raises(BoardError, match="Bad credentials"):
+        board(gh, sleep=lambda s: None).ensure()
+    assert len(calls) == 1
+
+
 def test_any_other_failure_is_not_sent_again():
     gh, calls = failing("HTTP 401: Bad credentials", "HTTP 500: x")
     with pytest.raises(BoardError, match="401"):
