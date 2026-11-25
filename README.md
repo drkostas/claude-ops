@@ -63,6 +63,18 @@ url_check.problem("http://example.org/")      # "takes only https addresses, ...
 
 Only https addresses are taken, and redirects are followed only to https, five at most. An address with a user name or password in it, or with no host, is refused by `problem` before anything is sent, and `ok` raises `NotHttps` for it. The request sends no cookies and no credentials. Any other answer is `(False, why)`, with the status or the error named ("404 from example.org", "timed out after 10 s").
 
+
+## Check a token without holding it
+
+After a new access token is made, the question is whether the new one works and the old one no longer does. `bearer_check.status(url, value, header=None)` asks one https address once with the value in an Authorization header and returns the status and, when one is named, that one response header. The value is in no field of the answer, a redirect is returned as a status and never followed, and a value that could carry a second header is refused.
+
+```python
+from claude_ops import bearer_check
+a = bearer_check.status("https://api.github.com/user", token, header="X-OAuth-Scopes")
+a.status    # 200, 401 or None when nothing answered
+a.header    # "repo, read:org" or None
+```
+
 ## What a deploy brought
 
 `claude-ops changelog <old> <new>` lists the pull requests merged between two commits, oldest first, so a deploy can say what arrived instead of two hashes. It reads the first-parent history, so the commits inside each pull request are left out.
