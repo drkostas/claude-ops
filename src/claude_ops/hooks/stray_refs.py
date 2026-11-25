@@ -18,9 +18,18 @@ nor `git remote prune`, in any repository, for ever. In the repository this was 
 refs had gathered that way, 2,245 of them from one wildcard fetch, and the merged listing of them
 took 2.09 s against 0.084 s for the remote's own refs alone.
 
-So this hook refuses a fetch whose refspec names a destination under `refs/remotes/`, which only a
-remote's own refspec should write, or under any namespace with no tool that lists it, and the
-refusal says which of the two it would be. A destination under `refs/heads/`, `refs/tags/`,
+⛔ AND THE DISCRIMINATOR IS NOT WHERE THE REF LANDS, IT IS WHETHER A CONFIGURED REFSPEC COVERS IT,
+source as well as destination. `git fetch origin +refs/heads/master:refs/remotes/origin/master` is a
+documented idiom, the remote's own default refspec spelled out for one branch, and the ref it writes
+is refreshed by every later plain fetch and protected by a prune. `+refs/pull/7/head:refs/remotes/origin/pr-7`
+lands in the same namespace and is covered by nothing, so that ref is never refreshed and only looks
+at home. Both are prunable, so prunability cannot tell them apart. This hook reads the repository's
+own `remote.<name>.fetch` patterns and refuses only a refspec none of them maps, which is why the
+answer it gives is about the repository in front of it rather than about the shape of a ref.
+
+So this hook refuses a fetch whose refspec no configured refspec covers and whose destination is
+under `refs/remotes/`, which only a remote's own refspec should write, or under any namespace with no
+tool that lists it, and the refusal says which of the two it would be. A destination under `refs/heads/`, `refs/tags/`,
 `refs/notes/` or `refs/replace/` goes through, because each of those has a command that shows it and
 a person who can remove it, and so does a plain local branch name. A fetch with no destination goes
 through, which is almost every fetch. The refusal names both ways through, since a refusal with no
@@ -88,6 +97,48 @@ def configured_remotes(folder: str) -> set[str] | None:
     return {line.strip() for line in done.stdout.splitlines() if line.strip()}
 
 
+def configured_refspecs(folder: str) -> tuple[str, ...] | None:
+    """Every `remote.<name>.fetch` pattern this repository configures, or None when they cannot be
+    read (no repository, no git). A clone and `git remote add` both write one, so an empty answer is
+    read as unknown too rather than as a repository that configures nothing."""
+    try:
+        done = subprocess.run(["git", "-C", folder or ".", "config", "--get-regexp",
+                               r"^remote\..*\.fetch$"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    out = tuple(line.split(None, 1)[1].strip() for line in done.stdout.splitlines()
+                if len(line.split(None, 1)) == 2)
+    return out or None
+
+
+def covered(spec: str, patterns: tuple[str, ...]) -> bool:
+    """This refspec is one a configured refspec already maps, source and destination both, so a
+    plain fetch refreshes the ref it writes and a prune protects it.
+
+    A pattern holds at most one `*` on each side, and the piece the source's `*` stands for must be
+    the piece the destination's `*` stands for, which is what makes
+    `+refs/heads/master:refs/remotes/origin/master` covered by `+refs/heads/*:refs/remotes/origin/*`
+    and `+refs/pull/7/head:refs/remotes/origin/pr-7` covered by neither."""
+    src, _, dst = spec.lstrip("+").partition(":")
+    for pattern in patterns:
+        p_src, _, p_dst = pattern.lstrip("+").partition(":")
+        if not p_dst:
+            continue
+        if "*" not in p_src or "*" not in p_dst:
+            if (src, dst) == (p_src, p_dst):
+                return True
+            continue
+        head, _, tail = p_src.partition("*")
+        if not (src.startswith(head) and src.endswith(tail) and len(src) >= len(head) + len(tail)):
+            continue
+        middle = src[len(head):len(src) - len(tail)] if tail else src[len(head):]
+        if dst == p_dst.replace("*", middle, 1):
+            return True
+    return False
+
+
 def strays(command: str, cwd: str = ".") -> list[tuple[str, str, str]]:
     """(the refspec, the ref it writes, the folder the fetch runs in) for every fetch on this
     command line that would leave a ref behind, in the order they are written."""
@@ -95,11 +146,18 @@ def strays(command: str, cwd: str = ".") -> list[tuple[str, str, str]]:
     for inv in commandline.git_invocations(command, cwd):
         if inv["sub"] != "fetch":
             continue
+        patterns = None
         for spec in inv["args"]:
             if spec.startswith("-"):
                 continue
             dst = destination(spec)
-            if dst is not None and not owned(dst):
+            if dst is None or owned(dst):
+                continue
+            if patterns is None:
+                patterns = configured_refspecs(inv["dir"])
+            # ⛔ unknown is not a stray: a repository whose patterns cannot be read may be
+            # configuring this very refspec, and a hook that cannot tell must not refuse
+            if patterns is not None and not covered(spec, patterns):
                 found.append((spec, dst, inv["dir"]))
     return found
 

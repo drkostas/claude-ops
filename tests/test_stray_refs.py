@@ -18,16 +18,35 @@ from claude_ops import cli
 from claude_ops.hooks import stray_refs as sr
 
 
-def call(command: str, cwd: str = "/tmp") -> str | None:
+def call(command: str, cwd: str) -> str | None:
     return sr.check({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd})
+
+
+IDENT = ["-c", "user.name=test", "-c", "user.email=test@example.org", "-c", "commit.gpgsign=false",
+         "-c", "init.defaultBranch=main", "-c", "protocol.file.allow=always"]
+
+
+def git(cwd, *args):
+    done = subprocess.run(["git", *IDENT, *args], cwd=str(cwd), capture_output=True, text=True,
+                          timeout=60)
+    assert done.returncode == 0, f"git {' '.join(args)}: {done.stderr.strip()}"
+    return done.stdout
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A repository with a remote, so its own configured refspec is there to be read. `git remote
+    add` writes `+refs/heads/*:refs/remotes/origin/*`, which is what the rule turns on."""
+    git(tmp_path, "init", "-q", "work")
+    work = tmp_path / "work"
+    git(work, "remote", "add", "origin", "https://host.example.org/owner/repo.git")
+    return work
 
 
 REFUSED = [
     "git fetch origin +refs/pull/7/head:refs/remotes/origin/pr-7",
     'git fetch origin "+refs/pull/*/head:refs/remotes/pr-tmp/*"',
     "git fetch -q origin +refs/pull/7/head:refs/rider/7",
-    "git -C /tmp/elsewhere fetch origin refs/pull/7/head:refs/remotes/origin/pr-7",
-    "cd /tmp && git fetch -q origin +refs/pull/7/head:refs/remotes/origin/pr-7",
     "git fetch origin refs/heads/main:refs/remotes/origin/kept",
 ]
 THROUGH = [
@@ -47,17 +66,70 @@ THROUGH = [
 
 
 @pytest.mark.parametrize("command", REFUSED)
-def test_a_fetch_that_writes_its_own_ref_is_refused(command):
-    assert call(command), command
+def test_a_fetch_that_writes_its_own_ref_is_refused(command, repo):
+    assert call(command, str(repo)), command
 
 
 @pytest.mark.parametrize("command", THROUGH)
-def test_everything_else_goes_through(command):
-    assert call(command) is None, command
+def test_everything_else_goes_through(command, repo):
+    assert call(command, str(repo)) is None, command
 
 
-def test_the_refusal_names_the_ref_and_both_ways_through():
-    why = call("git fetch origin +refs/pull/7/head:refs/remotes/origin/pr-7")
+def test_the_folder_the_fetch_runs_in_is_the_one_read(repo, tmp_path):
+    # ⭐ the rule is about the repository in front of the command, so `-C` and a `cd` earlier on the
+    # line both move which config is read
+    spec = "+refs/pull/7/head:refs/remotes/origin/pr-7"
+    assert call(f"git -C {repo} fetch origin {spec}", str(tmp_path))
+    assert call(f"cd {repo} && git fetch -q origin {spec}", str(tmp_path))
+    # and from a folder that is no repository the same line refuses nothing, since nothing there
+    # says whether a configured refspec covers it
+    assert call(f"git fetch origin {spec}", str(tmp_path)) is None
+
+
+def test_the_remotes_own_refspec_spelled_out_for_one_branch_goes_through(repo):
+    # ⛔ THE FALSE REFUSAL THIS RULE EXISTS FOR (found 25 Nov 2026 by running the hook rather
+    # than reading it). This is the default refspec written out, a documented idiom, and the ref it
+    # writes is refreshed by every later plain fetch and protected by a prune. Prunability cannot
+    # tell it from the stray below it, since both are prunable.
+    assert call("git fetch origin +refs/heads/master:refs/remotes/origin/master", str(repo)) is None
+    assert call("git fetch origin refs/heads/master:refs/remotes/origin/master", str(repo)) is None
+    assert call("git fetch origin +refs/pull/7/head:refs/remotes/origin/pr-7", str(repo))
+
+
+def test_configuring_the_refspec_the_refusal_offers_silences_it(repo):
+    # the way through the words offer must actually work, or it is advice nobody can follow
+    assert call('git fetch origin "+refs/pull/*/head:refs/remotes/origin/pr/*"', str(repo))
+    git(repo, "config", "--add", "remote.origin.fetch", "+refs/pull/*/head:refs/remotes/origin/pr/*")
+    assert call('git fetch origin "+refs/pull/*/head:refs/remotes/origin/pr/*"', str(repo)) is None
+    assert call("git fetch origin +refs/pull/7/head:refs/remotes/origin/pr/7", str(repo)) is None
+    # and a destination that pattern does not map is still a stray
+    assert call("git fetch origin +refs/pull/7/head:refs/remotes/origin/pr-7", str(repo))
+
+
+def test_a_folder_whose_patterns_cannot_be_read_refuses_nothing(tmp_path, monkeypatch):
+    # a hook that cannot tell must not refuse, and a repository whose config it cannot read may be
+    # configuring this very refspec
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    plain = tmp_path / "no-repository"
+    plain.mkdir()
+    assert sr.configured_refspecs(str(plain)) is None
+    assert call("git fetch origin +refs/pull/7/head:refs/remotes/origin/pr-7", str(plain)) is None
+
+
+@pytest.mark.parametrize("spec, want", [
+    ("+refs/heads/master:refs/remotes/origin/master", True),
+    ("refs/heads/master:refs/remotes/origin/master", True),
+    ("+refs/heads/a/b:refs/remotes/origin/a/b", True),
+    ("+refs/pull/7/head:refs/remotes/origin/pr-7", False),
+    ("+refs/heads/feature:refs/remotes/origin/inside", False),
+    ("+refs/heads/master:refs/remotes/elsewhere/master", False),
+])
+def test_coverage_is_read_from_both_sides_of_the_pattern(spec, want):
+    assert sr.covered(spec, ("+refs/heads/*:refs/remotes/origin/*",)) is want
+
+
+def test_the_refusal_names_the_ref_and_both_ways_through(repo):
+    why = call("git fetch origin +refs/pull/7/head:refs/remotes/origin/pr-7", str(repo))
     assert "refs/remotes/origin/pr-7" in why
     assert "--no-write-fetch-head" in why and "ls-remote" in why
     assert "remote.<name>.fetch" in why
@@ -73,9 +145,9 @@ def test_what_would_remove_it_is_four_answers_and_never_a_guess(ref, remotes, sa
     assert says in sr.fate(ref, remotes)
 
 
-def test_a_wildcard_says_how_many_it_would_leave():
+def test_a_wildcard_says_how_many_it_would_leave(repo):
     why = call('git fetch origin "+refs/pull/*/head:refs/remotes/a/*" '
-               '"+refs/pull/*/head:refs/remotes/b/*"')
+               '"+refs/pull/*/head:refs/remotes/b/*"', str(repo))
     assert "1 more on this line" in why
 
 
@@ -93,16 +165,6 @@ def test_the_cli_runs_it_and_exits_2(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------- the measurement
-IDENT = ["-c", "user.name=test", "-c", "user.email=test@example.org", "-c", "commit.gpgsign=false",
-         "-c", "init.defaultBranch=main", "-c", "protocol.file.allow=always"]
-
-
-def git(cwd, *args):
-    done = subprocess.run(["git", *IDENT, *args], cwd=str(cwd), capture_output=True, text=True, timeout=60)
-    assert done.returncode == 0, f"git {' '.join(args)}: {done.stderr.strip()}"
-    return done.stdout
-
-
 def refs(cwd):
     return set(git(cwd, "for-each-ref", "--format=%(refname)").split())
 
