@@ -173,6 +173,9 @@ def cmd_hook(a) -> int:
     if a.name == "no-restore":
         from .hooks import no_restore
         return no_restore.main([])
+    if a.name == "stray-refs":
+        from .hooks import stray_refs
+        return stray_refs.main([])
     if a.name == "stale-status":
         from .hooks import stale_status
         return stale_status.main([])
@@ -525,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
                                     "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "no-restore", "mail-guard", "wide-kill",
-                                    "clock-ahead", "stale-status",
+                                    "clock-ahead", "stale-status", "stray-refs",
                                     "rtk-rewrite", "chain"))
     s.set_defaults(func=cmd_hook)
 
