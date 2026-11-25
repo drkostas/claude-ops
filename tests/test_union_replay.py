@@ -170,3 +170,40 @@ def test_a_merge_commit_is_left_out_and_what_it_merged_is_not(repo):
     rows = union.commits_touching(repo, "base", "journal.md")
     assert len(rows) == 2
     assert {r["subject"] for r in rows} == {"add three", "add four"}
+
+
+def test_a_base_the_repository_lacks_is_not_an_empty_history(repo, capsys):
+    """A range naming a revision the repository does not hold used to read as "no commit changes
+    it", exit 0, which a caller gating on this takes as a promise that a rebase is safe. The read
+    now raises, the command exits 2, and the file is never called safe on a question nobody
+    answered. A clone with no remote is the ordinary way to meet it."""
+    write(repo, "journal.md", ["one", "two", "three"])
+    commit(repo, "add three")
+    with pytest.raises(union.Refused) as e:
+        union.commits_touching(repo, "origin/main", "journal.md")
+    assert "origin/main..HEAD" in str(e.value)
+    assert union.main([str(repo), "--replay-risk", "journal.md", "--base", "origin/main"]) == 2
+    said = capsys.readouterr()
+    assert "could not read origin/main..HEAD" in said.err
+    assert "no commit of" not in said.out        # ⛔ never the reassuring line for an unread range
+
+
+def test_a_head_that_does_not_resolve_is_the_same_answer(repo, capsys):
+    """The other end of the range, for a caller that passes a head read from somewhere else."""
+    write(repo, "journal.md", ["one", "two", "three"])
+    commit(repo, "add three")
+    assert union.main([str(repo), "--replay-risk", "journal.md", "--base", "base",
+                       "--head", "no/such/head"]) == 2
+    assert "no commit of" not in capsys.readouterr().out
+
+
+def test_a_range_that_reads_still_answers_0_and_1(repo):
+    """The fix changes nothing for a range git can read, which is every ordinary call."""
+    write(repo, "beside.md", ["a line"])
+    commit(repo, "a file the journal does not name")
+    assert union.main([str(repo), "--replay-risk", "journal.md", "--base", "base"]) == 0
+    write(repo, "journal.md", ["one", "two", "three"])
+    commit(repo, "add three")
+    write(repo, "journal.md", ["one", "two", "three and a half"])
+    commit(repo, "say it better")
+    assert union.main([str(repo), "--replay-risk", "journal.md", "--base", "base"]) == 1
