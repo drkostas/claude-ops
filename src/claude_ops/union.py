@@ -258,11 +258,20 @@ def commits_touching(wt: Path, base: str, path: str, head: str = "HEAD", env=Non
     `subject`, and the `added` and `removed` lines of that file, without the leading + or -. Merge
     commits are left out, because a rebase replays the commits under them, and for the same reason
     the read asks for the full history: git would otherwise leave out a commit whose change a merge
-    did not keep, which a rebase replays all the same."""
+    did not keep, which a rebase replays all the same.
+    ⛔ A GIT RUN THAT FAILED IS NOT AN EMPTY HISTORY. A range naming a revision the repository does
+    not hold, such as a remote-tracking branch in a clone that has none, left git with nothing on
+    standard output, and this read answered that no commit changes the file, which a caller takes
+    as "nothing to worry about". A refused read now raises Refused with git's own first line, so a
+    question that cannot be answered is never answered reassuringly."""
     r = subprocess.run(["git", "-C", str(wt), "log", "--reverse", "--no-merges", "--full-history",
                         "-p", "--unified=0", f"--format={RECORD}%H%x1f%s", f"{base}..{head}",
                         "--", path],
                        capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        said = (r.stderr or r.stdout).strip().splitlines()
+        raise Refused(f"git could not read {base}..{head} in {wt}. "
+                      f"{said[0] if said else f'git exited {r.returncode}'}")
     rows: list[dict] = []
     for chunk in r.stdout.split(RECORD):
         head_line, _, body = chunk.partition("\n")
@@ -302,16 +311,27 @@ def replay_doubles(wt: Path, base: str, path: str, head: str = "HEAD", env=None)
 
 def report_replay_risk(wt: Path, base: str, path: str, head: str = "HEAD", env=None) -> int:
     """Print what `base..head` does to `path` and whether a rebase can double a line of it. 1 when
-    it can, 0 when it cannot."""
-    rows = commits_touching(wt, base, path, head, env)
+    it can, 0 when it cannot, and 2 when the range cannot be read at all.
+    ⭐ 0 MEANS SAFE AND MUST ONLY MEAN SAFE, which is why a read git refuses is its own answer. A
+    caller that gates on this treats 2 as "decide some other way" and 0 as "go ahead", so telling
+    it 0 for a range that was never read is the one answer that cannot be recovered from."""
     where = f"{base}..{head}"
+    try:
+        rows = commits_touching(wt, base, path, head, env)
+    except Refused as e:
+        print(f"claude-ops union: {e}", file=sys.stderr)
+        return 2
     if not rows:
         print(f"{path}: no commit of {where} changes it")
         return 0
     print(f"{path}: {len(rows)} commit(s) of {where} change it")
     for r in rows:
         print(f"  {r['sha'][:9]} +{len(r['added'])} -{len(r['removed'])} {r['subject']}")
-    doubles = replay_doubles(wt, base, path, head, env)
+    try:
+        doubles = replay_doubles(wt, base, path, head, env)
+    except Refused as e:                        # the second read of the same range, for the same reason
+        print(f"claude-ops union: {e}", file=sys.stderr)
+        return 2
     for d in doubles:
         print(f"a rebase can leave a line of {path} twice. {d['removed_by'][:9]} removes a line "
               f"{d['added_by'][:9]} added, and a union keeps both versions")
