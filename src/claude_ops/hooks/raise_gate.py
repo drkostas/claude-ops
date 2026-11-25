@@ -38,7 +38,9 @@ What it reads, from a JSON file:
 The file is `--config`, else `CLAUDE_OPS_RAISE_GATE_CONFIG`, else `~/.config/claude-ops/raise-gate.json`.
 With no file nothing is read and nothing is held. A fault that exits 0 (a traceback in the output of a
 command that still succeeded) is not seen: the failure flag is the one fact the transcript records
-about a result, and matching words in a success is reading prose.
+about a result, and matching words in a success is reading prose. That includes any watched command
+piped into another program, since a pipeline exits with its last command (`prog | tail -1` exits 0
+when `prog` fails).
 
 It answers with `hookSpecificOutput.additionalContext`, the channel for feedback that is not an
 error, and it fails open on anything unexpected. It cannot loop: when the stop was already held once
