@@ -7,6 +7,8 @@ refusal says only that nothing runs one by itself; a destination anywhere else i
 `git fetch --prune` nor `git remote prune`, ever. The first version of this hook said the harsher
 sentence for both, and this test is what refuted it.
 """
+from __future__ import annotations
+
 import json
 import subprocess
 
