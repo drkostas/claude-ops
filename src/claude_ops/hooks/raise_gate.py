@@ -40,7 +40,10 @@ With no file nothing is read and nothing is held. A fault that exits 0 (a traceb
 command that still succeeded) is not seen: the failure flag is the one fact the transcript records
 about a result, and matching words in a success is reading prose. That includes any watched command
 piped into another program, since a pipeline exits with its last command (`prog | tail -1` exits 0
-when `prog` fails).
+when `prog` fails). This is not a property of the gate. Anything that reads a transcript for what
+failed (a count of tool faults, a check built on the failure flag, a review of a session's history)
+sees a success for a failed command whose output was piped into `tail` or `grep`, and nothing in
+the transcript says so.
 
 It answers with `hookSpecificOutput.additionalContext`, the channel for feedback that is not an
 error, and it fails open on anything unexpected. It cannot loop: when the stop was already held once
