@@ -194,6 +194,9 @@ def cmd_hook(a) -> int:
     if a.name == "chain":
         from .hooks import chain
         return chain.main([])
+    if a.name == "raise-gate":
+        from .hooks import raise_gate
+        return raise_gate.main([])
     if a.name == "ask-what-you-need":
         from .hooks import ask_what_you_need
         return ask_what_you_need.main()
@@ -528,7 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", choices=("ask-what-you-need", "context-check", "context-mark", "no-session-links",
                                     "public-voice", "protected-checkouts", "plain-voice", "open-question",
                                     "merge-gate", "held-worktrees", "conflict-markers", "guarded-labels", "kept-out", "no-restore", "mail-guard", "wide-kill",
-                                    "clock-ahead", "stale-status", "stray-refs",
+                                    "clock-ahead", "stale-status", "stray-refs", "raise-gate",
                                     "rtk-rewrite", "chain"))
     s.set_defaults(func=cmd_hook)
 
