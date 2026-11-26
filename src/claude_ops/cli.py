@@ -578,7 +578,8 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "mcp-park": ("mcp_park", "move MCP servers between the configuration and a parked file, or keep only some"),
          "instructions": ("instruction_history", "what changed in the instruction files a chat loaded, from kept copies"),
          "pr-changes": ("pr_changes", "what the open pull requests change, by file and function, against a text"),
-         "fork-guard": ("fork_guard", "scheduled workflows that act on the repository without a fork guard")}
+         "fork-guard": ("fork_guard", "scheduled workflows that act on the repository without a fork guard"),
+         "email-reply": ("mail_reply", "show the reply to a Gmail thread, and send it only with --send")}
 
 
 def main(argv: list[str] | None = None) -> int:
