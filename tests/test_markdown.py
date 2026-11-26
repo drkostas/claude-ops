@@ -92,3 +92,24 @@ def test_unwrap_is_idempotent_and_a_line_no_editor_wraps_is_not_continued():
                  "Intro line that is long enough to look wrapped at seventy-two\ncolumns\nthen more\n"):
         once = markdown.unwrap(text)
         assert markdown.unwrap(once) == once and not markdown.is_wrapped(once), text
+
+
+def test_a_break_after_a_full_stop_is_not_a_wrap_whatever_the_line_is_long():
+    # ⛔ The length alone used to decide, and it decided two ways inside one text: a line under
+    # MAX_WRAPPED that ended in a full stop took the sentence after it, while a longer line in the
+    # same text was left alone. A body written one sentence to a line is how a person writes for a
+    # page that shows every line break, so it must survive untouched.
+    short = "A" * 85 + " and this line ends the same day."
+    long = "B" * 180 + " and this one ends here too."
+    assert markdown.MIN_WRAPPED <= len(short) <= markdown.MAX_WRAPPED < len(long)
+    body = f"{short}\nThe next sentence starts with a capital.\n{long}\nAnd another sentence here."
+    assert not markdown.is_wrapped(body), markdown.wrapped(body, 3)
+    assert markdown.unwrap(body) == body
+    # a lower-case word after a full stop starts a sentence too, when it is a name the code uses
+    named = f"{short}\nread_config then does the rest."
+    assert not markdown.is_wrapped(named), markdown.wrapped(named, 3)
+    # and a break in the MIDDLE of a sentence is still a wrap, so the join that matters still happens
+    real = ("The tool reads the configuration file and applies each rule in order. Rules\n"
+            "that do not match are skipped.")
+    assert markdown.is_wrapped(real)
+    assert markdown.unwrap(real).count("\n") == 0

@@ -45,6 +45,22 @@ ISSUE_LINE = re.compile(r"^(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|see)\s
 CLOSED = re.compile(r"^\s*(?:#{1,6}(?:\s|$)|\||<)")
 
 
+#: ⛔ A BREAK AFTER A SENTENCE IS NOT A WRAP, WHATEVER THE LINE IS LONG. The reason to join a
+#: wrapped paragraph is that the reader sees each sentence cut in the middle of a line, with half the
+#: line left empty on a narrow screen. A break that falls AFTER a full stop cuts no sentence, so text
+#: written one sentence to a line is already right and joining it would undo a deliberate choice.
+#: Without this the length alone decided, and the decision went two ways in one text: a line of 117
+#: characters ending in a full stop took the sentence after it, while a line of 196 characters in the
+#: same text was left alone, because only the first was under MAX_WRAPPED. A paragraph meant to flow
+#: whose wrap happens to fall at a full stop is now left as two lines, which is the safe way to be
+#: wrong: it still reads as one sentence to a line, and nothing is cut.
+SENTENCE_END = re.compile(r"""[.!?][""')\]]*$""")
+
+
+def _ends_sentence(stripped: str) -> bool:
+    return bool(SENTENCE_END.search(stripped))
+
+
 def _hard_break(line: str) -> bool:
     return line.endswith("  ") or line.endswith("\\")
 
@@ -90,6 +106,7 @@ def _unwrap_once(text: str) -> str:
             continue
         alone = _stands_alone(stripped)
         if (joinable and MIN_WRAPPED <= len(before.rstrip()) <= MAX_WRAPPED and not alone
+                and not _ends_sentence(before.rstrip())
                 and not BLOCK.match(line) and not RULE.match(line)):
             out[-1] = out[-1].rstrip() + " " + stripped
             joinable = not _hard_break(line)
