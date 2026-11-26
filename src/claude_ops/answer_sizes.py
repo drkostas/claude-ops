@@ -16,7 +16,8 @@ Two things make the figures honest:
 
 A measured maximum is what happened in the window, not a bound on what can happen. Use it to find the
 tools worth a look, and read a tool's code before calling its answer small. When several answers share
-the largest length exactly, the tool reports it as a cut, since answers of real sizes have one largest.
+the largest length exactly, the tool reports it as a cut, since answers of real sizes have one largest,
+and dates the newest of them, so a cut that was later removed reads as history.
 
     claude-ops answer-sizes --prefix mcp__myserver__ [--days 30] [--limit 20000] [--json]
 """
@@ -53,12 +54,12 @@ def answer_text(content) -> str:
     return text
 
 
-def sizes_in(lines, prefix: str, since: str = "") -> list[tuple[str, int]]:
-    """(tool, length) for each answer in one transcript's `lines` whose tool's name starts with `prefix`
+def sizes_in(lines, prefix: str, since: str = "") -> list[tuple[str, int, str]]:
+    """(tool, length, when) for each answer in one transcript's `lines` whose tool's name starts with `prefix`
     and whose line is dated at or after `since` (an ISO 8601 time in UTC, as transcripts write it).
     The tool is named by the tool_use block the answer replies to, so a name may hold any characters."""
     names: dict[str, str] = {}
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str, int, str]] = []
     for line in lines:
         text = line.decode("utf-8", "replace") if isinstance(line, bytes) else line
         # only a line naming a wanted tool, or a reply once one was named, is worth parsing
@@ -79,27 +80,35 @@ def sizes_in(lines, prefix: str, since: str = "") -> list[tuple[str, int]]:
             elif b.get("type") == "tool_result" and b.get("tool_use_id") in names:
                 if since and str(rec.get("timestamp") or "") < since:
                     continue
-                out.append((names[b["tool_use_id"]], len(answer_text(b.get("content")))))
+                out.append((names[b["tool_use_id"]], len(answer_text(b.get("content"))), str(rec.get("timestamp") or "")))
     return out
 
 
 def summary(pairs, limit: int = LIMIT) -> list[dict]:
     """Per tool, the number of answers, the largest, the 99th percentile, how many were over `limit`, and
-    how many share that largest length exactly (`at_max`), largest first.
+    how many share that largest length exactly (`at_max`) and when the newest of those was given
+    (`at_max_last`), largest first. `pairs` holds (tool, length) or (tool, length, when).
 
     Answers of real sizes have one largest. Several answers of exactly the same largest length are how a
     cut looks from the reader's side (the tool or a layer under it stopped every long answer at one
     length), so `cut` is true when `at_max` is more than one, and that `max` is the cut's length rather
-    than a size any answer reached. This needs no knowledge of any limit."""
+    than a size any answer reached. This needs no knowledge of any limit. `at_max_last` dates it, because
+    a window can hold two regimes (a cut that was later removed), and a cut whose newest answer is weeks
+    old is history rather than how the tool answers now."""
     by: dict[str, list[int]] = {}
-    for tool, n in pairs:
+    when: dict[tuple[str, int], str] = {}
+    for p in pairs:
+        tool, n = p[0], p[1]
         by.setdefault(tool, []).append(n)
+        if len(p) > 2 and p[2] > when.get((tool, n), ""):
+            when[(tool, n)] = p[2]
     rows = []
     for tool, v in by.items():
         v.sort()
         at_max = sum(1 for n in v if n == v[-1])
         rows.append({"tool": tool, "count": len(v), "max": v[-1], "p99": v[min(len(v) - 1, int(len(v) * 0.99))],
-                     "over": sum(1 for n in v if n > limit), "at_max": at_max, "cut": at_max > 1})
+                     "over": sum(1 for n in v if n > limit), "at_max": at_max, "cut": at_max > 1,
+                     "at_max_last": when.get((tool, v[-1])) or None})
     return sorted(rows, key=lambda r: (-r["max"], r["tool"]))
 
 
@@ -142,7 +151,8 @@ def main(argv: "list[str] | None" = None) -> int:
     print(f"{out['files']} transcripts, answers since {out['since']} UTC, over means longer than {a.limit}")
     for r in out["tools"]:
         print(f"{r['tool']:32} answers {r['count']:6}  max {r['max']:7}  p99 {r['p99']:7}  over {r['over']}"
-              + (f"  ({r['at_max']} answers end at exactly {r['max']}, which is how a cut looks)" if r["cut"] else ""))
+              + (f"  ({r['at_max']} answers end at exactly {r['max']}, which is how a cut looks"
+                 + (f", the newest on {r['at_max_last'][:10]})" if r["at_max_last"] else ")") if r["cut"] else ""))
     return 0
 
 

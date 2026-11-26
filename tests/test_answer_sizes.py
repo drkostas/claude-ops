@@ -35,13 +35,15 @@ def test_answers_are_named_by_their_tool_use_and_dated_by_their_own_line():
              use("c", "mcp__other__thing"), result("c", "z" * 999),
              use("d", P + "get_order"), result("d", "w" * 70, as_list=False)]
     got = A.sizes_in(lines, P, since="2026-11-01T00:00:00")
-    assert got == [("list-orders", 300), ("get_order", 70)], got
+    assert got == [("list-orders", 300, "2026-11-20T10:00:01.000Z"), ("get_order", 70, "2026-11-20T10:00:01.000Z")], got
 
 
 def test_a_summary_gives_count_max_p99_and_how_many_were_over_the_limit():
     rows = A.summary([("a", 10), ("a", 30), ("b", 25000), ("b", 5)], limit=20000)
-    assert rows[0] == {"tool": "b", "count": 2, "max": 25000, "p99": 25000, "over": 1, "at_max": 1, "cut": False}
-    assert rows[1] == {"tool": "a", "count": 2, "max": 30, "p99": 30, "over": 0, "at_max": 1, "cut": False}
+    assert rows[0] == {"tool": "b", "count": 2, "max": 25000, "p99": 25000, "over": 1, "at_max": 1, "cut": False,
+                       "at_max_last": None}
+    assert rows[1] == {"tool": "a", "count": 2, "max": 30, "p99": 30, "over": 0, "at_max": 1, "cut": False,
+                       "at_max_last": None}
 
 
 def test_several_answers_at_one_exact_largest_length_read_as_a_cut():
@@ -49,6 +51,12 @@ def test_several_answers_at_one_exact_largest_length_read_as_a_cut():
                                              ("clipped", 512), ("real", 19980), ("real", 19000)])}
     assert rows["clipped"]["at_max"] == 3 and rows["clipped"]["cut"] is True
     assert rows["real"]["at_max"] == 1 and rows["real"]["cut"] is False
+
+
+def test_a_cut_is_dated_by_its_newest_answer_so_a_removed_cut_reads_as_history():
+    rows = {r["tool"]: r for r in A.summary([("t", 20000, "2026-11-01T09:00:00Z"), ("t", 20000, "2026-11-12T23:00:00Z"),
+                                             ("t", 4000, "2026-11-25T08:00:00Z")])}
+    assert rows["t"]["cut"] is True and rows["t"]["at_max_last"] == "2026-11-12T23:00:00Z"
 
 
 def test_measure_skips_a_file_older_than_the_window_and_reads_subagents(tmp_path):
@@ -63,7 +71,7 @@ def test_measure_skips_a_file_older_than_the_window_and_reads_subagents(tmp_path
     os.utime(old, (now - 40 * 86400,) * 2)
     out = A.measure(P, days=30, root=tmp_path, now=now)
     assert out["files"] == 2 and out["tools"] == [{"tool": "list", "count": 2, "max": 60, "p99": 60, "over": 0,
-                                                    "at_max": 1, "cut": False}]
+                                                    "at_max": 1, "cut": False, "at_max_last": stamp}]
     assert "q" not in json.dumps(out), "no answer text is kept"
 
 
@@ -77,5 +85,5 @@ def test_the_command_prints_one_line_a_tool(tmp_path, capsys):
     assert A.main(["--prefix", P, "--root", str(tmp_path), "--days", "1"]) == 0
     out = capsys.readouterr().out
     assert "list" in out and "max   21000" in out and "over 1" in out
-    assert "2 answers end at exactly 300, which is how a cut looks" in out
+    assert f"2 answers end at exactly 300, which is how a cut looks, the newest on {stamp[:10]})" in out
     assert out.count("how a cut looks") == 1
