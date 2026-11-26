@@ -83,6 +83,23 @@ def test_an_approval_does_not_cover_another_body_recipient_or_a_late_send(cfg):
     assert mg.decide(cfg, call(to="someone@example.org", thread_id=None), NOW + timedelta(hours=1))[0] == "refused"
 
 
+def test_a_changed_body_is_refused_saying_the_body_differs(cfg):
+    approve(cfg, "a1", body="Dear Ana,\nthe invoice is attached.")
+    decision, why = mg.decide(cfg, call(to="someone@example.org", thread_id=None, body="Dear Ana, the invoice is attached."), NOW)
+    assert decision == "refused" and "this body is not the approved one" in why
+    assert mg.decide(cfg, call(to="someone@example.org", thread_id=None, body="Dear Ana,\nthe invoice is attached."),
+                     NOW) == ("approval", "a1.json"), "the approval is still there for the approved body"
+
+
+def test_another_recipient_or_a_used_approval_is_not_called_a_changed_body(cfg):
+    approve(cfg, "a1")
+    _, other = mg.decide(cfg, call(to="else@example.org", thread_id=None, body="Changed"), NOW)
+    assert "no unused approval matches this exact message" in other
+    assert mg.decide(cfg, call(to="someone@example.org", thread_id=None), NOW)[0] == "approval"
+    _, used = mg.decide(cfg, call(to="someone@example.org", thread_id=None, body="Changed"), NOW)
+    assert "no unused approval matches this exact message" in used
+
+
 def test_observe_mode_refuses_nothing_and_keeps_the_approval(cfg):
     cfg["mode"] = "observe"
     path = approve(cfg, "a1")
