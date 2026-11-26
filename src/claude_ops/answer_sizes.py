@@ -15,7 +15,8 @@ Two things make the figures honest:
   so a figure is the tool's own answer rather than about a tenth more.
 
 A measured maximum is what happened in the window, not a bound on what can happen. Use it to find the
-tools worth a look, and read a tool's code before calling its answer small.
+tools worth a look, and read a tool's code before calling its answer small. When several answers share
+the largest length exactly, the tool reports it as a cut, since answers of real sizes have one largest.
 
     claude-ops answer-sizes --prefix mcp__myserver__ [--days 30] [--limit 20000] [--json]
 """
@@ -83,16 +84,22 @@ def sizes_in(lines, prefix: str, since: str = "") -> list[tuple[str, int]]:
 
 
 def summary(pairs, limit: int = LIMIT) -> list[dict]:
-    """Per tool, the number of answers, the largest, the 99th percentile and how many were over `limit`,
-    largest first."""
+    """Per tool, the number of answers, the largest, the 99th percentile, how many were over `limit`, and
+    how many share that largest length exactly (`at_max`), largest first.
+
+    Answers of real sizes have one largest. Several answers of exactly the same largest length are how a
+    cut looks from the reader's side (the tool or a layer under it stopped every long answer at one
+    length), so `cut` is true when `at_max` is more than one, and that `max` is the cut's length rather
+    than a size any answer reached. This needs no knowledge of any limit."""
     by: dict[str, list[int]] = {}
     for tool, n in pairs:
         by.setdefault(tool, []).append(n)
     rows = []
     for tool, v in by.items():
         v.sort()
+        at_max = sum(1 for n in v if n == v[-1])
         rows.append({"tool": tool, "count": len(v), "max": v[-1], "p99": v[min(len(v) - 1, int(len(v) * 0.99))],
-                     "over": sum(1 for n in v if n > limit)})
+                     "over": sum(1 for n in v if n > limit), "at_max": at_max, "cut": at_max > 1})
     return sorted(rows, key=lambda r: (-r["max"], r["tool"]))
 
 
@@ -134,7 +141,8 @@ def main(argv: "list[str] | None" = None) -> int:
         return 0
     print(f"{out['files']} transcripts, answers since {out['since']} UTC, over means longer than {a.limit}")
     for r in out["tools"]:
-        print(f"{r['tool']:32} answers {r['count']:6}  max {r['max']:7}  p99 {r['p99']:7}  over {r['over']}")
+        print(f"{r['tool']:32} answers {r['count']:6}  max {r['max']:7}  p99 {r['p99']:7}  over {r['over']}"
+              + (f"  ({r['at_max']} answers end at exactly {r['max']}, which is how a cut looks)" if r["cut"] else ""))
     return 0
 
 
