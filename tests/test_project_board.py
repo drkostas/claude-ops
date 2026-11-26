@@ -600,3 +600,53 @@ def test_a_view_naming_a_field_the_project_lacks_is_refused():
     gh, b = view_board()
     with pytest.raises(BoardError, match="no field"):
         b.ensure_views([{"name": "X", "layout": "TABLE_LAYOUT", "fields": ["Nope"]}])
+
+
+def test_seconds_bound_stops_writes_once_spent():
+    gh = FakeGitHub()
+    now = [0.0]
+    b = board(gh, seconds=90, clock=lambda: now[0])
+    b.ensure()                                     # inside the bound: the project and its fields are made
+    b.put("k1", title="t", body="b")
+    now[0] = 91.0
+    with pytest.raises(OutOfBudget):
+        b.put("k2", title="t", body="b")
+    assert len(gh.issues) == 1                     # nothing of the second record was written
+    with pytest.raises(OutOfBudget):
+        b.graphql("mutation { x }", write=True)
+
+
+def test_seconds_bound_never_stops_a_record_part_way():
+    gh = FakeGitHub()
+    now = [0.0]
+    b = board(gh, seconds=90, clock=lambda: now[0])
+    b.ensure()
+    now[0] = 89.0                                  # the record starts inside the bound ...
+    gh_put = gh.createIssue
+
+    def slow_create(v):
+        now[0] = 200.0                             # ... and the bound passes while it is being written
+        return gh_put(v)
+    gh.createIssue = slow_create
+    had = b.put("k1", title="t", body="b", fields={"State": "Open"})
+    assert had.get("item") and had["fields"] == {"State": "Open"}   # it is finished all the same
+
+
+def test_prune_stops_quietly_when_the_seconds_are_spent():
+    gh = FakeGitHub()
+    now = [0.0]
+    b = board(gh, seconds=90, clock=lambda: now[0])
+    b.ensure()
+    old = b.put("old", title="t", body="b", closed=True)
+    now[0] = 95.0
+    assert b.prune(days=14, now=datetime(2026, 3, 12, tzinfo=timezone.utc)) == 0
+    assert old["item"] in gh.items                 # left for the next run
+
+
+def test_no_seconds_means_no_time_bound():
+    gh = FakeGitHub()
+    now = [0.0]
+    b = board(gh, clock=lambda: now[0])
+    b.ensure()
+    now[0] = 10_000.0
+    assert b.put("k1", title="t", body="b")["item"]
