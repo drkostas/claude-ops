@@ -651,6 +651,18 @@ A request Google fails (a 5xx) or asks to slow down (a 429) is asked again up to
 
 The `chat-watcher` skill explains the full pattern to Claude, including the launchd file.
 
+## Answer an email thread without the usual faults
+
+`claude-ops email-reply` builds the reply to a Gmail thread and shows it. It sends nothing unless it is given `--send`. Three faults make a hand-built reply go wrong without any sign in the sender's own mailbox. A body written with bare line feeds reaches Outlook and Exchange as one long paragraph. A reply made against an older message, or against the sender's own last message, makes a thread that talks to itself. A reply with only the reply headers reads as a new message. The command takes the newest message of the thread that is not a draft, refuses when that message was sent from the mailbox itself, and builds a plain-text reply with CRLF line breaks, the subject encoded as RFC 2047, `In-Reply-To` and `References` set from the message it answers, and an attribution line with a quote of it.
+
+```bash
+claude-ops email-reply --token-file token.json --client-file credentials.json \
+    --thread 18c2f00000000000 --body-file reply.txt          # shows the reply, sends nothing
+claude-ops email-reply ... --send                            # sends it, reads it back and checks it
+```
+
+The body comes from a file and not from an argument, because an apostrophe inside a shell argument is a parse failure that lands far from its cause. After `--send` the message is read back from Gmail, and the command prints `VERIFIED` only when the decoded body has CRLF and no bare line feed, the message is labelled SENT in the same thread, `In-Reply-To` is the message that was answered and the recipient is its sender. A send that fails one of those exits 1 and lists what is wrong. The token needs the gmail.readonly scope to show a reply and gmail.send to send one. In Python, `claude_ops.mail_reply.reply(box, thread_id, body, send=False)` does the same with a `Mailbox`, and `Mailbox.thread`, `raw`, `raw_labels` and `send` are the calls under it.
+
 ## Add an event to a Google calendar
 
 `claude_ops.gcal.Calendar` puts an event on a calendar from a job and reads it back by its id. It takes the same two files as the mailbox above, so the job needs no browser and no Google client library, and the token needs a scope that can write events:

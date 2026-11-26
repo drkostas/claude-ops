@@ -26,6 +26,7 @@ Google said, and its `needs_sign_in` tells a refused sign-in from everything a l
 from __future__ import annotations
 
 import base64
+import json
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
@@ -145,6 +146,41 @@ class Mailbox(GoogleSession):
             if not page:
                 break
         return found[:max_results]
+
+    def thread(self, thread_id: str) -> list[dict]:
+        """The messages of one conversation, oldest first, each `{"id", "labels", "internalDate"}`
+        with internalDate as a number of epoch milliseconds. A draft is in the list, labelled DRAFT,
+        so a caller that wants only what was sent or received leaves it out."""
+        out = self._get("threads/" + urllib.parse.quote(thread_id, safe=""), [("format", "minimal")])
+        found = [{"id": m["id"], "labels": m.get("labelIds", []), "internalDate": int(m.get("internalDate") or 0)}
+                 for m in out.get("messages", [])]
+        return sorted(found, key=lambda m: m["internalDate"])
+
+    def raw(self, message_id: str) -> bytes:
+        """One message exactly as Gmail holds it (headers, parts and encodings), decoded from the
+        base64url Gmail answers with."""
+        out = self._get("messages/" + urllib.parse.quote(message_id, safe=""), [("format", "raw")])
+        data = out.get("raw") or ""
+        return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+    def raw_labels(self, message_id: str) -> list[str]:
+        """The labels of one message (SENT, INBOX, DRAFT and the person's own)."""
+        out = self._get("messages/" + urllib.parse.quote(message_id, safe=""), [("format", "minimal")])
+        return out.get("labelIds", [])
+
+    def send(self, raw: bytes, thread_id: "str | None" = None) -> dict:
+        """Send one finished message. This puts mail in front of other people and cannot be taken
+        back, so nothing in this module calls it unless its caller was told to. `thread_id` files the
+        message in that conversation, which Gmail does only when the subject and the reply headers
+        agree. The token needs the gmail.send scope. Returns `{"id", "threadId"}`."""
+        payload = {"raw": base64.urlsafe_b64encode(raw).decode()}
+        if thread_id:
+            payload["threadId"] = thread_id
+        req = urllib.request.Request(API + "messages/send", data=json.dumps(payload).encode(), method="POST",
+                                     headers={"Authorization": "Bearer " + self.token(),
+                                              "Content-Type": "application/json"})
+        out = self._open(req)
+        return {"id": out.get("id"), "threadId": out.get("threadId")}
 
     def message(self, message_id: str, headers=HEADERS) -> dict:
         """One message's id, thread, labels, internalDate, snippet and the named headers by name,
