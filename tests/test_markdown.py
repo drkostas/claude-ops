@@ -92,3 +92,32 @@ def test_unwrap_is_idempotent_and_a_line_no_editor_wraps_is_not_continued():
                  "Intro line that is long enough to look wrapped at seventy-two\ncolumns\nthen more\n"):
         once = markdown.unwrap(text)
         assert markdown.unwrap(once) == once and not markdown.is_wrapped(once), text
+
+
+def test_a_line_longer_than_any_wrap_width_is_never_a_continuation():
+    # A log of entries written one paragraph to a line, with no blank line between paragraphs: a bold
+    # heading, a short dated line, then paragraphs of several hundred characters each. The dated line
+    # is of a length a wrapped line could have, but the line after it is longer than any editor wraps,
+    # and a wrapped paragraph's next line is never longer than the width it was wrapped at.
+    dated = "2026-01-02 (a note on the second step, after the first one and before the third)."
+    first = "The pass now builds one message " + "and leaves the rest unbuilt " * 20 + "until they are sent."
+    second = "Measured twice, " + "the read took less time from the source " * 12 + "than through the view."
+    text = f"**Entry 12. A pass builds only what it sends.**\n{dated}\n{first}\n{second}\n"
+    assert markdown.MIN_WRAPPED <= len(dated) <= markdown.MAX_WRAPPED < len(first)
+    assert not markdown.is_wrapped(text) and markdown.unwrap(text) == text and markdown.wrapped(text) == []
+    # a paragraph that really was wrapped is still joined, up to the long line after it
+    wrapped = ("A paragraph that its writer wrapped at about seventy-two columns, as\n"
+               "editors do.\n" + first + "\n")
+    assert markdown.unwrap(wrapped) == ("A paragraph that its writer wrapped at about seventy-two columns, as "
+                                        "editors do.\n" + first + "\n")
+
+
+def test_a_line_that_is_one_bold_span_stands_alone():
+    text = ("**Entry 12. A pass builds only what it sends.**\n"
+            "2026-01-02 (a note on the second step, after the first one and before the third).\n")
+    assert not markdown.is_wrapped(text) and markdown.unwrap(text) == text
+    # a bold paragraph that was wrapped opens on one line and closes on the next, and is joined
+    wrapped = ("**A bold paragraph that its writer wrapped at about seventy-two columns\n"
+               "as editors do.**\n")
+    assert markdown.unwrap(wrapped) == ("**A bold paragraph that its writer wrapped at about seventy-two columns "
+                                        "as editors do.**\n")
