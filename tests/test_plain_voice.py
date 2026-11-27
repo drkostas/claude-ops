@@ -209,3 +209,13 @@ def test_file_mode_refuses_when_no_phrase_list_can_be_read(tmp_path, monkeypatch
     # the hook itself still lets a call through without a list
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(bash("gh pr comment 1 --body 'One: two.'", tmp_path))))
     assert pv.main([]) == 0
+
+
+def test_a_body_of_one_line_paragraphs_after_a_short_line_is_sent_as_written(tmp_path):
+    # Joining here would merge a correct line into the paragraph after it and send that to GitHub.
+    dated = "2026-01-02 (a note on the second step, after the first one and before the third)."
+    long_line = "The pass builds one message " + "and leaves the rest unbuilt " * 20 + "until they are sent."
+    body = tmp_path / "body.md"
+    body.write_text(f"**Entry 12. A pass builds only what it sends.**\n{dated}\n{long_line}\n{long_line}\n")
+    why, new, note = pv.review(bash(f"gh pr create --title T --body-file {body}", tmp_path), pv.Config())
+    assert why is None and new is None and note == ""
