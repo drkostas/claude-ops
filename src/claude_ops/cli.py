@@ -563,6 +563,7 @@ TOOLS = {"union": ("union", "settle a rebase conflict where both sides only adde
          "mutate": ("mutate", "change code on purpose and check the tests catch it"),
          "plan-apply": ("plan_apply", "apply a written plan's Write and Edit steps exactly"),
          "heavy": ("heavy", "run heavy jobs one at a time across chats, under a memory cap"),
+         "answer-sizes": ("answer_sizes", "how long each tool's answers were, read from the transcripts"),
          "ci-run": ("ci_run", "wait for a pull request's workflow run, re-run only a job its runner lost, merge, see it deployed"),
          "runner-diag": ("runner_diag", "steps of a self-hosted runner's jobs that ran far longer than in the last green run"),
          "pr-gate": ("pr_gate", "run a pull request's checks locally at its own head, under a machine lock, with a canary"),
