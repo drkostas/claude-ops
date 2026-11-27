@@ -130,8 +130,9 @@ class Board:
     project starts private.
 
     `budget` is how many writes one Board may make. `seconds`, when given, also bounds how long it may
-    write: once that many seconds have passed since the Board was made, the next write raises
-    OutOfBudget, as a spent write budget does. A record that put() has started is always finished,
+    write: once that many seconds have passed since the Board was made (or since restart_clock(), for
+    a caller that reads or waits before the work), the next write raises OutOfBudget, as a spent
+    write budget does. A record that put() has started is always finished,
     so the bound is checked before each record and before each write outside one. A pass whose calls
     are slow then stops on time and leaves the rest for the next run, instead of running long.
     """
@@ -158,8 +159,14 @@ class Board:
 
     # -- talking to GitHub ---------------------------------------------------------------------
 
+    def restart_clock(self) -> None:
+        """Count `seconds` from now. For a caller that makes the Board before the work the bound is for, such as
+        reads it makes first or a wait for its turn, so that time does not use up the bound."""
+        self.started = self.clock()
+
     def _check_time(self) -> None:
-        """Raise OutOfBudget once `seconds` have passed since the Board was made (no bound when None)."""
+        """Raise OutOfBudget once `seconds` have passed since the Board was made, or since restart_clock()
+        (no bound when None)."""
         if self.seconds is not None:
             spent = self.clock() - self.started
             if spent >= self.seconds:

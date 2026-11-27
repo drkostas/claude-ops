@@ -616,6 +616,20 @@ def test_seconds_bound_stops_writes_once_spent():
         b.graphql("mutation { x }", write=True)
 
 
+def test_restart_clock_counts_the_seconds_from_then():
+    gh = FakeGitHub()
+    now = [0.0]
+    b = board(gh, seconds=90, clock=lambda: now[0])
+    now[0] = 120.0                                 # reads or a wait before the work, past the bound
+    b.restart_clock()
+    b.ensure()
+    b.put("k1", title="t", body="b")               # the work starts with the whole bound
+    now[0] = 211.0
+    with pytest.raises(OutOfBudget):
+        b.put("k2", title="t", body="b")
+    assert len(gh.issues) == 1
+
+
 def test_seconds_bound_never_stops_a_record_part_way():
     gh = FakeGitHub()
     now = [0.0]
