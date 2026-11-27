@@ -111,15 +111,15 @@ def rule_for(cfg: dict, account: str, thread: str, to: list[str]) -> str | None:
     return None
 
 
-def use_approval(cfg: dict, account: str, thread: str, to: list[str], digest: str, now: datetime,
-                 *, mark: bool = True) -> str | None:
-    """The file name of an unused, unexpired approval for exactly this message, marked used; or None."""
+def _open_approvals(cfg: dict, account: str, thread: str, to: list[str], now: datetime):
+    """Each (file, record) of an unused, unexpired approval for this account, thread and recipient list,
+    whatever body it approved."""
     folder = cfg.get("approvals")
     if not folder:
-        return None
+        return
     root = Path(os.path.expanduser(folder))
     if not root.is_dir():
-        return None
+        return
     for f in sorted(root.glob("*.json")):
         try:
             rec = json.loads(f.read_text())
@@ -128,10 +128,18 @@ def use_approval(cfg: dict, account: str, thread: str, to: list[str], digest: st
             if datetime.fromisoformat(str(rec["expires"])) <= now:
                 continue
             if (rec.get("account", "") != account or (rec.get("thread") or "") != thread
-                    or rec.get("body_sha256") != digest
                     or sorted(str(a).strip().lower() for a in rec.get("recipients") or []) != sorted(to)):
                 continue
         except (OSError, ValueError, KeyError, TypeError):
+            continue
+        yield f, rec
+
+
+def use_approval(cfg: dict, account: str, thread: str, to: list[str], digest: str, now: datetime,
+                 *, mark: bool = True) -> str | None:
+    """The file name of an unused, unexpired approval for exactly this message, marked used; or None."""
+    for f, rec in _open_approvals(cfg, account, thread, to, now):
+        if rec.get("body_sha256") != digest:
             continue
         if mark:
             rec["used"] = now.isoformat()
@@ -161,6 +169,12 @@ def decide(cfg: dict, payload: dict, now: datetime | None = None) -> tuple[str, 
     used = use_approval(cfg, account, thread, to, body_hash(ti), now, mark=not observe)
     if used:
         return "approval", used
+    if next(_open_approvals(cfg, account, thread, to, now), None) is not None:
+        # an approval for this account, thread and these recipients waits, so the body is what differs. Saying so
+        # tells the session to send the approved text exactly, never to retry a send with its own wording
+        why = ("an unused approval for this account, these recipients and this thread exists, but this body is not "
+               "the approved one. Send the approved body exactly, character for character, or ask for a new approval")
+        return ("would-refuse" if observe else "refused"), why
     why = (f"no rule allows a send from {account or 'this account'} to {', '.join(to) or 'nobody'}"
            + (f" in thread {thread}" if thread else "") + ", and no unused approval matches this exact message")
     return ("would-refuse" if observe else "refused"), why

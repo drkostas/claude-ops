@@ -128,18 +128,29 @@ class Board:
     exists on the project is used as it is. `public` makes the project public (True) or private
     (False), and `description` sets its short description; None leaves either as it is. A new
     project starts private.
+
+    `budget` is how many writes one Board may make. `seconds`, when given, also bounds how long it may
+    write: once that many seconds have passed since the Board was made (or since restart_clock(), for
+    a caller that reads or waits before the work), the next write raises OutOfBudget, as a spent
+    write budget does. A record that put() has started is always finished,
+    so the bound is checked before each record and before each write outside one. A pass whose calls
+    are slow then stops on time and leaves the rest for the next run, instead of running long.
     """
 
     def __init__(self, repo: str, title: str, *, selects: dict[str, list[str]] | None = None,
                  texts: tuple[str, ...] = (), budget: int = 60, pause: float = 1.0,
                  public: bool | None = None, description: str | None = None,
-                 gh=None, env: dict | None = None, sleep=time.sleep):
+                 gh=None, env: dict | None = None, sleep=time.sleep, seconds: float | None = None,
+                 clock=time.monotonic):
         self.owner, self.name = repo.split("/", 1)
         self.repo, self.title = repo, title
         self.selects, self.texts = dict(selects or {}), tuple(texts)
         self.public, self.description = public, description
         self.budget, self.pause, self.sleep = budget, pause, sleep
         self.writes = 0
+        self.seconds, self.clock = seconds, clock
+        self.started = clock()
+        self._in_put = False
         self._gh = gh or (lambda args, stdin=None: _gh(args, stdin, env))
         self.project: dict | None = None
         self.repository_id: str | None = None
@@ -148,12 +159,27 @@ class Board:
 
     # -- talking to GitHub ---------------------------------------------------------------------
 
+    def restart_clock(self) -> None:
+        """Count `seconds` from now. For a caller that makes the Board before the work the bound is for, such as
+        reads it makes first or a wait for its turn, so that time does not use up the bound."""
+        self.started = self.clock()
+
+    def _check_time(self) -> None:
+        """Raise OutOfBudget once `seconds` have passed since the Board was made, or since restart_clock()
+        (no bound when None)."""
+        if self.seconds is not None:
+            spent = self.clock() - self.started
+            if spent >= self.seconds:
+                raise OutOfBudget(f"{spent:.0f} s spent writing, the bound is {self.seconds:g} s")
+
     def graphql(self, query: str, variables: dict | None = None, *, write: bool = False) -> dict:
         """Run one GraphQL query or mutation and return its `data`. A write counts against the
         budget and waits `pause` seconds first, so a long pass stays under GitHub's write rate."""
         if write:
             if self.writes >= self.budget:
                 raise OutOfBudget(f"{self.writes} writes made, the budget is {self.budget}")
+            if not self._in_put:
+                self._check_time()
             if self.writes:
                 self.sleep(self.pause)
             self.writes += 1
@@ -298,10 +324,12 @@ class Board:
             raise BoardError("call ensure() first")
         if self.writes + PUT_WRITES > self.budget:
             raise OutOfBudget(f"{self.writes} writes made, the budget is {self.budget}")
+        self._check_time()
         new = dict(had or {})
         new.setdefault("fields", {})
         new["fields"] = dict(new["fields"])
         full = body_with_marker(key, body)
+        self._in_put = True
         try:
             if not new.get("node"):
                 made = self.graphql(
@@ -352,6 +380,8 @@ class Board:
         except BoardError as e:
             e.had = new
             raise
+        finally:
+            self._in_put = False
         return new
 
     # -- labels and parents of anything the account can write ------------------------------------
