@@ -536,3 +536,54 @@ def test_it_merges_once_nothing_is_in_flight_and_the_picture_holds():
     assert code == 0, said_back
     assert gh.merged
     assert said_back.startswith("merged abc123def456 as fedcba987654 (merge)")
+
+
+def job(name, run_id, conclusion="SUCCESS"):
+    """A rollup entry for a GitHub Actions job, whose details address ends in its check run's id."""
+    return {**check_run(name, conclusion=conclusion),
+            "detailsUrl": f"https://github.com/owner/repo/actions/runs/9/job/{run_id}"}
+
+
+def ran(name, run_id, title, completed_at):
+    return {"id": run_id, "name": name, "completed_at": completed_at, "output": {"title": title, "summary": ""}}
+
+
+def test_a_failed_run_is_shown_with_its_own_words_when_its_name_ran_twice():
+    """A workflow that also runs when the pull request is edited runs twice on one head, under one
+    name. The rollup lists both runs. The failed one must be explained by its own words, never by
+    the words of the run that passed beside it, whichever order the API lists them in."""
+    rollup = [job("check", 11, conclusion="FAILURE"), job("check", 22)]
+    runs = [ran("check", 22, "nothing found", "2026-01-01T10:05:00Z"),
+            ran("check", 11, "2 problems found", "2026-01-01T10:00:00Z")]
+    message = merge.why_not_merged(rollup, "owner/repo", "abc123", FakeGh([[]], check_runs=runs))
+    assert message == "not every check passed: check: failure (2 problems found)", message
+    message = merge.why_not_merged(rollup, "owner/repo", "abc123", FakeGh([[]], check_runs=runs[::-1]))
+    assert message == "not every check passed: check: failure (2 problems found)", message
+
+
+def test_by_name_alone_the_newest_run_speaks():
+    runs = [ran("scan", 5, "old words", "2026-01-01T09:00:00Z"),
+            ran("scan", 6, "new words", "2026-01-01T11:00:00Z"),
+            ran("scan", 4, "middle words", "2026-01-01T10:00:00Z")]
+    assert merge.check_words("owner/repo", "abc123", ["scan"], FakeGh([[]], check_runs=runs)) == {"scan": "new words"}
+
+
+def test_every_page_of_check_runs_is_read():
+    """gh api --paginate prints one object a page, back to back."""
+    class Paged(FakeGh):
+        def __call__(self, args):
+            if args[0] == "api" and "check-runs" in args[1]:
+                self.calls.append(args)
+                pages = [{"check_runs": [ran("a", 1, "first page", "x")]},
+                         {"check_runs": [ran("b", 2, "second page", "x")]}]
+                return run(out="".join(json.dumps(p) for p in pages))
+            return super().__call__(args)
+    assert merge.check_words("owner/repo", "abc123", ["b"], Paged([[]])) == {"b": "second page"}
+
+
+def test_an_entry_without_a_run_id_falls_back_to_its_name():
+    """Another app's details address is its own page, so the entry is matched by name."""
+    rollup = [{**check_run("Scanner", conclusion="NEUTRAL"), "detailsUrl": "https://scanner.example.org"}]
+    runs = [ran("Scanner", 7, "1 secret found", "2026-01-01T10:00:00Z")]
+    message = merge.why_not_merged(rollup, "owner/repo", "abc123", FakeGh([[]], check_runs=runs))
+    assert message == "not every check passed: Scanner: neutral (1 secret found)", message

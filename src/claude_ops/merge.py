@@ -35,6 +35,7 @@ timeout, 3 one refused (a moved head among the reasons), 7 the production confir
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 
@@ -107,38 +108,97 @@ def still_running(rollup: list[dict]) -> list[str]:
     return [name for check in rollup for name, state, _ in [_one(check)] if state == "waiting"]
 
 
+def _run_id(check: dict) -> int | None:
+    """Pure. The check run's id for one rollup entry, or None. A GitHub Actions job's details
+    address ends in /job/<id>, and that number is the check run's id. Another app's address is its
+    own page and names no run, so it gives None."""
+    if check.get("databaseId"):
+        return int(check["databaseId"])
+    m = re.search(r"/job/(\d+)$", check.get("detailsUrl") or "")
+    return int(m.group(1)) if m else None
+
+
+def _all_runs(repo: str | None, sha: str, gh) -> list[dict] | None:
+    """Every check run on `sha`, across all pages, or None when they cannot be read.
+    gh api --paginate prints one JSON object a page, back to back, so each is decoded in turn."""
+    where = _name_with_owner(repo, gh)
+    if not (where and sha):
+        return None
+    r = gh(["api", f"repos/{where}/commits/{sha}/check-runs?per_page=100", "--paginate"])
+    if r.returncode != 0:
+        return None
+    runs, text, at, dec = [], r.stdout or "", 0, json.JSONDecoder()
+    try:
+        while True:
+            while at < len(text) and text[at].isspace():
+                at += 1
+            if at >= len(text):
+                break
+            page, at = dec.raw_decode(text, at)
+            runs.extend(page.get("check_runs") or [])
+    except (ValueError, AttributeError):
+        return None
+    return runs
+
+
+def _said(run_: dict) -> str:
+    output = run_.get("output") or {}
+    title = (output.get("title") or "").strip()
+    summary = (output.get("summary") or "").strip()
+    first = next((line.strip(" #").strip() for line in summary.splitlines() if line.strip()), "")
+    return ". ".join(part for part in (title, first) if part)
+
+
+def _newest(runs: list[dict]) -> dict:
+    return max(runs, key=lambda r: (r.get("completed_at") or "", r.get("started_at") or "", r.get("id") or 0))
+
+
 def check_words(repo: str | None, sha: str, names, gh) -> dict[str, str]:
     """What each of `names` said about itself, as one line per check.
 
     A check run reports a title and a summary of its own, and gh's statusCheckRollup carries
     neither, so this reads them from the commit's check runs. They are the difference between
     "the scan is neutral" and the scan's own "1 secret uncovered". Returns an empty mapping when
-    they cannot be read, since the words only make a message better and must never replace it."""
+    they cannot be read, since the words only make a message better and must never replace it.
+
+    One name can belong to several runs on the same head, because a workflow that also runs on an
+    edit of the pull request runs again for each edit. By name alone the newest run is the one that
+    speaks. `run_words` matches each run exactly, and is what a merge message uses."""
     wanted = {str(n) for n in names}
     if not (sha and wanted):
         return {}
-    where = _name_with_owner(repo, gh)
-    if not where:
-        return {}
-    r = gh(["api", f"repos/{where}/commits/{sha}/check-runs", "--paginate"])
-    if r.returncode != 0:
-        return {}
-    try:
-        runs = json.loads(r.stdout).get("check_runs") or []
-    except (ValueError, AttributeError):
+    runs = _all_runs(repo, sha, gh)
+    if not runs:
         return {}
     out = {}
-    for run_ in runs:
-        name = run_.get("name")
-        if name not in wanted or name in out:
-            continue
-        output = run_.get("output") or {}
-        title = (output.get("title") or "").strip()
-        summary = (output.get("summary") or "").strip()
-        first = next((line.strip(" #").strip() for line in summary.splitlines() if line.strip()), "")
-        said = ". ".join(part for part in (title, first) if part)
+    for name in wanted:
+        mine = [r for r in runs if r.get("name") == name]
+        said = _said(_newest(mine)) if mine else ""
         if said:
             out[name] = said
+    return out
+
+
+def run_words(repo: str | None, sha: str, entries: list[dict], gh) -> list[str]:
+    """Pure in its matching. What each rollup entry in `entries` said, in the same order ("" where
+    it said nothing or could not be read).
+
+    Each entry is matched to its own check run by id (`_run_id`), so when one name belongs to two
+    runs, a failed run is shown with its own words and never with the words of the run that
+    passed beside it. An entry without an id falls back to the newest run of its name."""
+    if not entries:
+        return []
+    runs = _all_runs(repo, sha, gh) or []
+    by_id = {r.get("id"): r for r in runs if r.get("id") is not None}
+    out = []
+    for e in entries:
+        rid = _run_id(e)
+        run_ = by_id.get(rid) if rid is not None else None
+        if run_ is None and rid is None:
+            name = e.get("name") or e.get("context")
+            mine = [r for r in runs if r.get("name") == name]
+            run_ = _newest(mine) if mine else None
+        out.append(_said(run_) if run_ else "")
     return out
 
 
@@ -205,13 +265,13 @@ def gate_blockers(rollup: list[dict], repo: str | None, base: str, sha: str, gh)
 def why_not_merged(rollup: list[dict], repo: str | None, sha: str, gh) -> str:
     """The reason a merge stopped, in the checks' own words where they gave any, and naming the
     checks that had not finished, so a caller is not left thinking the finished ones are the whole
-    story."""
-    _, named = verdict(rollup)
-    words = check_words(repo, sha, failed_names(rollup), gh)
+    story. Each failed check is shown with the words of its own run (see `run_words`)."""
+    failed = [c for c in rollup if _one(c)[1] == "failed"]
+    words = run_words(repo, sha, failed, gh)
     parts = []
-    for item in named:
-        name = item.split(":")[0]
-        said = words.get(name)
+    for check, said in zip(failed, words):
+        name, _, result = _one(check)
+        item = f"{name}: {result}"
         parts.append(f"{item} ({said})" if said else item)
     message = "not every check passed: " + "; ".join(parts)
     running = still_running(rollup)
