@@ -369,6 +369,13 @@ def cmd_layering(a) -> int:
     return layering.main(a.root, a.package, a.marker or [], a.skip or [], a.json)
 
 
+def cmd_missing_names(a) -> int:
+    from . import missing_names
+    argv = ["--base", a.base, *(["--repo", a.repo] if a.repo else []), *sum((["--path", p] for p in a.path or []), []),
+            *a.files]
+    return missing_names.main(argv)
+
+
 def cmd_tab_colors(a) -> int:
     from claude_ops import iterm   # noqa: PLC0415
     done = iterm.color_chat_tabs(prefix=a.prefix)
@@ -469,6 +476,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--skip", action="append", help="a module prefix to leave out, e.g. app.tests")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_layering)
+
+    s = sub.add_parser("missing-names", help="list the names test files need that a base revision's modules "
+                                             "do not have, before running them there")
+    s.add_argument("--base", required=True, help="the revision the files will run against, e.g. origin/main")
+    s.add_argument("--repo", help="the repository (default: the one holding the current folder)")
+    s.add_argument("--path", action="append", help="another folder the files import from, relative to the repository")
+    s.add_argument("files", nargs="+")
+    s.set_defaults(func=cmd_missing_names)
 
     s = sub.add_parser("chat", help="start, show, end or list chats that run in tmux")
     s.add_argument("action", choices=("new", "show", "end", "list"))
