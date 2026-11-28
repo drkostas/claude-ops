@@ -18,6 +18,10 @@ class LabelTaken(Exception):
     pass
 
 
+class NotFound(Exception):
+    pass
+
+
 def run(code=0, out="", err=""):
     return subprocess.CompletedProcess([], code, out, err)
 
@@ -33,6 +37,9 @@ class FakeGitHub:
             if project else None
         self.parents, self.fail, self.n, self.ignored = {}, fail, 0, False
         self.labels, self.labelled, self.views, self.label_race = {}, {}, [], False
+        # a listing in pages of page_size (None: one page), its cursor the last item it gave, as
+        # GitHub's is stable while items are taken off; on_list runs before each page is answered
+        self.order, self.page_size, self.on_list = [], None, None
 
     def _id(self, prefix):
         self.n += 1
@@ -58,6 +65,9 @@ class FakeGitHub:
             return run(1, json.dumps({"errors": [{"message": "Content already exists in this project"}]}))
         except LabelTaken:
             return run(1, json.dumps({"errors": [{"message": "Name has already been taken"}]}))
+        except NotFound as e:
+            return run(1, json.dumps({"errors": [{"type": "NOT_FOUND",
+                                                  "message": f"Could not resolve to a node with the global id of '{e}'."}]}))
 
     # queries
     def repository(self, v):
@@ -70,8 +80,17 @@ class FakeGitHub:
             items = [{"id": i, "project": {"id": "P1"}} for i, c in self.items.items() if c == v["id"]]
             return {"node": {"projectItems": {"nodes": items}}}
         if "after" in v:
-            nodes = [{"id": i, "content": self.issues.get(c, {})} for i, c in self.items.items()]
-            return {"node": {"items": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}
+            if self.on_list:
+                self.on_list()
+            self.order += [i for i in self.items if i not in self.order]
+            start = self.order.index(v["after"]) + 1 if v.get("after") else 0
+            live = [i for i in self.order[start:] if i in self.items]
+            size = self.page_size or max(len(live), 1)
+            page = live[:size]
+            nodes = [{"id": i, "content": self.issues.get(self.items[i], {})} for i in page]
+            return {"node": {"items": {"pageInfo": {"hasNextPage": len(live) > size,
+                                                    "endCursor": page[-1] if page else v.get("after")},
+                                       "nodes": nodes}}}
         return {"node": {"views": {"nodes": [
                     {**x, "fields": {"nodes": [{"name": n} for n in x["fields"]]}} for x in self.views]},
                          "fields": {"nodes": [
@@ -182,6 +201,8 @@ class FakeGitHub:
         return {"updateProjectV2": {"projectV2": {"id": v["id"]}}}
 
     def deleteProjectV2Item(self, v):
+        if v["item"] not in self.items:
+            raise NotFound(v["item"])
         self.items.pop(v["item"])
         return {"deleteProjectV2Item": {"deletedItemId": v["item"]}}
 
@@ -664,3 +685,94 @@ def test_no_seconds_means_no_time_bound():
     b.ensure()
     now[0] = 10_000.0
     assert b.put("k1", title="t", body="b")["item"]
+
+
+def paged_board(page_size=2, read_s=50.0, seconds=90):
+    """A project in pages of two whose every page read takes read_s seconds of the Board's clock."""
+    gh = FakeGitHub()
+    now = [0.0]
+    b = board(gh, seconds=seconds, clock=lambda: now[0])
+    b.ensure()
+    gh.page_size = page_size
+
+    def read():
+        now[0] += read_s
+    gh.on_list = read
+    return gh, b, now
+
+
+MARCH = datetime(2026, 3, 12, tzinfo=timezone.utc)
+
+
+def test_prune_stops_before_a_page_once_the_seconds_are_spent_and_resumes_there():
+    gh, b, now = paged_board()
+    o1, o2 = b.put("o1", title="t", body="b", closed=True), b.put("o2", title="t", body="b", closed=True)
+    x1 = b.put("x1", title="t", body="b")
+    o3 = b.put("o3", title="t", body="b", closed=True)
+    x2 = b.put("x2", title="t", body="b")
+    now[0] = 0.0
+    b.restart_clock()
+    # page one (o1 o2) is read at 0 s and both are taken off; page two is read at 50 s (x1 o3) and its
+    # write comes at 100 s, past the 90 s bound, so the listing stops with o3 still on the project
+    assert b.prune(days=14, now=MARCH) == 2
+    assert o1["item"] not in gh.items and o2["item"] not in gh.items and o3["item"] in gh.items
+    assert b.prune_complete is False and b.prune_after == o2["item"]   # page two again, for o3
+    b.restart_clock()
+    assert b.prune(days=14, now=MARCH, after=b.prune_after) == 1
+    assert o3["item"] not in gh.items and x1["item"] in gh.items and x2["item"] in gh.items
+    assert b.prune_complete is True and b.prune_after is None
+
+
+def test_prune_reads_no_page_past_the_bound():
+    gh, b, now = paged_board(read_s=100.0)
+    for k in ("x1", "x2", "x3", "x4", "x5"):
+        b.put(k, title="t", body="b")
+    now[0] = 0.0
+    b.restart_clock()
+    reads = []
+    gh.on_list = lambda: (reads.append(1), now.__setitem__(0, now[0] + 100.0))
+    assert b.prune(days=14, now=MARCH) == 0
+    assert len(reads) == 1                         # one page read at 0 s; the second would begin at 100 s
+    assert b.prune_complete is False and b.prune_after is not None
+
+
+def test_a_listing_read_to_its_end_says_so():
+    gh = FakeGitHub()
+    b = board(gh)
+    b.ensure()
+    b.put("x1", title="t", body="b")
+    b.prune(days=14, now=MARCH)
+    assert b.prune_complete is True and b.prune_after is None
+
+
+def test_remove_takes_off_the_named_items_and_counts_a_gone_one_as_taken_off():
+    gh = FakeGitHub()
+    b = board(gh)
+    b.ensure()
+    a, c = b.put("a", title="t", body="b"), b.put("c", title="t", body="b")
+    keep = b.put("k", title="t", body="b")
+    before = len(gh.ops)
+    assert b.remove([a["item"], "T-gone", c["item"]]) == [a["item"], "T-gone", c["item"]]
+    assert a["item"] not in gh.items and c["item"] not in gh.items and keep["item"] in gh.items
+    assert a["node"] in gh.issues                  # the issue itself stays
+    assert gh.ops[before:] == ["deleteProjectV2Item"] * 3   # one write each, and no listing
+
+
+def test_remove_stops_quietly_at_the_bound_and_says_what_it_did():
+    gh = FakeGitHub()
+    now = [0.0]
+    b = board(gh, seconds=90, clock=lambda: now[0])
+    b.ensure()
+    a, c = b.put("a", title="t", body="b"), b.put("c", title="t", body="b")
+    assert b.remove([a["item"]]) == [a["item"]]
+    now[0] = 91.0
+    assert b.remove([c["item"]]) == []
+    assert c["item"] in gh.items                   # left for the next run
+
+
+def test_remove_lets_any_other_refusal_through():
+    gh = FakeGitHub(project=True, fail="deleteProjectV2Item")
+    b = board(gh)
+    b.ensure()
+    with pytest.raises(BoardError, match="refused"):
+        b.remove(["T1"])

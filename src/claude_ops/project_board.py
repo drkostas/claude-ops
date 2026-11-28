@@ -135,6 +135,9 @@ class Board:
     write budget does. A record that put() has started is always finished,
     so the bound is checked before each record and before each write outside one. A pass whose calls
     are slow then stops on time and leaves the rest for the next run, instead of running long.
+    prune() also checks the bound before each page it reads, because a large project's listing can
+    take longer than its writes. When it stops there, `prune_after` holds the cursor to begin from
+    the next time, and it is None once a listing has reached its last page.
     """
 
     def __init__(self, repo: str, title: str, *, selects: dict[str, list[str]] | None = None,
@@ -156,6 +159,8 @@ class Board:
         self.repository_id: str | None = None
         self.fields: dict[str, dict] = {}
         self._labels: dict[tuple[str, str], str] = {}
+        self.prune_after: str | None = None
+        self.prune_complete = False
 
     # -- talking to GitHub ---------------------------------------------------------------------
 
@@ -170,7 +175,7 @@ class Board:
         if self.seconds is not None:
             spent = self.clock() - self.started
             if spent >= self.seconds:
-                raise OutOfBudget(f"{spent:.0f} s spent writing, the bound is {self.seconds:g} s")
+                raise OutOfBudget(f"{spent:.0f} s spent, the bound is {self.seconds:g} s")
 
     def graphql(self, query: str, variables: dict | None = None, *, write: bool = False) -> dict:
         """Run one GraphQL query or mutation and return its `data`. A write counts against the
@@ -550,13 +555,22 @@ class Board:
 
     # -- keeping the board small ---------------------------------------------------------------
 
-    def prune(self, days: float, now: datetime | None = None) -> int:
+    def prune(self, days: float, now: datetime | None = None, *, after: str | None = None) -> int:
         """Take off the project every issue and pull request closed more than `days` ago. The
         issues and pull requests themselves stay. Returns how many items it took off; stops
-        quietly when the budget is spent, and the next run takes off the rest."""
+        quietly when the write budget or the seconds bound is spent, and the next run takes off the
+        rest. `after` begins the listing at that cursor (a `prune_after` an earlier call left).
+        Afterwards `prune_after` is the cursor to begin from next time (None for the start), and
+        `prune_complete` says whether this call read the listing to its last page."""
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=days)
-        removed, after = 0, None
+        removed = 0
+        self.prune_after, self.prune_complete = after, False
         while True:
+            try:
+                self._check_time()                 # a listing of many pages is bounded too, not only its writes
+            except OutOfBudget:
+                self.prune_after = after
+                return removed
             data = self.graphql(
                 """query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV2 {
                      items(first: 100, after: $after) {
@@ -575,9 +589,32 @@ class Board:
                                  deleteProjectV2Item(input: {projectId: $project, itemId: $item}) { deletedItemId } }""",
                             {"project": self.project["id"], "item": it["id"]}, write=True)
                     except OutOfBudget:
+                        self.prune_after = after           # this page again, for the items it did not take off
                         return removed
                     removed += 1
             page = items.get("pageInfo") or {}
             if not page.get("hasNextPage"):
+                self.prune_after, self.prune_complete = None, True
                 return removed
             after = page.get("endCursor")
+
+    def remove(self, items) -> list[str]:
+        """Take the named project items off the project, each one a write. Returns the ids taken
+        off, with any the project no longer holds counted as taken off, in the order given. It
+        stops quietly when the write budget or the seconds bound is spent, so the ids it did not
+        reach are left for the next run. For a caller that already knows which items to take off,
+        so it need not list the project."""
+        done: list[str] = []
+        for item in items:
+            try:
+                self.graphql(
+                    """mutation($project: ID!, $item: ID!) {
+                         deleteProjectV2Item(input: {projectId: $project, itemId: $item}) { deletedItemId } }""",
+                    {"project": self.project["id"], "item": item}, write=True)
+            except OutOfBudget:
+                break
+            except BoardError as e:
+                if "could not resolve to a node" not in str(e).lower():
+                    raise
+            done.append(item)
+        return done
