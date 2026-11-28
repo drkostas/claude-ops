@@ -97,7 +97,17 @@ def test_the_command_line_exits_1_with_lines_and_2_on_an_unknown_base(tmp_path, 
     rc = missing_names.main(["--base", "base", "--repo", str(root), str(root / "tests/test_it.py")])
     out = capsys.readouterr()
     assert rc == 1 and "tests/test_it.py:2: reads pkg.mod.Y, which base does not define" in out.out
+    assert "1 name(s) the files need that base does not have" in out.err and "globals(), exec or setattr" in out.err
     write(root, {"tests/test_it.py": "from pkg import mod\nmod.X\n"})
     assert missing_names.main(["--base", "base", "--repo", str(root), str(root / "tests/test_it.py")]) == 0
     assert missing_names.main(["--base", "no-such-ref", "--repo", str(root), str(root / "tests/test_it.py")]) == 2
     assert missing_names.main(["--base", "base", "--repo", str(root), str(root / "tests/missing.py")]) == 2
+
+
+def test_a_name_made_only_at_run_time_reads_as_missing_and_the_summary_names_that_form(tmp_path, capsys):
+    root = repo(tmp_path, {**BASE, "pkg/made.py": "globals()['LATE'] = 1\n"}, {})
+    write(root, {"tests/test_it.py": "from pkg import made\nmade.LATE\n"})
+    rc = missing_names.main(["--base", "base", "--repo", str(root), str(root / "tests/test_it.py")])
+    out = capsys.readouterr()
+    assert rc == 1 and "tests/test_it.py:2: reads pkg.made.LATE" in out.out
+    assert "makes only when it runs" in out.err

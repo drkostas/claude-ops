@@ -24,6 +24,10 @@ A module whose names cannot be known from its text (``from x import *``, a modul
 ``__getattr__``) is left out, and so is a decorated function's signature. Writing an attribute
 (``module.NAME = value``) never fails, so it is not a use.
 
+It reads text and runs nothing, so a name a module makes only when it runs (through ``globals()``,
+``exec`` or ``setattr`` on the module itself) reads as missing although the run would find it. The
+summary line says so, so a reader who meets one knows the form at once.
+
 Exit 0 when nothing is missing, 1 when something is, 2 on a usage error (an unknown base, a file
 that is not there or cannot be parsed).
 """
@@ -395,7 +399,8 @@ def main(argv: list[str] | None = None) -> int:
         print(m)
     if found:
         print(f"{len(found)} name(s) the files need that {a.base} does not have; a run against {a.base} "
-              f"would stop at the first one", file=sys.stderr)
+              f"would stop at the first one. A name a module makes only when it runs (through globals(), exec or "
+              f"setattr on the module itself) reads as missing here, so check such a line in its module", file=sys.stderr)
     return 1 if found else 0
 
 
