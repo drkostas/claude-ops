@@ -446,10 +446,11 @@ def test_group_memorys_signature_is_left_alone_and_the_largest_program_has_a_rea
         "group_memory takes what it always took, so a two-parameter stub of it still matches"
     monkeypatch.setattr(h, "group_memory", lambda _pgid, _seen=None: (1.0, 0.5))
     assert h.group_memory(os.getpid()) == (1.0, 0.5), "and such a stub is callable as the job loop calls it"
-    _prog = h.largest_program(os.getpgrp())
-    assert _prog and "/" not in _prog and _prog.lower().startswith(("python", "pytest")), \
-        f"the reader names a real program of this very process group, by name and not by path: {_prog!r}"
     assert h.largest_program(999999) == "", "and a group that is gone names nothing rather than raising"
+    if sys.platform == "darwin":        # the footprints come from proc_pid_rusage, which is macOS's
+        _prog = h.largest_program(os.getpgrp())
+        assert _prog and "/" not in _prog and _prog.lower().startswith(("python", "pytest")), \
+            f"the reader names a real program of this very process group, by name and not by path: {_prog!r}"
 
 
 def test_what_a_finished_job_took_names_the_program_that_was_largest_at_its_peak(monkeypatch, tmp_path):
