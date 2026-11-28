@@ -190,3 +190,48 @@ def test_the_supervisor_file_is_in_the_package_and_imports_only_the_standard_lib
     names = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     names |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     assert names <= {"os", "signal", "subprocess", "sys", "time"}
+
+
+def test_without_a_log_the_job_gets_a_new_one_in_the_logs_folder(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(detach, "default_log_dir", lambda env=None: str(tmp_path / "logs" / "claude-ops"))
+    assert cli.main(["detach", "--", sys.executable, "-c", "print('nolog')"]) == 0
+    out, err = capsys.readouterr()
+    assert out.strip().isdigit()
+    line = [x for x in err.splitlines() if x.startswith("detach log ")][0]
+    log = line.removeprefix("detach log ")
+    assert log.startswith(str(tmp_path / "logs" / "claude-ops" / "detach-")) and log.endswith(".log")
+    assert _wait_for(log, "nolog")
+
+
+def test_the_default_log_dir_is_the_usual_logs_folder(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert detach.default_log_dir({}).endswith(os.path.join("Library", "Logs", "claude-ops"))
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert detach.default_log_dir({"XDG_STATE_HOME": "/x/state"}) == "/x/state/claude-ops/logs"
+
+
+def test_a_log_outside_the_listed_folders_is_refused_before_anything_starts(tmp_path, monkeypatch):
+    ok = tmp_path / "ok"
+    monkeypatch.setenv(detach.LOG_ROOTS_ENV, str(ok) + os.pathsep + str(tmp_path / "other"))
+    marker = tmp_path / "ran"
+    with pytest.raises(ValueError) as e:
+        detach.detach([sys.executable, "-c", f"open({str(marker)!r}, 'w')"], str(tmp_path / "bad" / "j.log"))
+    assert str(ok) in str(e.value) and "outside" in str(e.value)
+    assert not (tmp_path / "bad").exists() and not marker.exists()
+    pid = detach.detach([sys.executable, "-c", "print('inside')"], str(ok / "sub" / "j.log"))
+    assert pid > 0 and _wait_for(ok / "sub" / "j.log", "inside")
+
+
+def test_a_link_out_of_the_listed_folders_does_not_pass(tmp_path, monkeypatch):
+    ok, elsewhere = tmp_path / "ok", tmp_path / "elsewhere"
+    ok.mkdir()
+    elsewhere.mkdir()
+    (ok / "link").symlink_to(elsewhere)
+    monkeypatch.setenv(detach.LOG_ROOTS_ENV, str(ok))
+    with pytest.raises(ValueError):
+        detach.check_log_root(str(ok / "link" / "j.log"))
+
+
+def test_with_no_list_any_folder_is_allowed(tmp_path, monkeypatch):
+    monkeypatch.delenv(detach.LOG_ROOTS_ENV, raising=False)
+    detach.check_log_root(str(tmp_path / "anywhere" / "j.log"))
