@@ -45,6 +45,7 @@ def bash(command, cwd="/"):
     ("it stopped at 13:20. Then at 13:31 it ran", ["13:20", "13:31"]),
     # a forward word far back names who or what, not a deadline
     ("the run (pid 34662) was ended by its pid at 13:25", ["13:25"]),
+    ("I ran the checks on the five branches by hand at 13:25", ["13:25"]),
     ("the build was stopped by the user, who read the log at 13:25", ["13:25"]),
     # a sentence-wide word after the time marks nothing before it, so "by" far back still decides
     ("the run was ended by its pid at 13:25, and tomorrow it runs again", ["13:25"]),

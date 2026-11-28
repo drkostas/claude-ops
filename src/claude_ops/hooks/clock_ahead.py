@@ -89,6 +89,7 @@ FORWARD_WORDS_BACK = 3
 #: words that mark the whole sentence as a condition, a future or another day, wherever they sit before the
 #: time. Every other forward word (by, from, after) names who or what as often as when, so it counts only
 #: among the last FORWARD_WORDS_BACK words
+_BY_HAND = re.compile(r"\bby\s+hand\b", re.I)
 SENTENCE_WIDE = ("if", "will", "tomorrow", "tonight")
 
 #: a time of day. A colon may end it when a space or the end of the text follows, as in a log line that starts
@@ -237,6 +238,9 @@ def ahead(text: str, now: dt.datetime, cfg: Config) -> list[tuple[str, float]]:
         before = clean[start:m.start()]
         ends = list(_SENTENCE_END.finditer(before))
         sentence = before[ends[-1].end():] if ends else before
+        # "by hand" says how something was done and not by when, so it is taken out before the forward words are
+        # looked for ("I ran it by hand at 13:25" is a past time, and "by" is not a deadline word there)
+        sentence = _BY_HAND.sub(" ", sentence)
         near = " ".join(sentence.split()[-cfg.forward_back:])
         if cfg.forward_re and cfg.forward_re.search(near):
             continue
