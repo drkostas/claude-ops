@@ -17,7 +17,8 @@ together they fill memory and swap, and swap files fill the disk, until everythi
 slows down. This is one queue for every heavy job: a job waits for its turn and for room, runs under
 a memory cap, and gives the slot back.
 
-THE GATE. A job starts only with HEAVY_MIN_FREE_GB (6) of free and reclaimable memory, macOS not
+THE GATE. A job starts only with enough free and reclaimable memory for it, which is what it declares or
+what the gate works out from its record and its command (see the need paragraph below), macOS not
 rating the memory pressure critical, and the data volume over HEAVY_MIN_DISK_PCT (10) free; swap over
 HEAVY_MAX_SWAP_GB (14) holds it only while the free disk is also under HEAVY_SWAP_DISK_FACTOR (3)
 times the swap in use. Swap is history, and hurts only when its files could fill the disk, so the
@@ -44,12 +45,23 @@ inside an inline script given as one word (bash -c '...'), or in the text of a f
 claude-ops detach runs it in the background instead, and heavy exits 2. A job inside another heavy job
 takes no slot, so it is never refused. Without HEAVY_SELF_QUEUED nothing is refused.
 
-A JOB MAY SAY WHAT IT NEEDS. The gate's HEAVY_MIN_FREE_GB (6) is room for a job nobody has measured, and a
-small job waited behind it on a machine with plenty of room for that job. A job that knows its size
-declares it with --need-gb <GB> or HEAVY_NEED_GB, held between NEED_FLOOR_GB (0.5) and HEAVY_MAX_GB, and
-the gate then asks that much free memory instead. A job that declares nothing asks HEAVY_MIN_FREE_GB as
-before, and when memory holds it, its first waiting line about memory and its hour note say how to declare
-a need, with the peak of the last run of its name that exited 0. The hour note also says how far the most
+A JOB MAY SAY WHAT IT NEEDS, AND THE GATE WORKS THE REST OUT. A job that knows its size declares it with
+--need-gb <GB> or HEAVY_NEED_GB, held between NEED_FLOOR_GB (0.5) and HEAVY_MAX_GB, and the gate asks that
+much free memory. A job that declares nothing is no longer made to ask HEAVY_MIN_FREE_GB's default of 6,
+which is room for the largest job anybody runs: a small job waited behind that number on a machine with
+plenty of room for it, in one case for half an hour until it gave up, and the same job told to ask for 1 GB
+started at once and peaked at 0.1. The gate already kept what every finished job took, so estimated_need
+reads its own record instead of asking for a fixed amount. THE LARGEST PEAK of the last NEED_RUNS (5) runs
+of that job name that exited 0, with NEED_MARGIN (a third) on top, is asked for when there is one. With no
+such run, a program the job's command names in HEAVY_PROGRAMS is asked for instead, so a first render or a
+first build is not made to start in the room an ordinary script needs. With neither, UNKNOWN_NEED_GB (2).
+A HEAVY_MIN_FREE_GB somebody SET in the environment is obeyed as it always was and nothing is worked out,
+because a setting is not a default to work around. The amount asked for is in the job's own running line
+whichever way it was arrived at, and when memory holds a job that declared nothing, its waiting line and
+its hour note say why that much is being asked for and how to declare a need instead.
+An estimate that comes out too low costs a wait that was too short, never the machine: a group past
+HEAVY_MAX_GB is ended whatever it asked for, and the run's own peak reaches the record before the next run
+reads it, so one run corrects the estimate and there is no list for anybody to maintain. The hour note also says how far the most
 free memory of the whole wait got from what the job asks and the whole number of GB a job could ask for
 and start at once (ceiling_words), because a gate half a GB out of reach for an hour reads exactly like
 one that is hopeless, and the two want different repairs. A declaration is not taken on trust. Each job is sampled as it runs, and a peak more than
@@ -88,6 +100,14 @@ then, so a live pid whose process started more than SAME_START_S (1 s) later is 
 the record goes. A start that cannot be read keeps the record. `ps` runs once for all the records one
 reader looks at, and only when one of their pids is alive. HEAVY_FAKE_STARTED (an epoch) stands in for
 every process's start in tests.
+
+WHICH STEP TOOK IT. The peak alone says a job needs that much and not which part of it does, so each
+sample also reads the single largest process of the group (group_memory's `most`, one more pass of
+proc_pid_rusage over pids already in hand) and the program that was largest at the sample which SET the
+peak is kept. The finished and ENDED lines name it, and so does the done record, as peak_by. A job whose
+steps are separate programs is named step by step, and one that does everything inside a single process
+names that process, which is the honest answer since nothing outside it can see its parts. When the peak
+comes from peak_of_children() instead, a child's own maximum that no sample saw, no program is named.
 
 WHAT IT TOOK. Every job's finished or ENDED line says its peak memory, and HEAVY_DIR/done/<pid>.json
 keeps it with the exit code and the minutes, so a chat knows the cap a job needs before running it
@@ -181,7 +201,7 @@ import time
 from pathlib import Path
 
 from . import config, killguard
-from .footprint import total_gb, total_resident_gb
+from .footprint import biggest_gb, total_gb, total_resident_gb
 
 DIR = Path(os.environ.get("HEAVY_DIR", "/tmp/claude-ops-heavy"))
 SLOT, QUEUE, LAST = DIR / "slot", DIR / "queue", DIR / "last"
@@ -235,6 +255,27 @@ LIMIT_VARS = {"memory": ("HEAVY_MIN_FREE_GB", "HEAVY_NEED_GB"), "pressure": (),
               "swap": ("HEAVY_MAX_SWAP_GB", "HEAVY_SWAP_DISK_FACTOR"), "disk": ("HEAVY_MIN_DISK_PCT",)}
 #: how many runs in a row of one job that fail the same way are worth saying
 REPEAT_FAILS = int(_num("HEAVY_REPEAT_FAILS", 3))
+
+#: a measured peak is asked for with this much on top, because the same job varies between runs
+NEED_MARGIN = _num("HEAVY_NEED_MARGIN", 0.3)
+#: how many of a job name's past runs the estimate takes the largest peak of
+NEED_RUNS = int(_num("HEAVY_NEED_RUNS", 5))
+#: what a job asks for when nobody has measured it and no program in its command is a known heavy one
+UNKNOWN_NEED_GB = _num("HEAVY_UNKNOWN_NEED_GB", 2)
+#: programs whose work is heavy on memory, and what a FIRST run of a job naming one asks for, in GB. It is
+#: read only when no run of that job name has been measured, and one real run replaces the guess for good,
+#: so a wrong number here costs one run of one job. Matched on the program's own name (program()), so a
+#: path and its arguments do not matter. Names common to light work (python, node, sh) are deliberately
+#: absent: a guess that fires on them would put every job back behind a large number.
+HEAVY_PROGRAMS = {
+    "blender": 8, "cycles": 8, "qemu": 8, "emulator": 8, "qemu-system-aarch64": 8, "qemu-system-x86_64": 8,
+    "ollama": 8, "llama-server": 8, "llama-cli": 8,
+    "openscad": 6, "freecad": 6, "meshlab": 6, "prusa-slicer": 6, "super-slicer": 6, "cura": 6,
+    "povray": 6, "xcodebuild": 6, "gradle": 6, "bazel": 6, "handbrake": 6, "HandBrakeCLI": 6,
+    "chrome": 4, "chromium": 4, "firefox": 4, "msedge": 4, "webkit": 4, "ffmpeg": 4, "whisper": 4,
+    "rustc": 4, "cargo": 4, "clang": 4, "clang++": 4, "g++": 4, "ld": 4, "lld": 4, "swiftc": 4,
+    "javac": 4, "cmake": 4, "ninja": 4, "docker": 4, "colima": 4, "dockerd": 4,
+}
 #: how far back `status` and failing() look for such a run of failures
 REPEAT_HOURS = _num("HEAVY_REPEAT_HOURS", 24)
 #: how long the HEAVY_HOOK command may take before it is left behind
@@ -424,7 +465,7 @@ def declared_need(given: str | None = None) -> tuple[float | None, tuple[str, st
     except ValueError:
         need = math.nan
     if not math.isfinite(need):
-        say(f"{name} {raw!r} is not a number of GB, so this job asks {MIN_FREE_GB:g} GB free like one that "
+        say(f"{name} {raw!r} is not a number of GB, so this job asks what the gate works out like one that "
             "declares nothing")
         return None, None
     held = round(min(max(need, NEED_FLOOR_GB), MAX_GB), 2)
@@ -446,19 +487,108 @@ def kept_peak(what: str) -> float:
         return 0.0
 
 
-def gate_gb(what: str, need: float | None) -> float:
-    """The free memory the gate asks for a run of `what`: MIN_FREE_GB when it declares no need, else the larger
-    of its need and the peak its last run took over that need (kept_peak), never above MAX_GB."""
+def measured_peaks(what: str, records: list[dict] | None = None) -> list[float]:
+    """The peaks in GB of the newest NEED_RUNS runs of `what` that exited 0, newest first, with a peak above 0.
+    A failed run is left out, since it may have ended before it took what it needs, and a record whose exit
+    code or peak cannot be read is left out rather than counted as 0."""
+    out: list[float] = []
+    runs = [r for r in (done_jobs() if records is None else records) if str(r.get("what")) == what]
+    for r in sorted(runs, key=lambda r: float(r["end"]), reverse=True):
+        try:
+            rc, peak = int(r.get("rc", 1)), float(r.get("peak_gb") or 0)
+        except (TypeError, ValueError):
+            continue
+        if rc == 0 and peak > 0:
+            out.append(peak)
+        if len(out) == NEED_RUNS:
+            break
+    return out
+
+
+def heavy_program(command) -> tuple[str, float] | None:
+    """Pure. The first program in `command` that HEAVY_PROGRAMS names as heavy on memory, with its GB, or
+    None. Each word is read as a path and matched on its last part, so /opt/x/bin/blender is blender, and a
+    word that is an argument rather than a program simply matches nothing."""
+    for word in command or ():
+        name = Path(str(word)).name
+        if name in HEAVY_PROGRAMS:
+            return name, float(HEAVY_PROGRAMS[name])
+    return None
+
+
+def estimated_need(what: str, command=(), records: list[dict] | None = None) -> tuple[float, str]:
+    """What a job that declares no need is asked for, and why, in words a reader can act on.
+
+    The second value is why, for a reader held by the gate, and it is EMPTY when a HEAVY_MIN_FREE_GB
+    somebody set decided the number, because the gate already says "needs N" and a reason that only repeats
+    the number earns no room.
+
+    MEASURED FIRST, because the record is better evidence than any guess: the largest peak of the last
+    NEED_RUNS runs of this job name that exited 0, with NEED_MARGIN on top for the variation between runs.
+    THEN THE SOFTWARE, for a job nobody has measured: a program its command names in HEAVY_PROGRAMS asks
+    that program's number, which is why a first render or a first build is not made to start in the room an
+    ordinary script needs. THEN UNKNOWN_NEED_GB, which is small on purpose, because the room for a job
+    nobody has measured used to be the room for the largest job anybody runs, and every small job waited
+    behind that number. Held between NEED_FLOOR_GB and MAX_GB.
+
+    An estimate that comes out too low costs a wait that was too short, never the machine: a group past
+    MAX_GB is ended whatever it asked for, and this run's own peak is in the record before the next run
+    reads it, so one run corrects the estimate with no list to maintain.
+    """
+    # ⛔ A SETTING SOMEBODY MADE IS NOT A DEFAULT TO WORK AROUND. HEAVY_MIN_FREE_GB set in the environment is
+    # a deliberate floor for this job (the module's own example is a job that needs 16 GB), so it is obeyed and
+    # nothing is worked out. Only the DEFAULT of 6, which was the room for the largest job anybody runs and
+    # which every small job waited behind, is replaced by what follows.
+    if os.environ.get("HEAVY_MIN_FREE_GB", "").strip():
+        return _num("HEAVY_MIN_FREE_GB", MIN_FREE_GB), ""
+    peaks = measured_peaks(what, records)
+    if peaks:
+        gb = _hold_need(max(peaks) * (1 + NEED_MARGIN))
+        return gb, (f"{len(peaks)} run(s) of {what} that exited 0 peaked at most {max(peaks):g} GB, so it "
+                    f"asks {gb:g} GB, that peak and {NEED_MARGIN * 100:g} per cent")
+    heavy = heavy_program(command)
+    if heavy:
+        gb = _hold_need(heavy[1])
+        return gb, (f"no run of {what} has been measured, and its command runs {heavy[0]}, which is heavy on "
+                    f"memory, so it asks {gb:g} GB until one run of it has been")
+    gb = _hold_need(UNKNOWN_NEED_GB)
+    return gb, (f"no run of {what} has been measured and no program in its command is a known heavy one, so "
+                f"it asks {gb:g} GB")
+
+
+def _hold_need(gb: float) -> float:
+    """`gb` held between NEED_FLOOR_GB and MAX_GB, rounded as a need is."""
+    return round(min(max(gb, NEED_FLOOR_GB), MAX_GB), 2)
+
+
+def gate_gb(what: str, need: float | None, est: tuple[float, str] | None = None, command=()) -> float:
+    """The free memory the gate asks for a run of `what`. With a declared need, the larger of that need and
+    the peak its last run took over it (kept_peak), never above MAX_GB. With none, the estimate: `est` when
+    the caller has already worked it out (so the words beside it come from the same reading), else
+    estimated_need, which obeys a HEAVY_MIN_FREE_GB somebody set and otherwise works the amount out. The
+    DEFAULT MIN_FREE_GB is no longer asked of an undeclared job, because it is the room for the largest job
+    anybody runs and it made every small one wait for that."""
     if need is None:
-        return MIN_FREE_GB
+        return (est or estimated_need(what, command))[0]
     return round(min(max(need, kept_peak(what)), MAX_GB), 2)
 
 
-def judge_need(chat: str, what: str, need: float | None, peak: float) -> str | None:
+def judge_need(chat: str, what: str, need: float | None, peak: float,
+               asked: float | None = None) -> str | None:
     """After a run that declared `need`: a peak more than NEED_SLACK over it is kept for the next run of `what`
     and said, in one line that is returned. A run that stayed within its need drops a peak kept before, and its
-    next run asks the need again. Nothing for a run that declared nothing."""
+    next run asks the need again.
+
+    For a run that declared nothing, `asked` is what the gate worked out for it (estimated_need). A peak more
+    than NEED_SLACK over that is said once and NOTHING IS KEPT, because this run's own peak is already in the
+    record and the next run's estimate reads it. A kept file would be a second store of the same fact, and the
+    two could disagree."""
     if need is None:
+        if asked is not None and peak > asked * (1 + NEED_SLACK):
+            line = (f"{what} took {peak:g} GB, more than a quarter over the {asked:g} GB the gate worked out "
+                    f"for it, and this run is in the record, so its next run asks for more")
+            say(line)
+            return line
         return None
     f = _peak_file(what)
     if peak > need * (1 + NEED_SLACK):
@@ -490,11 +620,13 @@ NEED_HINT = ("A job that needs less memory can say so with --need-gb <GB> or HEA
              "until that much is free")
 
 
-def need_words(last_gb: float | None = None) -> str:
-    """Pure. NEED_HINT, and with `last_gb` (last_peak) the peak of the last run of the same name that exited 0."""
-    if last_gb is None:
-        return NEED_HINT
-    return NEED_HINT + f" (its last run under this name that exited 0 peaked at {last_gb:g} GB)"
+def need_words(last_gb: float | None = None, est_words: str = "") -> str:
+    """Pure. NEED_HINT, and with `last_gb` (last_peak) the peak of the last run of the same name that exited 0.
+    `est_words` is estimated_need's own reason, which leads, because a job held by the gate wants to know why
+    that much is being asked for before it is told how to ask for less."""
+    hint = NEED_HINT if last_gb is None else (
+        NEED_HINT + f" (its last run under this name that exited 0 peaked at {last_gb:g} GB)")
+    return f"{est_words}. {hint}" if est_words else hint
 
 
 def ceiling_words(most_free: float, ask: float, minutes: float, can_declare: bool = True) -> str:
@@ -532,15 +664,8 @@ def last_peak(what: str, records: list[dict] | None = None) -> float | None:
     """The peak, in GB, of the newest run of `what` that exited 0 among `records` (done_jobs() when not given),
     or None when there is no such run with a peak above 0. A failed run is left out, since it may have ended
     before it took what it needs."""
-    runs = [r for r in (done_jobs() if records is None else records) if str(r.get("what")) == what]
-    for r in sorted(runs, key=lambda r: float(r["end"]), reverse=True):
-        try:
-            rc, peak = int(r.get("rc", 1)), float(r.get("peak_gb") or 0)
-        except (TypeError, ValueError):
-            continue
-        if rc == 0 and peak > 0:
-            return peak
-    return None
+    peaks = measured_peaks(what, records)
+    return peaks[0] if peaks else None
 
 
 def held_note(why: str, kinds: set[str], minutes: float, most_free: float, ask_gb: float | None = None,
@@ -889,14 +1014,17 @@ def gave_up_line(what: str, g: GaveUp, runs_without: str | None = None) -> str:
 
 
 def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
-              declared: tuple[str, str] | None = None, max_wait: float | None = None) -> bool:
+              declared: tuple[str, str] | None = None, max_wait: float | None = None, command=()) -> bool:
     """Wait for this caller's turn, then take the slot for `holder_pid`. False when `holder_pid`
     ended while it waited (a CI worker that was cancelled). `need` is the memory the job declares
     (declared_need), and `declared` where that came from: the gate then asks gate_gb instead of
     MIN_FREE_GB. With `max_wait` (seconds) a caller that is still waiting after that long stops: its ticket
     goes, HEAVY_HOOK is told `withdrawn`, and GaveUp says whether the gate or a holder was in the way."""
     began = time.time()
-    ask = gate_gb(what, need)
+    # worked out ONCE, so the number the gate asks for and the words beside it come from one reading of the
+    # record. `hold` passes no command, which only means its software guess has nothing to read.
+    est = estimated_need(what, command) if need is None else None
+    ask = gate_gb(what, need, est)
     if need is not None and ask > need:
         say(f"{what} took {kept_peak(what):g} GB on its last run, over the {need:g} GB it declares, so it "
             f"waits for {ask:g} GB free")
@@ -921,6 +1049,9 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
         if not last:
             last.append(last_peak(what))
         return last[0]
+
+    def why_ask() -> str:
+        return est[1] if est else ""
 
     try:
         while True:
@@ -993,7 +1124,7 @@ def wait_turn(chat: str, what: str, holder_pid: int, need: float | None = None,
                 held_kinds = {kind for kind, _words in held}
                 line = f"waiting, {why}{cause_if_memory(held_kinds)}"
                 if need is None and "memory" in held_kinds and not hinted:
-                    line += ". " + need_words(peak())
+                    line += ". " + need_words(peak(), why_ask())
                     hinted = True
                 say(line)
                 said = key
@@ -1076,6 +1207,24 @@ def group_memory(pgid: int, seen: dict[int, int] | None = None) -> tuple[float, 
         seen.update(outside)
         pids = sorted(set(members) | set(still_running(seen, table)))
     return round(total_gb(pids), 1), round(total_resident_gb(pids), 2)
+
+
+def largest_program(pgid: int, seen: dict[int, int] | None = None) -> str:
+    """The program of the single largest process of a job now, or "" when none can be read.
+
+    ⛔ A FUNCTION OF ITS OWN RATHER THAN AN ARGUMENT OF group_memory (2026-11-28). The obvious shape was to
+    have group_memory fill in the largest process from the walk it already does, which costs nothing extra.
+    It also breaks every caller that stands group_memory in for a test, because a stub is a second
+    implementation of the signature and a widened one no longer matches it: this package's own swapped-out
+    tests stub it as `lambda _pgid, _seen=None`, and 13 of them failed with a TypeError. So the reader is
+    separate and the signature is untouched. It is asked only at a sample that SETS a new peak, a handful of
+    times in a job rather than every poll, so the second walk costs a handful of microsecond reads.
+    """
+    table = killguard.process_table() or {}
+    members, outside = job_tree(pgid, table)
+    pids = sorted(set(members) | set(still_running(seen, table))) if seen is not None else members + list(outside)
+    big = biggest_gb(pids)
+    return program(big[0], table) if big else ""
 
 
 def swapped_words(what: str, resident: float, peak_resident: float, footprint: float, swap_now: float,
@@ -1175,14 +1324,15 @@ def peak_of_children() -> float:
 
 
 def remember(chat: str, what: str, rc: int, peak: float, minutes: float, ended: str | None,
-             need: float | None = None) -> Path:
-    """Keep what a finished job took, in DONE/<pid>.json, with the need it declared (None for none)."""
+             need: float | None = None, peak_by: str = "") -> Path:
+    """Keep what a finished job took, in DONE/<pid>.json, with the need it declared (None for none) and
+    `peak_by`, the program that was largest when the peak was reached ("" when none could be named)."""
     DONE.mkdir(parents=True, exist_ok=True)
     for old in sorted(DONE.glob("*.json"), key=lambda x: x.stat().st_mtime)[:-DONE_KEEP]:
         old.unlink(missing_ok=True)
     took = {"chat": chat, "what": what, "rc": rc, "peak_gb": peak, "minutes": round(minutes, 1),
             "ended": ended, "at": time.strftime("%Y-%m-%d %H:%M"), "end": round(time.time(), 2),
-            "session": _session(), "need_gb": need}
+            "session": _session(), "need_gb": need, "peak_by": peak_by or None}
     took["how"] = failed_how(took)
     (DONE / f"{os.getpid()}.json").write_text(json.dumps(took))
     return DONE / f"{os.getpid()}.json"
@@ -1354,6 +1504,7 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
     # wraps its own steps) would wait for the slot its own parent holds, and nothing could give it
     # back. Inside another heavy job (HEAVY_HELD names the holder) it runs in the outer job's process
     # group (no new session), so the outer job's memory cap still counts it and its stop still reaches it.
+    ask_was: float | None = None        # what the gate asked for when the job declared nothing, else None
     inside = inside_holder()
     if inside is not None and os.environ.get("HEAVY_HELD", "") == str(inside["pid"]):
         say(f"running {what} inside {inside['chat']}: {inside['what']}, which holds the slot")
@@ -1378,10 +1529,14 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
             return 2
     need, declared = declared_need(need_gb)
     if inside is None:
-        wait_turn(chat, what, os.getpid(), need, declared)
+        wait_turn(chat, what, os.getpid(), need, declared, command=cmd)
         slot_pid, held = os.getpid(), None
-        say(f"running {what} for {chat} (memory cap {MAX_GB:g} GB"
-            + (f", declared need {need:g} GB)" if need is not None else ")"))
+        # the asked-for memory is in this line whether the job declared it or the gate worked it out, so a
+        # reader of one job's output never has to find the gate's own reasoning somewhere else
+        ask_was = None if need is not None else estimated_need(what, cmd)[0]
+        asked = (f", declared need {need:g} GB)" if need is not None
+                 else f", asks {ask_was:g} GB free)")
+        say(f"running {what} for {chat} (memory cap {MAX_GB:g} GB" + asked)
     else:
         slot_pid = held = int(inside["pid"])
         say(f"running {what} for {chat} inside {inside['chat']}: {inside['what']}, which holds the slot, "
@@ -1468,6 +1623,11 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, forward)
     over, ended, began, peak = None, False, time.time(), 0.0
+    # ⭐ the program that was largest at the sample that SET the peak, so the finished line says which step
+    # of a job of several took the memory, and not only that the job took it. A job whose steps are separate
+    # programs is named step by step; one that does everything in a single process names that process, which
+    # is the honest answer, since nothing outside it can see its parts.
+    peak_by = ""
     # the resident peak, the swap when it was reached, and whether the job is said to be swapped out now
     peak_res, swap_at_peak, swapped = 0.0, 0.0, False
     try:
@@ -1484,7 +1644,8 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
                 rc = 124
                 break
             used, resident = group_memory(job.pid, strays)
-            peak = max(peak, used)
+            if used > peak:
+                peak, peak_by = used, largest_program(job.pid, strays) or peak_by
             if resident > peak_res:
                 peak_res, swap_at_peak = resident, swap_gb()
             if swapped and (resident >= peak_res / 2 or resident >= SWAPPED_SHARE * used):
@@ -1505,20 +1666,27 @@ def run(chat: str, what: str, cmd: list[str], max_hold: float | None = None,
         release(os.getpid())
         (TAKING / f"{slot_pid}.json").unlink(missing_ok=True)
     time.sleep(0.2 if notify_chat else 0)      # the relay prints the job's last lines first
-    peak = round(max(peak, peak_of_children()), 2)
+    # ⛔ peak_of_children() is a child's own maximum resident size, which no sample of this loop saw, so when
+    # it is the larger the peak has no program behind it that this job can honestly name. Keeping peak_by
+    # here would attach the name of the largest SAMPLED step to a figure that came from somewhere else.
+    children = peak_of_children()
+    if children > peak:
+        peak, peak_by = children, ""
+    peak = round(peak, 2)
     minutes = (time.time() - began) / 60
+    by = f", {peak_by} largest at that peak" if peak_by else ""
     why = None
     if ended:
         why = f"its --max-hold of {max_hold:g} min"
-        say(f"ENDED {what}: it ran for its --max-hold of {max_hold:g} min (peak memory {peak:g} GB)")
+        say(f"ENDED {what}: it ran for its --max-hold of {max_hold:g} min (peak memory {peak:g} GB{by})")
     if over is not None:
         why = f"{over} GB, over the {MAX_GB:g} GB cap"
-        say(f"ENDED {what}: it used {over} GB, over the {MAX_GB:g} GB cap. Rework it to use less "
+        say(f"ENDED {what}: it used {over} GB, over the {MAX_GB:g} GB cap{by}. Rework it to use less "
             "(stream, one part at a time), or run it with HEAVY_MAX_GB set to what it needs.")
     if why is None:
-        say(f"{what} is done: exit {rc}, peak memory {peak:g} GB, {minutes:.1f} min")
-    remember(chat, what, rc, peak, minutes, why, need)
-    judge_need(chat, what, need, peak)
+        say(f"{what} is done: exit {rc}, peak memory {peak:g} GB{by}, {minutes:.1f} min")
+    remember(chat, what, rc, peak, minutes, why, need, peak_by)
+    judge_need(chat, what, need, peak, ask_was)
     again = next((s for s in streaks(done_jobs()) if (s["chat"], s["what"]) == (chat, what)), None)
     if again is not None and not worth_saying(again["count"]):
         again = None

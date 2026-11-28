@@ -63,6 +63,14 @@ def total_gb(pids) -> float:
     return sum(gb for pid in pids if (gb := footprint_gb(pid)) is not None)
 
 
+def biggest_gb(pids) -> tuple[int, float] | None:
+    """The process with the largest footprint among these, as (pid, GB), or None when none can be read.
+    One pass of proc_pid_rusage over the same pids total_gb reads, so it costs microseconds and a caller
+    that wants both pays for one walk of the process tree rather than two."""
+    sizes = [(pid, gb) for pid in pids if (gb := footprint_gb(pid)) is not None]
+    return max(sizes, key=lambda x: x[1]) if sizes else None
+
+
 def total_resident_gb(pids) -> float:
     """The resident sizes of these processes added up, in GB; a process that is gone counts nothing."""
     return sum(gb for pid in pids if (gb := resident_gb(pid)) is not None)

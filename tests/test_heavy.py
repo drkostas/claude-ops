@@ -1,6 +1,7 @@
 """The heavy-job queue: the turn across chats, the gate, the memory cap, holds for CI jobs, and the
 clearing of what died. Every run uses its own state folder and stand-in machine readings."""
 import importlib
+import inspect
 import json
 import os
 import re
@@ -157,7 +158,7 @@ def test_a_waiter_beside_a_job_past_its_turn_counts_the_room_that_job_may_take_a
         sample = state / "taking" / f"{holder.pid}.json"
         sample.write_text(json.dumps({"now_gb": 2.0, "peak_gb": 9.0, "at": time.time()}))
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
-               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC,
+               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC, "HEAVY_MIN_FREE_GB": HELD_FLOOR,
                "HEAVY_LOG": str(tmp_path / "heavy.log"), "HEAVY_FAKE_STARTED": PROCESSES_STARTED}
         waiter = subprocess.Popen([sys.executable, "-m", "claude_ops.heavy", "t-chat", "second", "--", "echo", "ran"],
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
@@ -201,7 +202,7 @@ def test_a_job_that_gave_the_slot_up_still_counts_for_the_next_waiter(tmp_path):
         sample = state / "taking" / f"{old.pid}.json"
         sample.write_text(json.dumps({"now_gb": 2.0, "peak_gb": 9.0, "at": time.time()}))
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
-               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC,
+               "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "10 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC, "HEAVY_MIN_FREE_GB": HELD_FLOOR,
                "HEAVY_TURN_MIN": "60", "HEAVY_FAKE_STARTED": PROCESSES_STARTED}
         os.environ["HEAVY_DIR"] = str(state)   # the words for two jobs, read in this process, with this folder
         os.environ["HEAVY_FAKE_STARTED"] = PROCESSES_STARTED
@@ -261,6 +262,19 @@ def test_a_running_job_writes_its_sample_and_takes_it_away(tmp_path):
     r = subprocess.run([sys.executable, "-m", "claude_ops.heavy", "t-chat", "after", "--", "true"],
                        capture_output=True, text=True, timeout=30, env=env)
     assert r.returncode == 0 and not (state / "taking" / f"{dead.pid}.json").exists()
+
+
+#: ⭐ A TEST THAT WANTS A JOB THE GATE HOLDS SAYS SO, rather than leaning on what an undeclared job asks for.
+#: Until 2026-11-28 an undeclared job asked HEAVY_MIN_FREE_GB's default of 6 GB, and several tests below used
+#: that as their way to arrange a waiting job: pin the machine at 4.4 or 10 GB free, start a job that declares
+#: nothing, and it waits. The gate now works out what an undeclared job needs from its own record and its
+#: command, so a small job no longer waits and those arrangements stopped arranging anything. Setting the floor
+#: here is not a workaround for that change. It is each test saying the premise it always meant, and it keeps
+#: working because a HEAVY_MIN_FREE_GB somebody SET is obeyed where only the default is worked out.
+#: ⛔ And it is deliberately NOT set in every env below, because the tests of what an undeclared job asks for
+#: have to see the worked-out number: the suite would otherwise pin the old behaviour everywhere and prove the
+#: new one nowhere.
+HELD_FLOOR = "6"
 
 
 def _fresh(monkeypatch, tmp_path, **extra):
@@ -368,6 +382,87 @@ def test_last_peak_is_the_newest_run_of_that_name_that_exited_0(monkeypatch, tmp
     assert h.need_words() == h.NEED_HINT and h.need_words(0.07).endswith("peaked at 0.07 GB)")
 
 
+def test_an_undeclared_job_is_asked_what_its_record_and_its_command_say_not_a_fixed_amount(monkeypatch, tmp_path):
+    """A job that declares nothing used to ask HEAVY_MIN_FREE_GB's default of 6 GB, which is room for the
+    largest job anybody runs, so a small job waited behind that number. The gate keeps what every job took, so
+    it reads its own record first: the largest peak of the last NEED_RUNS runs of that name that exited 0, with
+    NEED_MARGIN on top. With no such run it reads the command, since a first render or a first build is not an
+    ordinary script. With neither it asks UNKNOWN_NEED_GB, which is small on purpose."""
+    h = _fresh(monkeypatch, tmp_path, HEAVY_MAX_GB="8")
+    runs = [{"what": "browse", "rc": 0, "peak_gb": 0.1, "end": 300.0},
+            {"what": "browse", "rc": 0, "peak_gb": 0.12, "end": 200.0},
+            {"what": "browse", "rc": 137, "peak_gb": 9.0, "end": 400.0},
+            {"what": "render", "rc": 0, "peak_gb": 5.0, "end": 100.0}]
+    assert h.measured_peaks("browse", runs) == [0.1, 0.12], "newest first, and the run that was killed is out"
+    assert h.measured_peaks("never ran", runs) == []
+    gb, why = h.estimated_need("browse", [], runs)
+    assert gb == 0.5 and "peaked at most 0.12 GB" in why and "30 per cent" in why, (gb, why)
+    assert h.estimated_need("render", [], runs)[0] == 6.5, "5 GB measured plus the margin"
+    assert h.gate_gb("browse", None, h.estimated_need("browse", [], runs)) == 0.5
+    # ⛔ the record BEFORE the command, because one real measurement outranks any guess about the software
+    heavy_cmd = ["/opt/x/bin/blender", "-b", "scene.blend"]
+    assert h.estimated_need("browse", heavy_cmd, runs)[0] == 0.5, "a measured job is not re-guessed from its command"
+    gb, why = h.estimated_need("first render", heavy_cmd, runs)
+    assert gb == 8 and "runs blender" in why and "heavy on memory" in why, (gb, why)
+    assert h.heavy_program(heavy_cmd) == ("blender", 8.0), "matched on the program name, not its path"
+    assert h.heavy_program(["python3", "run.py", "--blender-like"]) is None, "an argument is not a program"
+    assert h.heavy_program([]) is None and h.heavy_program(None) is None
+    gb, why = h.estimated_need("plain check", ["python3", "run.py"], runs)
+    assert gb == 2 and "no program in its command is a known heavy one" in why, (gb, why)
+    assert h.estimated_need("plain check", [], [])[0] == 2, "and with no record at all"
+    # ⛔ A FLOOR SOMEBODY SET IS OBEYED, so nothing that deliberately asks for room loses it to this change
+    monkeypatch.setenv("HEAVY_MIN_FREE_GB", "16")
+    gb, why = h.estimated_need("plain check", ["python3", "run.py"], runs)
+    assert gb == 16 and why == "", \
+        "⭐ and with no reason beside it, since the gate already says needs 16 and a reason would repeat it"
+    monkeypatch.delenv("HEAVY_MIN_FREE_GB")
+    assert h._hold_need(0.01) == h.NEED_FLOOR_GB and h._hold_need(99) == 8, "held between the floor and the cap"
+
+
+def test_an_estimate_a_run_went_over_is_said_once_and_kept_nowhere(monkeypatch, tmp_path):
+    """A declared need that a run goes over is kept in PEAKS for the next run. An ESTIMATE is not, because
+    this run's own peak reaches the record before the next run reads it, and a kept file would be a second
+    store of the same fact that could disagree with the first."""
+    h = _fresh(monkeypatch, tmp_path, HEAVY_MAX_GB="8")
+    said = []
+    monkeypatch.setattr(h, "say", said.append)
+    assert h.judge_need("c", "guessed", None, 3.0) is None and not said, "no estimate to judge against, nothing said"
+    line = h.judge_need("c", "guessed", None, 3.0, 2.0)
+    assert line and "more than a quarter over the 2 GB the gate worked out" in line and said[-1] == line, line
+    assert "this run is in the record, so its next run asks for more" in line
+    assert not h.PEAKS.exists(), "⭐ and nothing is kept: the record is the only store of what it took"
+    assert h.judge_need("c", "guessed", None, 2.4, 2.0) is None, "a quarter over is still within"
+
+
+def test_group_memorys_signature_is_left_alone_and_the_largest_program_has_a_reader_of_its_own(monkeypatch,
+                                                                                              tmp_path):
+    """⛔ A STUB IS A SECOND IMPLEMENTATION OF A SIGNATURE. The obvious way to say which step set a job's peak
+    was to have group_memory report the largest process from the walk it already does, for nothing. It broke 13
+    tests of this package with a TypeError, because they stand group_memory in as `lambda _pgid, _seen=None`,
+    and it would break every caller outside this package that does the same. So the signature keeps its two
+    parameters and the reader is its own function, asked only at a sample that sets a new peak."""
+    h = _fresh(monkeypatch, tmp_path)
+    assert list(inspect.signature(h.group_memory).parameters) == ["pgid", "seen"], \
+        "group_memory takes what it always took, so a two-parameter stub of it still matches"
+    monkeypatch.setattr(h, "group_memory", lambda _pgid, _seen=None: (1.0, 0.5))
+    assert h.group_memory(os.getpid()) == (1.0, 0.5), "and such a stub is callable as the job loop calls it"
+    assert h.largest_program(999999) == "", "and a group that is gone names nothing rather than raising"
+    if sys.platform == "darwin":        # the footprints come from proc_pid_rusage, which is macOS's
+        _prog = h.largest_program(os.getpgrp())
+        assert _prog and "/" not in _prog and _prog.lower().startswith(("python", "pytest")), \
+            f"the reader names a real program of this very process group, by name and not by path: {_prog!r}"
+
+
+def test_what_a_finished_job_took_names_the_program_that_was_largest_at_its_peak(monkeypatch, tmp_path):
+    """The peak says a job needs that much and not which part of it does. The done record carries peak_by, so a
+    reader ranks a job's steps without its output, and None when no program could be named."""
+    h = _fresh(monkeypatch, tmp_path)
+    rec = json.loads(h.remember("c", "build", 0, 4.0, 2.0, None, None, "clang++").read_text())
+    assert rec["peak_by"] == "clang++" and rec["peak_gb"] == 4.0 and rec["rc"] == 0
+    assert json.loads(h.remember("c", "build", 0, 4.0, 2.0, None).read_text())["peak_by"] is None, \
+        "and a job with no program behind its peak says None, never a guess"
+
+
 def test_a_peak_over_the_declared_need_is_said_and_the_next_run_of_that_name_waits_for_it(monkeypatch, tmp_path):
     """A declaration is not trusted blindly. A run that peaks more than a quarter over its need says so in one
     line, and the next run of that job name asks the larger of its need and that peak, never more than the
@@ -396,7 +491,7 @@ def test_a_job_that_declares_its_need_starts_where_an_undeclared_one_waits(tmp_p
     status."""
     state = tmp_path / "heavy"
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
-           "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "4.4 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC}
+           "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": "4.4 0 50", "HEAVY_POLL": "0.2", "PYTHONPATH": SRC, "HEAVY_MIN_FREE_GB": HELD_FLOOR}
 
     def heavy(*args, **extra):
         return subprocess.run([sys.executable, "-m", "claude_ops.heavy", *args], capture_output=True,
@@ -487,7 +582,7 @@ def test_heavy_queue(monkeypatch):
 
     def env(**extra):
         e = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
-             "HEAVY_DIR": str(STATE), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_POLL": "0.2", "PYTHONPATH": SRC}
+             "HEAVY_DIR": str(STATE), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_POLL": "0.2", "PYTHONPATH": SRC, "HEAVY_MIN_FREE_GB": HELD_FLOOR}
         e.update(extra)
         return e
 
@@ -1117,7 +1212,7 @@ def _kill(pid):
 def _heavy_env(state, **extra):
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
             "HEAVY_DIR": str(state), "HEAVY_FAKE_MACHINE": ROOMY, "HEAVY_CHECK": "0.2", "PYTHONPATH": SRC,
-            "HEAVY_FAKE_CAUSE": "4242 bigapp 3G 2.5", **extra}
+            "HEAVY_FAKE_CAUSE": "4242 bigapp 3G 2.5", "HEAVY_MIN_FREE_GB": HELD_FLOOR, **extra}
 
 
 def test_a_child_in_a_session_of_its_own_is_still_the_jobs(tmp_path):
