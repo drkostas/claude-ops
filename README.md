@@ -411,6 +411,7 @@ claude-ops pr-changes --repo owner/name --text "fix spawn_helpers"     # which o
 
 ```bash
 claude-ops detach --log /tmp/release.log -- ./release.sh v1.2   # prints the pid
+claude-ops detach -- ./release.sh v1.2                          # the log is a new file in the logs folder, named on stderr
 until grep -q '^detach end:' /tmp/release.log; do sleep 5; done   # wait for it to end
 kill -TERM -<pid>                                               # stop it and everything it started
 ```
