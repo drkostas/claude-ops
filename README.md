@@ -364,6 +364,22 @@ few third party actions that act on the repository through their own inputs (`ac
 `go_public.add_fork_guard` installs this workflow into a repository through a merged pull request,
 the way `go_public` installs the private-terms check.
 
+## Check a test's fake against the real function
+
+```python
+from claude_ops.stand_in import stand_in
+
+module.build = stand_in(module.build, fake_build)   # TypeError at once if fake_build cannot take a keyword build takes
+```
+
+A test that replaces a real function with a fake one learns nothing when the real function gains a
+keyword. Once the code under test passes it, the fake raises inside that code, and an error turned
+into an outcome makes the test fail far from the cause. `stand_in(real, fake)` compares the two
+signatures when the fake is set and names each argument the fake cannot take, and returns the fake
+itself. A parameter a caller may pass by name must have the same name in the fake (or the fake takes
+`**kwargs`), and a positional-only one needs a place. `missing(real, fake)` returns the same list
+without raising. It cannot see a function the code under test calls that the test never replaced.
+
 ## Tools for a repository many chats change
 
 ```bash
